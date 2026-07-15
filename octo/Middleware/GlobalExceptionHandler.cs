@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Diagnostics;
+using Octo.Services.Subsonic;
 
 namespace Octo.Middleware;
 
@@ -39,6 +40,10 @@ public class GlobalExceptionHandler : IExceptionHandler
     {
         return exception switch
         {
+            // Configuration errors (503) — surface the actionable message verbatim
+            // so a misconfigured upstream URL tells the user exactly what to fix.
+            OctoNotConfiguredException => (503, 0, exception.Message),
+
             // Not Found errors (404)
             FileNotFoundException => (404, 70, "Resource not found"),
             DirectoryNotFoundException => (404, 70, "Directory not found"),

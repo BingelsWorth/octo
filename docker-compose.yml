@@ -9,7 +9,10 @@ services:
       ASPNETCORE_ENVIRONMENT: Production
 
       # ----- Subsonic / Navidrome upstream -----
-      Subsonic__Url: ${SUBSONIC_URL:-http://localhost:4533}
+      # Required. Your Navidrome server, reachable from THIS container (a LAN IP
+      # or service name, not localhost). Left blank on purpose so a missing value
+      # is detected and reported clearly instead of silently failing.
+      Subsonic__Url: ${SUBSONIC_URL:-}
       Subsonic__StorageMode: ${STORAGE_MODE:-Stream}
       Subsonic__DownloadMode: ${DOWNLOAD_MODE:-Track}
       Subsonic__DownloadOnStar: ${DOWNLOAD_ON_STAR:-true}

@@ -29,10 +29,19 @@ public class SubsonicProxyService
         string endpoint, 
         Dictionary<string, string> parameters)
     {
-        var query = string.Join("&", parameters.Select(kv => 
+        if (string.IsNullOrWhiteSpace(_subsonicSettings.Url)
+            || !Uri.TryCreate(_subsonicSettings.Url, UriKind.Absolute, out _))
+        {
+            throw new OctoNotConfiguredException(
+                "Octo has no valid Navidrome URL. Set SUBSONIC_URL (Subsonic__Url) to your " +
+                "Navidrome server, e.g. http://192.168.1.10:4533 — an absolute URL reachable " +
+                "from the Octo container, not localhost.");
+        }
+
+        var query = string.Join("&", parameters.Select(kv =>
             $"{Uri.EscapeDataString(kv.Key)}={Uri.EscapeDataString(kv.Value)}"));
-        var url = $"{_subsonicSettings.Url}/{endpoint}?{query}";
-        
+        var url = $"{_subsonicSettings.Url.TrimEnd('/')}/{endpoint}?{query}";
+
         HttpResponseMessage response = await _httpClient.GetAsync(url);
         response.EnsureSuccessStatusCode();
         
@@ -147,4 +156,14 @@ public class SubsonicProxyService
             };
         }
     }
+}
+
+/// <summary>
+/// Thrown when Octo's upstream Navidrome URL is missing or not an absolute URL.
+/// The global handler surfaces its message to the client as an actionable
+/// Subsonic error instead of an opaque "Invalid request".
+/// </summary>
+public class OctoNotConfiguredException : Exception
+{
+    public OctoNotConfiguredException(string message) : base(message) { }
 }

@@ -42,12 +42,26 @@ Plug Octo in front of your Navidrome. Point your Subsonic apps (Feishin, Arpeggi
 
 ## Get started
 
-You need:
+Octo sits **in front of** your existing Navidrome. Your Subsonic app talks to Octo; Octo adds discovery and previews, then proxies everything else through to Navidrome:
+
+```
+   Subsonic app          Octo               Navidrome
+  (Feishin, Arpeggi) ──▶  :5274  ──────────▶  (your library)
+                           ├─▶ yt-dlp shim   (instant previews)
+                           └─▶ slskd         (downloads on star)
+```
+
+So setup is two steps: **tell Octo where Navidrome is**, and **point your app at Octo**.
+
+**Required**
 
 - A box with [Docker](https://docs.docker.com/engine/install/) installed.
-- An existing [Navidrome](https://www.navidrome.org/) server.
-- A free [Last.fm API key](https://www.last.fm/api/account/create).
-- A free [Soulseek account](https://www.slsknet.org/news/node/1).
+- An existing [Navidrome](https://www.navidrome.org/) server, reachable from the Octo host by LAN IP or service name (not `localhost`).
+
+**Optional** — Octo runs fine without these:
+
+- A free [Last.fm API key](https://www.last.fm/api/account/create) — enables radio / discovery.
+- A free [Soulseek account](https://www.slsknet.org/news/node/1) — enables lossless FLAC downloads when you star a song.
 
 Then:
 
@@ -57,12 +71,13 @@ cd octo
 ./install.sh
 ```
 
-The installer asks for those four things, brings the stack up, and prints the address.
+The installer asks for your Navidrome URL (and, optionally, Last.fm and Soulseek), brings the stack up, and prints the address.
 
 **When it's done:**
 
-- Point your Subsonic apps at `http://<your-host>:5274`.
+- Point your Subsonic apps at `http://<your-host>:5274` — **not** Navidrome's own address.
 - Open the admin dashboard at **`http://<your-host>:5274/admin`** to manage every setting from the browser — no editing config files by hand.
+- If a client reports the server is unreachable, that is Octo telling you setup is not finished: its ping response spells out exactly what to fix (usually the Navidrome URL).
 
 ## Compatible apps
 

@@ -73,11 +73,46 @@ public class SubsonicController : ControllerBase
         _coverArtService = coverArtService;
         _coverArtAggregator = coverArtAggregator;
         _logger = logger;
+        // No hard throw on a missing/blank Subsonic URL: that made every request
+        // fail opaquely. Misconfiguration is now reported per-request with an
+        // actionable message (see Ping and OctoNotConfiguredException), and the
+        // admin panel stays reachable so the user can fix it.
+    }
 
-        if (string.IsNullOrWhiteSpace(_subsonicSettings.Url))
+    // -------------------------------------------------------------------------
+    // ping — the first call every Subsonic client makes. We make it the moment a
+    // broken setup explains itself, instead of relaying blindly and returning an
+    // opaque error when the Navidrome URL is missing or unreachable.
+    // -------------------------------------------------------------------------
+    [HttpGet]
+    [HttpPost]
+    [Route("rest/ping")]
+    [Route("rest/ping.view")]
+    public async Task<IActionResult> Ping()
+    {
+        var parameters = await ExtractAllParameters();
+        var format = parameters.GetValueOrDefault("f", "xml");
+
+        if (string.IsNullOrWhiteSpace(_subsonicSettings.Url)
+            || !Uri.TryCreate(_subsonicSettings.Url, UriKind.Absolute, out _))
         {
-            throw new Exception("Error: Environment variable SUBSONIC_URL is not set.");
+            return _responseBuilder.CreateError(format, 0,
+                $"Octo isn't configured yet. Open {Request.Scheme}://{Request.Host}/admin/ and set " +
+                "your Navidrome URL (SUBSONIC_URL), then point this client at Octo instead of Navidrome.");
         }
+
+        // Relay to Navidrome so real credentials are validated there. A connection
+        // failure means Octo can't reach the configured URL; pass a successful
+        // (or auth-failed) Navidrome envelope straight through otherwise.
+        var relay = await _proxyService.RelaySafeAsync("rest/ping.view", parameters);
+        if (!relay.Success || relay.Body is null)
+        {
+            return _responseBuilder.CreateError(format, 0,
+                $"Octo can't reach Navidrome at {_subsonicSettings.Url}. Check the URL is correct and " +
+                "reachable from the Octo container (use a LAN IP or service name, not localhost).");
+        }
+
+        return File(relay.Body, relay.ContentType ?? $"application/{format}");
     }
 
     // ---------------------------------------------------------------------
