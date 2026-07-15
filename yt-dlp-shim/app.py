@@ -8,12 +8,16 @@ Why this is a separate container instead of in-process inside Octo:
   HTTP to this service, and any process-management quirks stay sandboxed.
 
 Endpoints:
-  GET /search?q=<query>
-      Runs `yt-dlp ytsearch1:<query>` and returns {video_id, title, duration}.
+  GET /search?q=<query>[&duration=<sec>]
+      One yt-dlp extraction returning {video_id, title, duration, channel}.
+      Without a duration hint it also resolves and caches the stream URL in
+      the SAME extraction, so a later /stream is a deterministic cache hit.
+      With a hint it picks the closest-length of several flat candidates
+      (cheap, no per-video extraction), then resolves the winner's URL.
 
   GET /stream?id=<videoId>
-      Resolves the best-audio URL via `yt-dlp -g`, then proxies bytes
-      from YouTube's CDN to the caller. Streaming chunks so this stays
+      Resolves the best-audio URL (cached), then proxies bytes from
+      YouTube's CDN to the caller. Streaming chunks so this stays
       flat-memory regardless of song length, and so cancellation is
       honored immediately (the upstream connection closes when the
       caller disconnects).
@@ -25,13 +29,25 @@ import logging
 import os
 import subprocess
 import threading
+import time
 from typing import Optional
 
 import requests
+from requests.adapters import HTTPAdapter
 from flask import Flask, Response, abort, jsonify, request, stream_with_context
 
 YTDLP = os.environ.get("YTDLP_PATH", "/usr/local/bin/yt-dlp")
 PORT = int(os.environ.get("PORT", "8080"))
+
+# Audio format selector shared by /search (single-extraction warm) and
+# /stream's _resolve_url (cold path), so both request the exact same format.
+# Format 140 is audio-only m4a (AAC); yt-dlp -g / --print returns one
+# contiguous googlevideo URL with a Content-Length for it. Format 18 (the old
+# muxed 360p mp4) is being phased out by YouTube and 502s on a growing share.
+_AUDIO_FORMAT = os.environ.get(
+    "YTDLP_AUDIO_FORMAT",
+    "140/bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio",
+)
 
 # In-memory LRU cache of search-query -> json result. Cuts repeat searches
 # from a 3-8s yt-dlp invocation to a dict lookup. Bounded so we never grow
@@ -49,6 +65,18 @@ _URL_CACHE: "OrderedDict[str, tuple[float, str]]" = OrderedDict()
 _URL_CACHE_MAX = int(os.environ.get("URL_CACHE_MAX", "512"))
 _URL_CACHE_TTL = int(os.environ.get("URL_CACHE_TTL", "3600"))  # 1 hour, well under signed-URL lifetime
 
+# Single-flight: collapse concurrent resolves of the same video id onto one
+# yt-dlp -g. Second callers wait on the per-id lock and reuse the cached URL.
+_INFLIGHT_LOCK = threading.Lock()
+_INFLIGHT: "dict[str, threading.Lock]" = {}
+
+# One pooled HTTPS session for all upstream googlevideo byte-proxying. Reuses
+# the TCP+TLS connection across an iOS client's `Range: bytes=0-1` probe and
+# the real range GET that follows, instead of a fresh handshake per request.
+_SESSION = requests.Session()
+_SESSION.mount("https://", HTTPAdapter(pool_connections=32, pool_maxsize=64))
+
+
 def _cache_get(key: str):
     with _SEARCH_CACHE_LOCK:
         v = _SEARCH_CACHE.get(key)
@@ -64,25 +92,27 @@ def _cache_put(key: str, value: dict):
             _SEARCH_CACHE.popitem(last=False)
 
 def _url_cache_get(video_id: str):
-    import time as _t
     with _URL_CACHE_LOCK:
         entry = _URL_CACHE.get(video_id)
         if not entry:
             return None
         ts, url = entry
-        if _t.time() - ts > _URL_CACHE_TTL:
+        if time.time() - ts > _URL_CACHE_TTL:
             del _URL_CACHE[video_id]
             return None
         _URL_CACHE.move_to_end(video_id)
         return url
 
 def _url_cache_put(video_id: str, url: str):
-    import time as _t
     with _URL_CACHE_LOCK:
-        _URL_CACHE[video_id] = (_t.time(), url)
+        _URL_CACHE[video_id] = (time.time(), url)
         _URL_CACHE.move_to_end(video_id)
         while len(_URL_CACHE) > _URL_CACHE_MAX:
             _URL_CACHE.popitem(last=False)
+
+def _url_cache_evict(video_id: str):
+    with _URL_CACHE_LOCK:
+        _URL_CACHE.pop(video_id, None)
 
 # Cap concurrent yt-dlp processes globally. Each one is fork+exec heavy;
 # letting them stack starves a small container.
@@ -98,13 +128,24 @@ log = logging.getLogger("ytdlp-shim")
 app = Flask(__name__)
 
 
-def _run(args: list[str], timeout: int = 20) -> Optional[str]:
-    """Run yt-dlp with a hard timeout. Returns stdout or None on any failure."""
+def _run(args: list[str], timeout: int = 20, label: str = "ytdlp") -> Optional[str]:
+    """Run yt-dlp with a hard timeout. Returns stdout or None on any failure.
+
+    Logs gate-wait and wall time so a real box can show whether interactive
+    resolves are queuing behind background prewarm (grep `gate_wait_ms`).
+    """
+    t_acquire = time.monotonic()
     if not _GATE.acquire(timeout=_GATE_WAIT_SEC):
         log.warning("yt-dlp gate full after %ds, dropping: %s", _GATE_WAIT_SEC, " ".join(args))
         return None
+    gate_ms = (time.monotonic() - t_acquire) * 1000.0
     try:
-        full = [YTDLP, "--no-warnings", "--no-cache-dir", "--no-playlist", *args]
+        # NOTE: --no-cache-dir intentionally removed. The cache stores the
+        # player base.js + solved nsig signatures; disabling it forced a
+        # re-download and re-solve on every fork. A persistent cache volume is
+        # mounted in compose.
+        full = [YTDLP, "--no-warnings", "--no-playlist", *args]
+        t_run = time.monotonic()
         try:
             cp = subprocess.run(
                 full,
@@ -114,10 +155,12 @@ def _run(args: list[str], timeout: int = 20) -> Optional[str]:
                 check=False,
             )
         except subprocess.TimeoutExpired:
-            log.warning("yt-dlp timed out: %s", " ".join(args))
+            log.warning("yt-dlp timed out (%s, gate_wait_ms=%.0f): %s", label, gate_ms, " ".join(args))
             return None
+        wall_ms = (time.monotonic() - t_run) * 1000.0
+        log.info("ytdlp label=%s gate_wait_ms=%.0f wall_ms=%.0f rc=%d", label, gate_ms, wall_ms, cp.returncode)
         if cp.returncode != 0:
-            log.warning("yt-dlp exit %d: %s", cp.returncode, cp.stderr.strip()[:300])
+            log.warning("yt-dlp exit %d (%s): %s", cp.returncode, label, cp.stderr.strip()[:300])
             return None
         return cp.stdout
     finally:
@@ -135,85 +178,147 @@ def search():
     if not q:
         abort(400, "missing q")
 
-    cache_key = q.lower()
+    hint_str = request.args.get("duration", "").strip()
+    duration_hint = int(hint_str) if hint_str.isdigit() else None
+
+    cache_key = f"{q.lower()}|{duration_hint or ''}"
     cached = _cache_get(cache_key)
     if cached is not None:
         return jsonify(**cached)
 
-    out = _run(
-        [
-            f"ytsearch1:{q}",
-            "--print",
-            "%(.{id,title,duration,channel})j",
-        ],
-        timeout=15,
-    )
-    if not out:
+    payload = _search_with_hint(q, duration_hint) if duration_hint is not None else _search_single(q)
+    if payload is None:
         return jsonify(error="search_failed"), 502
-
-    line = out.strip().split("\n", 1)[0].strip()
-    if not line:
+    if not payload.get("video_id"):
         return jsonify(error="no_hit"), 404
-    try:
-        data = json.loads(line)
-    except json.JSONDecodeError as e:
-        log.warning("search: bad json from yt-dlp: %s", e)
-        return jsonify(error="bad_yt_response"), 502
 
-    payload = {
+    _cache_put(cache_key, payload)
+    return jsonify(**payload)
+
+
+def _payload_from(data: dict) -> dict:
+    return {
         "video_id": data.get("id"),
         "title": data.get("title"),
         "duration": data.get("duration"),
         "channel": data.get("channel"),
     }
-    if payload["video_id"]:
-        _cache_put(cache_key, payload)
-        # Pre-resolve the stream URL in the background so /stream is instant
-        # when the user actually plays this track. Best-effort; failures are
-        # silent and just mean /stream pays the lookup cost on first hit.
-        threading.Thread(
-            target=_prefetch_stream_url,
-            args=(payload["video_id"],),
-            daemon=True,
-        ).start()
-    return jsonify(**payload)
 
 
-def _prefetch_stream_url(video_id: str) -> None:
-    if _url_cache_get(video_id) is not None:
-        return
-    url = _resolve_url(video_id)
-    if url:
-        _url_cache_put(video_id, url)
-        log.info("prefetched stream url for %s", video_id)
+def _search_single(q: str) -> Optional[dict]:
+    """No duration hint: fast path. One extraction yields metadata AND the
+    stream URL, which we warm into the URL cache so /stream is a cache hit."""
+    out = _run(
+        [
+            f"ytsearch1:{q}",
+            "-f", _AUDIO_FORMAT,
+            "--ignore-no-formats-error",
+            "--print", "%(.{id,title,duration,channel})j",
+            "--print", "%(urls)s",
+        ],
+        timeout=15,
+        label="search+resolve",
+    )
+    if out is None:
+        return None
+    lines = [ln.strip() for ln in out.strip().split("\n") if ln.strip()]
+    if not lines:
+        return {}
+    try:
+        data = json.loads(lines[0])
+    except json.JSONDecodeError as e:
+        log.warning("search: bad json from yt-dlp: %s", e)
+        return None
+    payload = _payload_from(data)
+    stream_url = lines[1] if len(lines) > 1 else None
+    if payload.get("video_id") and stream_url:
+        # Warm the URL cache from the SAME extraction. This used to be a second
+        # `yt-dlp -g` on a detached daemon thread; folding it in removes an
+        # entire yt-dlp invocation per track and makes the warm /stream path a
+        # deterministic cache hit instead of a gate-race.
+        _url_cache_put(payload["video_id"], stream_url)
+    return payload
+
+
+def _search_with_hint(q: str, duration_hint: int) -> Optional[dict]:
+    """Duration hint present: pick the closest-length of 5 flat candidates
+    (cheap, no per-video extraction), then resolve the winner's URL once."""
+    out = _run(
+        [
+            f"ytsearch5:{q}",
+            "--flat-playlist",
+            "--print", "%(.{id,title,duration,channel})j",
+        ],
+        timeout=20,
+        label="search5",
+    )
+    if out is None:
+        return None
+    candidates = []
+    for ln in out.strip().split("\n"):
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            candidates.append(json.loads(ln))
+        except json.JSONDecodeError:
+            pass
+    if not candidates:
+        return {}
+    # Closest duration wins; candidates without a duration sort last so a hint
+    # never drags us onto an entry we can't length-match.
+    candidates.sort(
+        key=lambda r: abs((r.get("duration") or 0) - duration_hint)
+        if r.get("duration") else float("inf")
+    )
+    payload = _payload_from(candidates[0])
+    if payload.get("video_id"):
+        # Warm the URL cache for the coming /stream (single-flight + cached).
+        _resolve_url(payload["video_id"])
+    return payload
 
 
 def _resolve_url(video_id: str) -> Optional[str]:
     cached = _url_cache_get(video_id)
     if cached:
         return cached
-    # Format 140 is audio-only m4a (AAC). Despite often being labeled "DASH" in
-    # yt-dlp's table, `yt-dlp -g` returns a single contiguous googlevideo.com
-    # URL with a Content-Length — proxying the body through requests.get works.
-    # Format 18 (the muxed 360p mp4 we used to use) is being phased out by
-    # YouTube and is missing on a growing share of videos; relying on it gave
-    # us many silent /stream 502s. Audio-only is what the Subsonic client
-    # actually wants anyway.
-    out = _run(
-        [
-            "-g",
-            "-f",
-            "140/bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio",
-            f"https://www.youtube.com/watch?v={video_id}",
-        ],
-        timeout=15,
-    )
-    if not out:
+
+    # Single-flight per video id: if a prefetch/other /stream is already
+    # resolving this id, wait for it and reuse its result instead of forking a
+    # second identical `yt-dlp -g`.
+    with _INFLIGHT_LOCK:
+        lock = _INFLIGHT.setdefault(video_id, threading.Lock())
+    with lock:
+        cached = _url_cache_get(video_id)
+        if cached:
+            return cached
+        try:
+            out = _run(
+                [
+                    "-g",
+                    "-f", _AUDIO_FORMAT,
+                    f"https://www.youtube.com/watch?v={video_id}",
+                ],
+                timeout=15,
+                label="resolve",
+            )
+            if not out:
+                return None
+            url = out.strip().split("\n", 1)[0].strip()
+            if url:
+                _url_cache_put(video_id, url)
+            return url or None
+        finally:
+            with _INFLIGHT_LOCK:
+                _INFLIGHT.pop(video_id, None)
+
+
+def _open_upstream(url: str, headers: dict, video_id: str):
+    try:
+        return _SESSION.get(url, stream=True, timeout=(8, 30), headers=headers)
+    except Exception as e:
+        log.warning("stream upstream failed for %s: %s", video_id, e)
         return None
-    url = out.strip().split("\n", 1)[0].strip()
-    if url:
-        _url_cache_put(video_id, url)
-    return url or None
 
 
 @app.get("/stream")
@@ -221,6 +326,7 @@ def stream():
     video_id = request.args.get("id", "").strip()
     if not video_id:
         abort(400, "missing id")
+    t_enter = time.monotonic()
 
     url = _resolve_url(video_id)
     if not url:
@@ -237,22 +343,36 @@ def stream():
     if incoming_range:
         upstream_headers["Range"] = incoming_range
 
-    try:
-        upstream = requests.get(url, stream=True, timeout=(8, 30), headers=upstream_headers)
-        # Accept both 200 (full body) and 206 (partial). Anything else is a real
-        # failure we need to surface.
-        if upstream.status_code not in (200, 206):
-            log.warning("stream upstream %d for %s", upstream.status_code, video_id)
-            return jsonify(error="upstream_failed", status=upstream.status_code), 502
-    except Exception as e:
-        log.warning("stream upstream failed for %s: %s", video_id, e)
+    upstream = _open_upstream(url, upstream_headers, video_id)
+    # A signed googlevideo URL can expire between resolve and play (long or
+    # paused song, or a stale cache entry). Expiry shows up as 403/410. Evict
+    # the bad entry, re-resolve once, and retry before surfacing a failure, so
+    # one stale URL does not fail every play of this id for the cache TTL.
+    if upstream is not None and upstream.status_code in (403, 410):
+        upstream.close()
+        log.info("stream %s: signed url expired (%d), re-resolving", video_id, upstream.status_code)
+        _url_cache_evict(video_id)
+        url = _resolve_url(video_id)
+        upstream = _open_upstream(url, upstream_headers, video_id) if url else None
+
+    if upstream is None or upstream.status_code not in (200, 206):
+        code = upstream.status_code if upstream is not None else "n/a"
+        if upstream is not None:
+            upstream.close()
+        log.warning("stream upstream %s for %s", code, video_id)
         return jsonify(error="upstream_failed"), 502
 
     @stream_with_context
     def generator():
+        first = True
         try:
             for chunk in upstream.iter_content(chunk_size=64 * 1024):
                 if chunk:
+                    if first:
+                        log.info("stream %s ttfb_ms=%.0f status=%d",
+                                 video_id, (time.monotonic() - t_enter) * 1000.0,
+                                 upstream.status_code)
+                        first = False
                     yield chunk
         finally:
             try:
