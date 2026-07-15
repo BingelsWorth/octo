@@ -97,7 +97,7 @@ public class SubsonicController : ControllerBase
             || !Uri.TryCreate(_subsonicSettings.Url, UriKind.Absolute, out _))
         {
             return _responseBuilder.CreateError(format, 0,
-                $"Octo isn't configured yet. Open {Request.Scheme}://{Request.Host}/admin/ and set " +
+                $"Octo isn't configured yet. Open {Request.Scheme}://{Request.Host}/admin and set " +
                 "your Navidrome URL (SUBSONIC_URL), then point this client at Octo instead of Navidrome.");
         }
 
