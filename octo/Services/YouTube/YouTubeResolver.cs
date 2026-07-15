@@ -29,10 +29,11 @@ public class YouTubeResolver
     /// <summary>
     /// Resolves "Artist - Title" to a single best YouTube hit via the shim.
     /// </summary>
-    public async Task<YouTubeHit?> SearchAsync(string query, CancellationToken ct = default)
+    public async Task<YouTubeHit?> SearchAsync(string query, int? durationHint = null, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(query)) return null;
-        var url = $"{_baseUrl}/search?q={Uri.EscapeDataString(query)}";
+        var url = $"{_baseUrl}/search?q={Uri.EscapeDataString(query)}"
+            + (durationHint is int dh && dh > 0 ? $"&duration={dh}" : "");
         try
         {
             var http = _httpClientFactory.CreateClient(SearchClientName);

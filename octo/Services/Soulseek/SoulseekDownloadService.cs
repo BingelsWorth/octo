@@ -66,7 +66,7 @@ public class SoulseekDownloadService : BaseDownloadService
         var videoId = routing.YouTubeId;
         if (string.IsNullOrEmpty(videoId) && routing.HasArtistTitle)
         {
-            var hit = await _youtube.SearchAsync($"{routing.Artist} {routing.Title}", cancellationToken);
+            var hit = await _youtube.SearchAsync($"{routing.Artist} {routing.Title}", routing.Duration, cancellationToken);
             videoId = hit?.VideoId;
             // Cache back on the routing so a second click on the same placeholder
             // skips the yt-dlp ytsearch1: round trip — that 3-8s saving is the

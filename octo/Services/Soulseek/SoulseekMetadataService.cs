@@ -132,7 +132,7 @@ public class SoulseekMetadataService : IMusicMetadataService
             {
                 var routing = t.routing!;
                 if (!string.IsNullOrEmpty(routing.YouTubeId)) return;
-                var hit = await _youtube.SearchAsync($"{routing.Artist} {routing.Title}", ct);
+                var hit = await _youtube.SearchAsync($"{routing.Artist} {routing.Title}", routing.Duration, ct);
                 if (hit is { VideoId: { Length: > 0 } })
                 {
                     routing.YouTubeId = hit.VideoId;
