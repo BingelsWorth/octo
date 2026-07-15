@@ -81,6 +81,21 @@ public enum FolderStructure
     Flat
 }
 
+/// <summary>
+/// Where a starred track's permanent copy comes from.
+/// </summary>
+public enum DownloadSource
+{
+    /// <summary>Lossless FLAC via Soulseek/slskd (default).</summary>
+    Soulseek,
+
+    /// <summary>Lossy MP3 via the yt-dlp shim.</summary>
+    YouTube,
+
+    /// <summary>Try Soulseek FLAC first; fall back to YouTube MP3 if it fails.</summary>
+    SoulseekThenYouTube
+}
+
 public class SubsonicSettings
 {
     public string? Url { get; set; }
@@ -144,6 +159,13 @@ public class SubsonicSettings
     /// Values: "Organized" (Artist/Album/Track.flac), "Flat" (Artist - Title.flac)
     /// </summary>
     public FolderStructure FolderStructure { get; set; } = FolderStructure.Flat;
+
+    /// <summary>
+    /// Source for permanent downloads (default: Soulseek).
+    /// Environment variable: DOWNLOAD_SOURCE
+    /// Values: "Soulseek" (FLAC), "YouTube" (MP3), "SoulseekThenYouTube" (FLAC with MP3 fallback)
+    /// </summary>
+    public DownloadSource DownloadSource { get; set; } = DownloadSource.Soulseek;
     
     /// <summary>
     /// Use local staging for cloud storage mounts (default: false)

@@ -45,6 +45,12 @@
             </svg>
             <span>Library</span>
           </button>
+          <button class="sidebar-nav-item" data-tab="downloads">
+            <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M8 2.5v7M5 7l3 3 3-3M3.5 13h9"/>
+            </svg>
+            <span>Downloads</span>
+          </button>
           <button class="sidebar-nav-item" data-tab="subsonic">
             <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
               <circle cx="8" cy="8" r="5.5"/><path d="M3 8a5 5 0 0 1 10 0"/>
@@ -209,13 +215,6 @@
               <option value="Cache">Cache — temporary, auto-cleanup</option>
             </select>
           </div>
-          <div class="field field-check">
-            <input type="checkbox" id="f-download-on-star" name="Subsonic.DownloadOnStar" />
-            <label for="f-download-on-star">
-              <span class="field-check-label">Download a song when starred</span>
-              <span class="field-help">Stream/Cache modes only. Permanent already downloads every play.</span>
-            </label>
-          </div>
           <div class="field">
             <label for="f-cache-hours">Cache duration (hours)</label>
             <input id="f-cache-hours" name="Subsonic.CacheDurationHours" type="number" min="1" />
@@ -226,6 +225,40 @@
             <label for="f-local-staging">
               <span class="field-check-label">Use local staging</span>
               <span class="field-help">Required when download path is a cloud/FUSE mount (rclone, pCloud).</span>
+            </label>
+          </div>
+        </form>
+      </section>
+
+      <!-- ─── DOWNLOADS ──────────────────────────────────────── -->
+      <section data-pane="downloads">
+        <header class="page-header">
+          <div>
+            <h1>Downloads</h1>
+            <p>Where a starred song's permanent copy comes from, and when Octo fetches it.</p>
+          </div>
+        </header>
+
+        <form data-section="downloads" class="settings-card">
+          <h3 class="settings-card-title">Source</h3>
+          <div class="field">
+            <label for="f-download-source">Download source</label>
+            <select id="f-download-source" name="Subsonic.DownloadSource">
+              <option value="Soulseek">Soulseek — lossless FLAC from peers</option>
+              <option value="YouTube">YouTube — lossy MP3 via yt-dlp</option>
+              <option value="SoulseekThenYouTube">Soulseek, then YouTube — FLAC first, MP3 fallback</option>
+            </select>
+            <div class="field-help">
+              Soulseek gives lossless FLAC but depends on a peer having the file.
+              YouTube always resolves but is lossy MP3. "Soulseek, then YouTube"
+              tries FLAC first and falls back to MP3 only when no peer delivers.
+            </div>
+          </div>
+          <div class="field field-check">
+            <input type="checkbox" id="f-download-on-star" name="Subsonic.DownloadOnStar" />
+            <label for="f-download-on-star">
+              <span class="field-check-label">Download a song when starred</span>
+              <span class="field-help">Stream/Cache modes only. Permanent already downloads every play.</span>
             </label>
           </div>
         </form>

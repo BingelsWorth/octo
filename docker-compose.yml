@@ -17,6 +17,7 @@ services:
       Subsonic__DownloadMode: ${DOWNLOAD_MODE:-Track}
       Subsonic__DownloadOnStar: ${DOWNLOAD_ON_STAR:-true}
       Subsonic__FolderStructure: ${FOLDER_STRUCTURE:-Flat}
+      Subsonic__DownloadSource: ${DOWNLOAD_SOURCE:-Soulseek}
       Subsonic__UseLocalStaging: ${USE_LOCAL_STAGING:-false}
       Subsonic__ExplicitFilter: ${EXPLICIT_FILTER:-All}
       Subsonic__CacheDurationHours: ${CACHE_DURATION_HOURS:-1}
@@ -63,6 +64,8 @@ services:
       SEARCH_CACHE_MAX: ${YTDLP_SEARCH_CACHE_MAX:-1024}
       URL_CACHE_MAX: ${YTDLP_URL_CACHE_MAX:-512}
       URL_CACHE_TTL: ${YTDLP_URL_CACHE_TTL:-3600}
+      # Root the /download endpoint may write under (matches the /music mount).
+      DOWNLOAD_ROOT: /music
     expose:
       - "8080"
     volumes:
@@ -70,6 +73,10 @@ services:
       # repeated on every fork, and survives container recreate. Named volume so
       # ownership is correct and `docker compose down` does not touch host paths.
       - ytdlp-cache:/root/.cache/yt-dlp
+      # Shared music root so YouTube-MP3 downloads (DownloadSource=YouTube) land
+      # where Navidrome scans; same host dir Octo and slskd mount, so dest paths
+      # line up across containers.
+      - ${DOWNLOAD_PATH:-./downloads}:/music
 
   # Soulseek client (slskd). Web UI on 5030, peer port 50300.
   # State (config, db, downloads-in-progress) persisted to ./slskd-state so the

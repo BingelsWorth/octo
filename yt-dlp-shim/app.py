@@ -39,6 +39,11 @@ from flask import Flask, Response, abort, jsonify, request, stream_with_context
 YTDLP = os.environ.get("YTDLP_PATH", "/usr/local/bin/yt-dlp")
 PORT = int(os.environ.get("PORT", "8080"))
 
+# Root the /download endpoint is allowed to write under (the shared music mount).
+# dest arrives over the wire, so downloads are confined here even though the shim
+# is internal-only.
+_DOWNLOAD_ROOT = os.path.realpath(os.environ.get("DOWNLOAD_ROOT", "/music"))
+
 # Audio format selector shared by /search (single-extraction warm) and
 # /stream's _resolve_url (cold path), so both request the exact same format.
 # Format 140 is audio-only m4a (AAC); yt-dlp -g / --print returns one
@@ -392,6 +397,81 @@ def stream():
         if v is not None:
             headers[h] = v
     return Response(generator(), headers=headers, status=upstream.status_code)
+
+
+@app.get("/download")
+def download():
+    """Download a YouTube video as a tagged MP3 to <dest>.mp3.
+
+    GET /download?id=<videoId>&dest=<path_no_ext>[&artist=<a>&title=<t>]
+    Returns {"path": "<dest>.mp3"} on success.
+    """
+    video_id = request.args.get("id", "").strip()
+    dest = request.args.get("dest", "").strip()
+    artist = request.args.get("artist", "").strip()
+    title = request.args.get("title", "").strip()
+    if not video_id or not dest:
+        abort(400, "missing id or dest")
+
+    # Confine writes to the shared music root.
+    full_dest = os.path.realpath(dest)
+    if not (full_dest == _DOWNLOAD_ROOT or full_dest.startswith(_DOWNLOAD_ROOT + os.sep)):
+        abort(400, "dest outside download root")
+    os.makedirs(os.path.dirname(full_dest) or ".", exist_ok=True)
+
+    out = _run(
+        [
+            "-x",
+            "-f", "141/140/bestaudio[ext=m4a]/bestaudio",
+            "--audio-format", "mp3",
+            "--audio-quality", "0",
+            "--embed-metadata",
+            "--embed-thumbnail",
+            "--convert-thumbnails", "jpg",
+            "-o", f"{full_dest}.%(ext)s",
+            f"https://www.youtube.com/watch?v={video_id}",
+        ],
+        timeout=300,
+        label="download",
+    )
+    path = f"{full_dest}.mp3"
+    if out is None or not os.path.exists(path):
+        for ext in (".jpg", ".webp", ".png", ".mp3"):
+            leftover = full_dest + ext
+            if os.path.exists(leftover):
+                try:
+                    os.remove(leftover)
+                except OSError:
+                    pass
+        return jsonify(error="download_failed", expected=path), 502
+
+    # Overwrite yt-dlp's video-derived title/artist with the clean values Octo
+    # passed, so Navidrome groups the track correctly. Codec-copy keeps the audio
+    # and the embedded cover; list args are quoting-safe for spaces. Best-effort:
+    # on failure we keep the original mp3.
+    if artist or title:
+        tagged = f"{full_dest}.tagged.mp3"
+        meta = []
+        if artist:
+            meta += ["-metadata", f"artist={artist}", "-metadata", f"album_artist={artist}"]
+        if title:
+            meta += ["-metadata", f"title={title}"]
+        try:
+            rc = subprocess.run(
+                ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                 "-i", path, "-map", "0", "-map_metadata", "0", "-codec", "copy",
+                 *meta, tagged],
+                timeout=60, check=False,
+            ).returncode
+            if rc == 0 and os.path.exists(tagged):
+                os.replace(tagged, path)
+            elif os.path.exists(tagged):
+                os.remove(tagged)
+        except Exception as e:
+            log.warning("retag failed for %s: %s", video_id, e)
+
+    log.info("downloaded %s -> %s", video_id, path)
+    return jsonify(path=path)
 
 
 if __name__ == "__main__":

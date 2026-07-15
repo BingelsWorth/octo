@@ -122,6 +122,60 @@ public class SoulseekDownloadService : BaseDownloadService
             throw new InvalidOperationException(
                 $"Cannot download '{song.Artist} - {song.Title}': missing artist/title in external id");
 
+        // DownloadOnStar decides WHETHER to download; DownloadSource decides FROM WHERE.
+        switch (SubsonicSettings.DownloadSource)
+        {
+            case DownloadSource.YouTube:
+                return await DownloadViaYouTubeAsync(routing, cancellationToken);
+            case DownloadSource.SoulseekThenYouTube:
+                try { return await DownloadViaSoulseekAsync(routing, cancellationToken); }
+                catch (Exception ex)
+                {
+                    Logger.LogWarning("Soulseek download failed ({Msg}); falling back to YouTube MP3", ex.Message);
+                    return await DownloadViaYouTubeAsync(routing, cancellationToken);
+                }
+            default:
+                return await DownloadViaSoulseekAsync(routing, cancellationToken);
+        }
+    }
+
+    // Lossy MP3 via the yt-dlp shim's /download. The shim writes <dest>.mp3 in
+    // the final layout with clean tags + cover, so there is no post-move.
+    private async Task<string> DownloadViaYouTubeAsync(SoulseekRouting routing, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrEmpty(DownloadPath))
+            throw new InvalidOperationException("DownloadPath is not configured");
+
+        var videoId = routing.YouTubeId;
+        if (string.IsNullOrEmpty(videoId))
+        {
+            var hit = await _youtube.SearchAsync($"{routing.Artist} {routing.Title}", routing.Duration, cancellationToken);
+            videoId = hit?.VideoId;
+            if (!string.IsNullOrEmpty(videoId)) routing.YouTubeId = videoId;
+        }
+        if (string.IsNullOrEmpty(videoId))
+            throw new FileNotFoundException($"No YouTube match for '{routing.Artist} - {routing.Title}'");
+
+        var ytArtist = SanitizeForFs(routing.Artist) ?? "Unknown Artist";
+        var ytTitle  = SanitizeForFs(routing.Title)  ?? "Unknown Title";
+        var destWithoutExt = SubsonicSettings.FolderStructure switch
+        {
+            Models.Settings.FolderStructure.Organized => Path.Combine(DownloadPath, ytArtist, ytTitle, $"{ytArtist} - {ytTitle}"),
+            _ => Path.Combine(DownloadPath, $"{ytArtist} - {ytTitle}"),
+        };
+
+        var path = await _youtube.DownloadAsync(videoId, destWithoutExt, routing.Artist, routing.Title, cancellationToken);
+        if (string.IsNullOrEmpty(path) || !IOFile.Exists(path))
+            throw new FileNotFoundException($"YouTube MP3 download failed for '{routing.Artist} - {routing.Title}'");
+
+        Logger.LogInformation("YouTube MP3 download complete: {Path}", path);
+        return path;
+    }
+
+    // Lossless FLAC via Soulseek/slskd: walk the top-N peers in quality order,
+    // first successful transfer wins.
+    private async Task<string> DownloadViaSoulseekAsync(SoulseekRouting routing, CancellationToken cancellationToken)
+    {
         // Clean the title before searching Soulseek. Last.fm's track.search
         // sometimes returns `title="Adele - Hello"` with the artist redundantly
         // prefixed, or YouTube-flavored titles like `"Long Season [LIVE][4K]"`.

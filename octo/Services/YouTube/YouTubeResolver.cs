@@ -119,6 +119,39 @@ public class YouTubeResolver
             return null;
         }
     }
+
+    /// <summary>
+    /// Downloads a YouTube video as MP3 to {destWithoutExt}.mp3 via the shim's
+    /// /download endpoint, passing clean artist/title so the file is tagged for
+    /// the library. Returns the saved path, or null on failure. Uses the
+    /// infinite-timeout stream client because a download can take a while.
+    /// </summary>
+    public async Task<string?> DownloadAsync(string videoId, string destWithoutExt,
+        string? artist = null, string? title = null, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(videoId) || string.IsNullOrWhiteSpace(destWithoutExt)) return null;
+        var url = $"{_baseUrl}/download?id={Uri.EscapeDataString(videoId)}&dest={Uri.EscapeDataString(destWithoutExt)}"
+            + (string.IsNullOrEmpty(artist) ? "" : $"&artist={Uri.EscapeDataString(artist)}")
+            + (string.IsNullOrEmpty(title) ? "" : $"&title={Uri.EscapeDataString(title)}");
+        try
+        {
+            var http = _httpClientFactory.CreateClient(StreamClientName);
+            using var resp = await http.GetAsync(url, ct);
+            if (!resp.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("shim /download HTTP {Code} for vid={Vid}", (int)resp.StatusCode, videoId);
+                return null;
+            }
+            var json = await resp.Content.ReadAsStringAsync(ct);
+            using var doc = JsonDocument.Parse(json);
+            return doc.RootElement.TryGetProperty("path", out var p) ? p.GetString() : null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("shim /download failed for {Vid}: {Msg}", videoId, ex.Message);
+            return null;
+        }
+    }
 }
 
 public class YouTubeHit
