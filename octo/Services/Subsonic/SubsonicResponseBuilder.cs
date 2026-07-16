@@ -44,6 +44,35 @@ public class SubsonicResponseBuilder
     }
 
     /// <summary>
+    /// Creates an ok response with a single element carrying string child fields,
+    /// in BOTH json and xml (unlike CreateResponse, which emits an empty element).
+    /// Used for albumInfo/artistInfo2 so the data survives regardless of format.
+    /// </summary>
+    public IActionResult CreateInfoResponse(string format, string elementName, Dictionary<string, string> fields)
+    {
+        if (format == "json")
+        {
+            return CreateJsonResponse(new Dictionary<string, object>
+            {
+                ["status"] = "ok",
+                ["version"] = SubsonicVersion,
+                [elementName] = fields.ToDictionary(kv => kv.Key, kv => (object)kv.Value),
+            });
+        }
+
+        var ns = XNamespace.Get(SubsonicNamespace);
+        var el = new XElement(ns + elementName);
+        foreach (var f in fields)
+            el.Add(new XElement(ns + f.Key, f.Value));
+        var doc = new XDocument(
+            new XElement(ns + "subsonic-response",
+                new XAttribute("status", "ok"),
+                new XAttribute("version", SubsonicVersion),
+                el));
+        return new ContentResult { Content = doc.ToString(), ContentType = "application/xml" };
+    }
+
+    /// <summary>
     /// Creates a Subsonic error response.
     /// </summary>
     public IActionResult CreateError(string format, int code, string message)

@@ -107,6 +107,23 @@ var app = builder.Build();
 
 app.UseExceptionHandler(_ => { });
 
+// Capture the raw request body for body-carrying methods so the proxy can
+// faithfully forward it after parameter extraction has consumed/closed the
+// stream (needed for relayed native endpoints like POST /auth/login).
+app.Use(async (ctx, next) =>
+{
+    var m = ctx.Request.Method;
+    if (HttpMethods.IsPost(m) || HttpMethods.IsPut(m) || HttpMethods.IsPatch(m))
+    {
+        ctx.Request.EnableBuffering();
+        using var ms = new MemoryStream();
+        await ctx.Request.Body.CopyToAsync(ms);
+        ctx.Items["Octo.RawBody"] = ms.ToArray();
+        ctx.Request.Body.Position = 0; // rewind so form/model reading still works
+    }
+    await next(ctx);
+});
+
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();

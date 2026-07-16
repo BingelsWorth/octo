@@ -1698,14 +1698,13 @@ public class SubsonicController : ControllerBase
         {
             var album = await _metadataService.GetAlbumAsync(provider!, externalId!);
             var url = album?.CoverArtUrl ?? "";
-            if (format == "json")
-                return _responseBuilder.CreateJsonResponse(new Dictionary<string, object>
-                {
-                    ["status"] = "ok",
-                    ["version"] = "1.16.1",
-                    ["albumInfo"] = new { notes = "", smallImageUrl = url, mediumImageUrl = url, largeImageUrl = url },
-                });
-            return _responseBuilder.CreateResponse(format, "albumInfo", new { });
+            return _responseBuilder.CreateInfoResponse(format, "albumInfo", new Dictionary<string, string>
+            {
+                ["notes"] = "",
+                ["smallImageUrl"] = url,
+                ["mediumImageUrl"] = url,
+                ["largeImageUrl"] = url,
+            });
         }
 
         var relay = await _proxyService.RelaySafeAsync("rest/getAlbumInfo2", parameters);
@@ -1730,14 +1729,13 @@ public class SubsonicController : ControllerBase
         {
             var artist = await _metadataService.GetArtistAsync(provider!, externalId!);
             var url = artist?.ImageUrl ?? "";
-            if (format == "json")
-                return _responseBuilder.CreateJsonResponse(new Dictionary<string, object>
-                {
-                    ["status"] = "ok",
-                    ["version"] = "1.16.1",
-                    ["artistInfo2"] = new { biography = "", smallImageUrl = url, mediumImageUrl = url, largeImageUrl = url },
-                });
-            return _responseBuilder.CreateResponse(format, "artistInfo2", new { });
+            return _responseBuilder.CreateInfoResponse(format, "artistInfo2", new Dictionary<string, string>
+            {
+                ["biography"] = "",
+                ["smallImageUrl"] = url,
+                ["mediumImageUrl"] = url,
+                ["largeImageUrl"] = url,
+            });
         }
 
         var relay = await _proxyService.RelaySafeAsync("rest/getArtistInfo2", parameters);
@@ -1757,17 +1755,53 @@ public class SubsonicController : ControllerBase
         var parameters = await ExtractAllParameters();
         var format = parameters.GetValueOrDefault("f", "xml");
 
+        // Safety net (client-agnostic): any endpoint we don't explicitly handle,
+        // called with one of our external ids, would relay to Navidrome and come
+        // back "data not found" — Navidrome has no such id. Degrade to a graceful
+        // ok so a client we haven't specifically tested never errors on external
+        // tracks. Endpoints that need real external data have their own handlers.
+        if (HasExternalId(parameters))
+        {
+            return _responseBuilder.CreateResponse(format, ElementFor(endpoint), new { });
+        }
+
         try
         {
-            var result = await _proxyService.RelayAsync(endpoint, parameters);
-            var contentType = result.ContentType ?? $"application/{format}";
-            return File(result.Body, contentType);
+            // Faithful relay: forward the caller's method + body + status so native
+            // Navidrome endpoints (e.g. the POST /auth/login some clients use) work,
+            // not just GET-shaped Subsonic calls.
+            var raw = await _proxyService.RelayRawAsync(endpoint, parameters);
+            Response.StatusCode = raw.Status;
+            Response.ContentType = raw.ContentType ?? $"application/{format}";
+            await Response.Body.WriteAsync(raw.Body);
+            return new EmptyResult();
         }
-        catch (HttpRequestException ex)
+        catch (Exception ex)
         {
-            // Return Subsonic-compatible error response
             return _responseBuilder.CreateError(format, 0, $"Error connecting to Subsonic server: {ex.Message}");
         }
+    }
+
+    /// <summary>True if any id-shaped parameter is one of Octo's external ids.</summary>
+    private bool HasExternalId(Dictionary<string, string> parameters)
+    {
+        foreach (var key in new[] { "id", "mediaId", "albumId", "artistId" })
+        {
+            if (parameters.TryGetValue(key, out var v) && !string.IsNullOrEmpty(v)
+                && _localLibraryService.ParseSongId(v).isExternal)
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>rest/getSomething -> "something"; best-effort element name for an
+    /// empty-ok response (JSON ignores it; XML just needs a well-formed element).</summary>
+    private static string ElementFor(string endpoint)
+    {
+        var name = (endpoint.Split('/').LastOrDefault() ?? "response").Replace(".view", "");
+        if (name.StartsWith("get", StringComparison.OrdinalIgnoreCase) && name.Length > 3)
+            name = char.ToLowerInvariant(name[3]) + name[4..];
+        return string.IsNullOrEmpty(name) ? "response" : name;
     }
 
     private static bool IsOctoOwnedPath(string endpoint)

@@ -52,6 +52,50 @@ public class SubsonicProxyService
     }
 
     /// <summary>
+    /// Faithful relay: forwards the caller's HTTP method + body + content-type and
+    /// returns the upstream status verbatim (no EnsureSuccessStatusCode). This is
+    /// what makes non-GET / body-carrying endpoints work through Octo — e.g.
+    /// Navidrome's native POST /auth/login that some clients use to sign in.
+    /// Requires request buffering (enabled in Program.cs) so the body is re-readable.
+    /// </summary>
+    public async Task<(int Status, byte[] Body, string? ContentType)> RelayRawAsync(
+        string endpoint,
+        Dictionary<string, string> parameters)
+    {
+        if (string.IsNullOrWhiteSpace(_subsonicSettings.Url)
+            || !Uri.TryCreate(_subsonicSettings.Url, UriKind.Absolute, out _))
+        {
+            throw new OctoNotConfiguredException(
+                "Octo has no valid Navidrome URL. Set SUBSONIC_URL (Subsonic__Url) to your " +
+                "Navidrome server, e.g. http://192.168.1.10:4533 — an absolute URL reachable " +
+                "from the Octo container, not localhost.");
+        }
+
+        var query = string.Join("&", parameters.Select(kv =>
+            $"{Uri.EscapeDataString(kv.Key)}={Uri.EscapeDataString(kv.Value)}"));
+        var url = $"{_subsonicSettings.Url.TrimEnd('/')}/{endpoint}?{query}";
+
+        var ctx = _httpContextAccessor.HttpContext;
+        var incoming = ctx?.Request;
+        var method = incoming?.Method ?? "GET";
+        using var req = new HttpRequestMessage(new HttpMethod(method), url);
+
+        // Forward the raw request body captured by the middleware (the live body
+        // stream is already closed by parameter extraction at this point).
+        if (ctx?.Items.TryGetValue("Octo.RawBody", out var rb) == true
+            && rb is byte[] bytes && bytes.Length > 0)
+        {
+            req.Content = new ByteArrayContent(bytes);
+            if (!string.IsNullOrEmpty(incoming?.ContentType))
+                req.Content.Headers.TryAddWithoutValidation("Content-Type", incoming.ContentType);
+        }
+
+        using var response = await _httpClient.SendAsync(req);
+        var body = await response.Content.ReadAsByteArrayAsync();
+        return ((int)response.StatusCode, body, response.Content.Headers.ContentType?.ToString());
+    }
+
+    /// <summary>
     /// Safely relays a request to the Subsonic server, returning null on failure.
     /// </summary>
     public async Task<(byte[]? Body, string? ContentType, bool Success)> RelaySafeAsync(
