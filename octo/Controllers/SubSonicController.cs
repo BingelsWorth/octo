@@ -1646,6 +1646,38 @@ public class SubsonicController : ControllerBase
         return _responseBuilder.CreateError(format, 0, "Jukebox is not supported");
     }
 
+    // OpenSubsonic getLyricsBySongId — Feishin fetches this every time a song
+    // plays. External tracks have no lyrics in Navidrome, so it returned code 70
+    // "data not found" per play; return an empty-but-ok lyrics list instead.
+    // (Real synced lyrics from an open source like lrclib are a future add.)
+    [HttpGet, HttpPost]
+    [Route("rest/getLyricsBySongId")]
+    [Route("rest/getLyricsBySongId.view")]
+    public async Task<IActionResult> GetLyricsBySongId()
+    {
+        var parameters = await ExtractAllParameters();
+        var id = parameters.GetValueOrDefault("id", "");
+        var format = parameters.GetValueOrDefault("f", "xml");
+        var (isExternal, _, _) = _localLibraryService.ParseSongId(id);
+
+        if (isExternal)
+        {
+            if (format == "json")
+                return _responseBuilder.CreateJsonResponse(new Dictionary<string, object>
+                {
+                    ["status"] = "ok",
+                    ["version"] = "1.16.1",
+                    ["lyricsList"] = new { structuredLyrics = Array.Empty<object>() },
+                });
+            return _responseBuilder.CreateResponse(format, "lyricsList", new { });
+        }
+
+        var relay = await _proxyService.RelaySafeAsync("rest/getLyricsBySongId", parameters);
+        if (relay.Success && relay.Body != null)
+            return File(relay.Body, relay.ContentType ?? $"application/{format}");
+        return _responseBuilder.CreateResponse(format, "lyricsList", new { });
+    }
+
     // Album/artist "info" panels. For external tracks these used to fall through
     // to Navidrome (which has no such id) and return "data not found" — the error
     // spam a client logs per row. Now they return a valid response with real
