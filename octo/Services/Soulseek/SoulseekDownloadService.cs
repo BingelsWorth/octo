@@ -3,6 +3,7 @@ using Octo.Models.Domain;
 using Octo.Models.Settings;
 using Octo.Services.Common;
 using Octo.Services.Local;
+using Octo.Services.Subsonic;
 using Octo.Services.YouTube;
 using IOFile = System.IO.File;
 
@@ -35,9 +36,11 @@ public class SoulseekDownloadService : BaseDownloadService
         YouTubeResolver youtube,
         ExternalIdRegistry idRegistry,
         IHttpClientFactory httpClientFactory,
+        NavidromeIdentityService navIdentity,
+        DownloadHistoryService history,
         IServiceProvider serviceProvider,
         ILogger<SoulseekDownloadService> logger)
-        : base(configuration, localLibraryService, metadataService, subsonicSettings.Value, serviceProvider, logger)
+        : base(configuration, localLibraryService, metadataService, subsonicSettings.Value, navIdentity, history, serviceProvider, logger)
     {
         _slskd = slskd;
         _settings = soulseekSettings.Value;
@@ -157,7 +160,10 @@ public class SoulseekDownloadService : BaseDownloadService
             throw new FileNotFoundException($"No YouTube match for '{routing.Artist} - {routing.Title}'");
 
         var ytArtist = SanitizeForFs(routing.Artist) ?? "Unknown Artist";
-        var ytTitle  = SanitizeForFs(routing.Title)  ?? "Unknown Title";
+        // Strip a redundant "Artist - " prefix from the title before naming the file,
+        // so a Last.fm title like "Massive Attack - Teardrop" doesn't produce
+        // "Massive Attack - Massive Attack - Teardrop.mp3".
+        var ytTitle  = SanitizeForFs(NormalizeTitle(routing.Title ?? "", routing.Artist ?? "")) ?? "Unknown Title";
         var destWithoutExt = SubsonicSettings.FolderStructure switch
         {
             Models.Settings.FolderStructure.Organized => Path.Combine(DownloadPath, ytArtist, ytTitle, $"{ytArtist} - {ytTitle}"),
@@ -273,7 +279,9 @@ public class SoulseekDownloadService : BaseDownloadService
             if (string.IsNullOrEmpty(DownloadPath) || !IOFile.Exists(currentPath)) return null;
 
             var artist = SanitizeForFs(routing.Artist) ?? "Unknown Artist";
-            var title  = SanitizeForFs(routing.Title)  ?? "Unknown Title";
+            // Same prefix cleanup as the YouTube path, so FLAC files don't double the
+            // artist ("Massive Attack - Massive Attack - Teardrop.flac").
+            var title  = SanitizeForFs(NormalizeTitle(routing.Title ?? "", routing.Artist ?? "")) ?? "Unknown Title";
             var ext    = Path.GetExtension(currentPath);
 
             string targetPath = SubsonicSettings.FolderStructure switch

@@ -18,12 +18,19 @@ public class DeezerMetadataService
         string? ArtistName, string? ArtistImageUrl);
     public record ArtistMeta(string? Name, string? ImageUrl);
 
+    /// <summary>Everything Deezer knows about a track, for writing rich file tags.</summary>
+    public record FullTrackMeta(
+        string? AlbumTitle, string? AlbumCoverUrl, int? Year, int? Duration, string? ArtistName,
+        int? TrackNumber, int? DiscNumber, string? Isrc, int? TotalTracks, string? Genre,
+        string? Label, string? ReleaseDate);
+
     private const string Base = "https://api.deezer.com";
     private const int MaxCache = 4096;
 
     private readonly IHttpClientFactory _httpFactory;
     private readonly ILogger<DeezerMetadataService> _logger;
     private readonly ConcurrentDictionary<string, TrackMeta?> _trackCache = new();
+    private readonly ConcurrentDictionary<string, FullTrackMeta?> _fullCache = new();
     private readonly ConcurrentDictionary<string, ArtistMeta?> _artistCache = new();
     private readonly ConcurrentDictionary<long, int?> _albumYearCache = new();
     // Single-flight the album-year fetch: many tracks in one search share an album
@@ -85,6 +92,68 @@ public class DeezerMetadataService
         }
 
         Cache(_trackCache, key, meta);
+        return meta;
+    }
+
+    /// <summary>
+    /// Full track metadata for tagging a downloaded file: one track search (album,
+    /// cover_xl, artist, duration, track_position, disk_number, isrc) plus one album
+    /// detail call (release year, genre, total tracks, label). Cached; best-effort.
+    /// </summary>
+    public async Task<FullTrackMeta?> EnrichTrackFullAsync(string? artist, string? title, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(artist) && string.IsNullOrWhiteSpace(title)) return null;
+        var key = $"full|{artist}|{title}".ToLowerInvariant();
+        if (_fullCache.TryGetValue(key, out var cached)) return cached;
+
+        FullTrackMeta? meta = null;
+        try
+        {
+            var q = Uri.EscapeDataString($"artist:\"{artist}\" track:\"{title}\"");
+            using var doc = await GetJsonAsync($"{Base}/search?q={q}&limit=1", ct);
+            if (FirstData(doc) is JsonElement t)
+            {
+                string? albTitle = null, cover = null, artName = null;
+                var isrc = Str(t, "isrc");
+                long albId = 0;
+                if (t.TryGetProperty("album", out var alb))
+                {
+                    albTitle = Str(alb, "title");
+                    cover = Str(alb, "cover_xl") ?? Str(alb, "cover_big") ?? Str(alb, "cover_medium");
+                    if (alb.TryGetProperty("id", out var aid) && aid.ValueKind == JsonValueKind.Number)
+                        albId = aid.GetInt64();
+                }
+                if (t.TryGetProperty("artist", out var art)) artName = Str(art, "name");
+
+                int? year = null, totalTracks = null;
+                string? genre = null, label = null, releaseDate = null;
+                if (albId > 0)
+                {
+                    using var adoc = await GetJsonAsync($"{Base}/album/{albId}", ct);
+                    if (adoc != null)
+                    {
+                        var root = adoc.RootElement;
+                        releaseDate = Str(root, "release_date");
+                        if (!string.IsNullOrEmpty(releaseDate) && releaseDate.Length >= 4 && int.TryParse(releaseDate[..4], out var yr))
+                            year = yr;
+                        totalTracks = Int(root, "nb_tracks");
+                        label = Str(root, "label");
+                        if (root.TryGetProperty("genres", out var g) && g.TryGetProperty("data", out var gd)
+                            && gd.ValueKind == JsonValueKind.Array && gd.GetArrayLength() > 0)
+                            genre = Str(gd[0], "name");
+                    }
+                }
+
+                meta = new FullTrackMeta(albTitle, cover, year, Int(t, "duration"), artName,
+                    Int(t, "track_position"), Int(t, "disk_number"), isrc, totalTracks, genre, label, releaseDate);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug("deezer full enrich '{A} - {T}' failed: {M}", artist, title, ex.Message);
+        }
+
+        Cache(_fullCache, key, meta);
         return meta;
     }
 
@@ -154,6 +223,9 @@ public class DeezerMetadataService
 
     private static string? Str(JsonElement e, string name)
         => e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+
+    private static int? Int(JsonElement e, string name)
+        => e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetInt32() : (int?)null;
 
     private static void Cache<TK, TV>(ConcurrentDictionary<TK, TV> cache, TK key, TV val) where TK : notnull
     {

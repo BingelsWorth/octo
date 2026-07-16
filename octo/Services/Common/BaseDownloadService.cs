@@ -23,8 +23,18 @@ public abstract class BaseDownloadService : IDownloadService
     protected readonly SubsonicSettings SubsonicSettings;
     protected readonly ILogger Logger;
     private readonly IServiceProvider _serviceProvider;
-    
-    protected readonly string DownloadPath;
+    private readonly NavidromeIdentityService _navIdentity;
+    private readonly DownloadHistoryService _history;
+
+    // The configured Library:DownloadPath. With auto-detect on this is only a
+    // fallback used until Navidrome's real music folder is detected.
+    private readonly string _configuredDownloadPath;
+
+    /// <summary>
+    /// Effective download destination. Resolves fresh each access so that once
+    /// Navidrome's music folder is detected, downloads follow it without a restart.
+    /// </summary>
+    protected string DownloadPath => _navIdentity.EffectiveDownloadPath(_configuredDownloadPath);
     protected readonly string CachePath;
     
     protected readonly Dictionary<string, DownloadInfo> ActiveDownloads = new();
@@ -56,6 +66,8 @@ public abstract class BaseDownloadService : IDownloadService
         ILocalLibraryService localLibraryService,
         IMusicMetadataService metadataService,
         SubsonicSettings subsonicSettings,
+        NavidromeIdentityService navIdentity,
+        DownloadHistoryService history,
         IServiceProvider serviceProvider,
         ILogger logger)
     {
@@ -63,12 +75,14 @@ public abstract class BaseDownloadService : IDownloadService
         LocalLibraryService = localLibraryService;
         MetadataService = metadataService;
         SubsonicSettings = subsonicSettings;
+        _navIdentity = navIdentity;
+        _history = history;
         _serviceProvider = serviceProvider;
         Logger = logger;
-        
-        DownloadPath = configuration["Library:DownloadPath"] ?? "./downloads";
+
+        _configuredDownloadPath = configuration["Library:DownloadPath"] ?? "./downloads";
         CachePath = PathHelper.GetCachePath();
-        
+
         if (!Directory.Exists(DownloadPath))
         {
             Directory.CreateDirectory(DownloadPath);
@@ -168,7 +182,60 @@ public abstract class BaseDownloadService : IDownloadService
     /// <param name="cancellationToken">Cancellation token</param>
     /// <returns>Local file path where the track was saved</returns>
     protected abstract Task<string> DownloadTrackAsync(string trackId, Song song, CancellationToken cancellationToken);
-    
+
+    /// <summary>Record a completed download in the fetched-songs log. Best-effort:
+    /// format + source are derived from the file extension (flac -> Soulseek/lossless,
+    /// otherwise -> YouTube/lossy), which matches Octo's two download sources.</summary>
+    private async Task RecordHistoryAsync(Song song, string localPath)
+    {
+        try
+        {
+            string? cover = song.CoverArtUrlLarge ?? song.CoverArtUrl;
+            string? album = string.IsNullOrEmpty(song.Album) ? null : song.Album;
+
+            // The star path rebuilds the song from its id, so it has no artwork or
+            // album. Pull the cover + album straight from Deezer for the log entry
+            // (cached, so this is cheap). Best-effort — never fails a download.
+            if (string.IsNullOrEmpty(cover) || album is null)
+            {
+                try
+                {
+                    var deezer = _serviceProvider.GetService<Octo.Services.Metadata.DeezerMetadataService>();
+                    if (deezer != null)
+                    {
+                        var meta = await deezer.EnrichTrackAsync(song.Artist, song.Title, includeYear: false);
+                        if (meta != null)
+                        {
+                            cover ??= meta.AlbumCoverUrl;
+                            album ??= meta.AlbumTitle;
+                        }
+                    }
+                }
+                catch { /* enrichment is best-effort */ }
+            }
+
+            var ext = System.IO.Path.GetExtension(localPath).TrimStart('.').ToUpperInvariant();
+            long size = 0;
+            try { size = new FileInfo(localPath).Length; } catch { /* best-effort */ }
+            _history.Record(new DownloadHistoryEntry
+            {
+                Artist = song.Artist,
+                Title = song.Title,
+                Album = album ?? string.Empty,
+                Path = localPath,
+                Format = string.IsNullOrEmpty(ext) ? "?" : ext,
+                Source = ext == "FLAC" ? "Soulseek" : "YouTube",
+                CoverArtUrl = cover,
+                SizeBytes = size,
+                DownloadedAt = DateTime.UtcNow.ToString("o"),
+            });
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Failed to record download history for {Path}", localPath);
+        }
+    }
+
     /// <summary>
     /// Extracts the external album ID from the internal album ID format.
     /// Example: "ext-deezer-album-123456" -> "123456"
@@ -292,7 +359,13 @@ public abstract class BaseDownloadService : IDownloadService
             downloadInfo.CompletedAt = DateTime.UtcNow;
             
             song.LocalPath = localPath;
-            
+
+            // Enrich from Deezer and write rich tags + real album art onto the file.
+            // Downloads otherwise arrive bare (YouTube: artist/title + a video
+            // thumbnail; Soulseek: whatever the peer tagged), so this is what makes
+            // every fetched song a properly-tagged library citizen.
+            await EnrichAndTagAsync(song, localPath, cancellationToken);
+
             // Check if this track belongs to a playlist and update M3U
             if (PlaylistSyncService != null)
             {
@@ -315,7 +388,8 @@ public abstract class BaseDownloadService : IDownloadService
             if (!isCache)
             {
                 await LocalLibraryService.RegisterDownloadedSongAsync(song, localPath);
-                
+                await RecordHistoryAsync(song, localPath);
+
                 // Trigger a Subsonic library rescan (with debounce)
                 _ = Task.Run(async () =>
                 {
@@ -430,6 +504,69 @@ public abstract class BaseDownloadService : IDownloadService
     /// <summary>
     /// Writes ID3/Vorbis metadata and cover art to the audio file
     /// </summary>
+    /// <summary>
+    /// Fills any missing metadata on <paramref name="song"/> from Deezer, then writes
+    /// full tags + real album art onto the downloaded file. Existing values win (a
+    /// well-tagged Soulseek FLAC is enriched, not overwritten); Deezer fills the gaps
+    /// and supplies the cover. Best-effort — a miss or write failure never breaks the
+    /// download, the file just keeps whatever tags it already had.
+    /// </summary>
+    protected async Task EnrichAndTagAsync(Song song, string filePath, CancellationToken cancellationToken)
+    {
+        // Last.fm/YouTube titles often carry a redundant "Artist - " prefix (e.g.
+        // "Radiohead - No Surprises") which both mislabels the file and breaks the
+        // Deezer lookup. Strip it for the written title; strip bracketed junk too for
+        // the lookup query so the match lands and we get real album art + tags.
+        song.Title = StripArtistPrefix(song.Artist, song.Title);
+        var queryTitle = StripBracketedJunk(song.Title);
+
+        try
+        {
+            var deezer = _serviceProvider.GetService<Octo.Services.Metadata.DeezerMetadataService>();
+            if (deezer != null)
+            {
+                var m = await deezer.EnrichTrackFullAsync(song.Artist, queryTitle, cancellationToken);
+                if (m != null)
+                {
+                    if (string.IsNullOrEmpty(song.Album) && !string.IsNullOrEmpty(m.AlbumTitle)) song.Album = m.AlbumTitle;
+                    if (string.IsNullOrEmpty(song.AlbumArtist) && !string.IsNullOrEmpty(m.ArtistName)) song.AlbumArtist = m.ArtistName;
+                    if (string.IsNullOrEmpty(song.CoverArtUrlLarge)) song.CoverArtUrlLarge = m.AlbumCoverUrl;
+                    if (!song.Year.HasValue) song.Year = m.Year;
+                    if (!song.Track.HasValue) song.Track = m.TrackNumber;
+                    if (!song.DiscNumber.HasValue) song.DiscNumber = m.DiscNumber;
+                    if (!song.TotalTracks.HasValue) song.TotalTracks = m.TotalTracks;
+                    if (!song.Duration.HasValue) song.Duration = m.Duration;
+                    if (string.IsNullOrEmpty(song.Genre)) song.Genre = m.Genre;
+                    if (string.IsNullOrEmpty(song.Isrc)) song.Isrc = m.Isrc;
+                    if (string.IsNullOrEmpty(song.Label)) song.Label = m.Label;
+                    if (string.IsNullOrEmpty(song.ReleaseDate)) song.ReleaseDate = m.ReleaseDate;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Deezer enrichment for tagging failed for '{Artist} - {Title}'", song.Artist, song.Title);
+        }
+
+        await WriteMetadataAsync(filePath, song, cancellationToken);
+    }
+
+    /// <summary>Drop a redundant leading "Artist - " from a track title.</summary>
+    private static string StripArtistPrefix(string? artist, string? title)
+    {
+        var t = (title ?? string.Empty).Trim();
+        var a = (artist ?? string.Empty).Trim();
+        if (a.Length > 0 && t.StartsWith(a + " - ", StringComparison.OrdinalIgnoreCase))
+            t = t[(a.Length + 3)..].Trim();
+        return t;
+    }
+
+    /// <summary>Strip [bracketed] / (parenthesized) annotations for a cleaner Deezer
+    /// query (e.g. "No Surprises (Official Video)" -> "No Surprises"). Only used for
+    /// the lookup, not the written title, so real "(feat. …)" tags are preserved.</summary>
+    private static string StripBracketedJunk(string title)
+        => System.Text.RegularExpressions.Regex.Replace(title ?? string.Empty, @"\s*[\[\(][^\]\)]*[\]\)]", "").Trim();
+
     protected async Task WriteMetadataAsync(string filePath, Song song, CancellationToken cancellationToken)
     {
         try
@@ -438,17 +575,26 @@ public abstract class BaseDownloadService : IDownloadService
             
             using var tagFile = TagLib.File.Create(filePath);
             
-            // Basic metadata
-            tagFile.Tag.Title = song.Title;
-            tagFile.Tag.Performers = new[] { song.Artist };
-            tagFile.Tag.Album = song.Album;
-            tagFile.Tag.AlbumArtists = new[] { !string.IsNullOrEmpty(song.AlbumArtist) ? song.AlbumArtist : song.Artist };
+            // Basic metadata. Title/artist we always have; only overwrite album +
+            // album-artist when we actually resolved them, so a well-tagged Soulseek
+            // FLAC keeps its own album if Deezer had no match.
+            if (!string.IsNullOrEmpty(song.Title)) tagFile.Tag.Title = song.Title;
+            if (!string.IsNullOrEmpty(song.Artist)) tagFile.Tag.Performers = new[] { song.Artist };
+            if (!string.IsNullOrEmpty(song.Album)) tagFile.Tag.Album = song.Album;
+            if (!string.IsNullOrEmpty(song.AlbumArtist))
+                tagFile.Tag.AlbumArtists = new[] { song.AlbumArtist };
+            else if (!string.IsNullOrEmpty(song.Artist))
+                tagFile.Tag.AlbumArtists = new[] { song.Artist };
             
-            if (song.Track.HasValue)
+            // Only write the track number when we actually have one, and only pair
+            // the total with it — avoids a bogus "0/11" when Deezer's search result
+            // carried the album total but not this track's position.
+            if (song.Track is > 0)
+            {
                 tagFile.Tag.Track = (uint)song.Track.Value;
-            
-            if (song.TotalTracks.HasValue)
-                tagFile.Tag.TrackCount = (uint)song.TotalTracks.Value;
+                if (song.TotalTracks.HasValue)
+                    tagFile.Tag.TrackCount = (uint)song.TotalTracks.Value;
+            }
             
             if (song.DiscNumber.HasValue)
                 tagFile.Tag.Disc = (uint)song.DiscNumber.Value;
