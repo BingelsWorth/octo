@@ -3,6 +3,7 @@ using System.Text.Json;
 using Octo.Models.Domain;
 using Octo.Models.Search;
 using Octo.Models.Subsonic;
+using Octo.Services.Metadata;
 using Octo.Services.YouTube;
 
 namespace Octo.Services.Soulseek;
@@ -24,15 +25,18 @@ public class SoulseekMetadataService : IMusicMetadataService
 
     private readonly YouTubeResolver _youtube;
     private readonly ExternalIdRegistry _idRegistry;
+    private readonly DeezerMetadataService _deezer;
     private readonly ILogger<SoulseekMetadataService> _logger;
 
     public SoulseekMetadataService(
         YouTubeResolver youtube,
         ExternalIdRegistry idRegistry,
+        DeezerMetadataService deezer,
         ILogger<SoulseekMetadataService> logger)
     {
         _youtube = youtube;
         _idRegistry = idRegistry;
+        _deezer = deezer;
         _logger = logger;
     }
 
@@ -178,11 +182,50 @@ public class SoulseekMetadataService : IMusicMetadataService
         });
     }
 
-    public Task<Album?> GetAlbumAsync(string externalProvider, string externalId)
-        => Task.FromResult<Album?>(null);
+    public async Task<Album?> GetAlbumAsync(string externalProvider, string externalId)
+    {
+        if (!string.Equals(externalProvider, ProviderName, StringComparison.OrdinalIgnoreCase)) return null;
+        var routing = _idRegistry.Lookup(externalId);
+        if (routing is null) return null;
 
-    public Task<Artist?> GetArtistAsync(string externalProvider, string externalId)
-        => Task.FromResult<Artist?>(null);
+        var placeholder = routing.Album ?? routing.Title ?? "";
+        // Enrich by the track title (the placeholder "album" is the song title) so
+        // Deezer returns the REAL album (e.g. "Creep" -> "Pablo Honey"). Degrades
+        // to the placeholder name if Deezer misses or is unreachable.
+        var meta = await _deezer.EnrichTrackAsync(routing.Artist, routing.Album ?? routing.Title);
+        var artistId = _idRegistry.Register(new SoulseekRouting { Kind = RoutingKind.Artist, Artist = routing.Artist });
+
+        return new Album
+        {
+            Id = externalId,
+            Title = meta?.AlbumTitle ?? placeholder,
+            Artist = routing.Artist ?? "",
+            ArtistId = artistId,
+            Year = meta?.Year,
+            CoverArtUrl = meta?.AlbumCoverUrl,
+            IsLocal = false,
+            ExternalProvider = ProviderName,
+            ExternalId = externalId,
+        };
+    }
+
+    public async Task<Artist?> GetArtistAsync(string externalProvider, string externalId)
+    {
+        if (!string.Equals(externalProvider, ProviderName, StringComparison.OrdinalIgnoreCase)) return null;
+        var routing = _idRegistry.Lookup(externalId);
+        if (routing is null) return null;
+
+        var meta = await _deezer.EnrichArtistAsync(routing.Artist);
+        return new Artist
+        {
+            Id = externalId,
+            Name = meta?.Name ?? routing.Artist ?? "",
+            ImageUrl = meta?.ImageUrl,
+            IsLocal = false,
+            ExternalProvider = ProviderName,
+            ExternalId = externalId,
+        };
+    }
 
     public Task<List<Album>> GetArtistAlbumsAsync(string externalProvider, string externalId)
         => Task.FromResult(new List<Album>());

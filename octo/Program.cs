@@ -70,6 +70,7 @@ builder.Services.AddHttpClient(YouTubeResolver.StreamClientName, c =>
 });
 builder.Services.AddSingleton<ExternalIdRegistry>();
 builder.Services.AddSingleton<RadioQueueStore>();
+builder.Services.AddSingleton<Octo.Services.Metadata.DeezerMetadataService>();
 builder.Services.AddSingleton<IMusicMetadataService, SoulseekMetadataService>();
 builder.Services.AddSingleton<IDownloadService, SoulseekDownloadService>();
 

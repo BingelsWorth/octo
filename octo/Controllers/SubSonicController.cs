@@ -1610,6 +1610,74 @@ public class SubsonicController : ControllerBase
     // .NET 9 + Static Web Assets configurations), we don't accidentally turn
     // /admin/admin.css into a Navidrome HTML response.
     [HttpGet, HttpPost]
+    // Album/artist "info" panels. For external tracks these used to fall through
+    // to Navidrome (which has no such id) and return "data not found" — the error
+    // spam a client logs per row. Now they return a valid response with real
+    // Deezer art for external ids, and only relay for genuine local ids.
+    [HttpGet, HttpPost]
+    [Route("rest/getAlbumInfo2")]
+    [Route("rest/getAlbumInfo2.view")]
+    [Route("rest/getAlbumInfo")]
+    [Route("rest/getAlbumInfo.view")]
+    public async Task<IActionResult> GetAlbumInfo2()
+    {
+        var parameters = await ExtractAllParameters();
+        var id = parameters.GetValueOrDefault("id", "");
+        var format = parameters.GetValueOrDefault("f", "xml");
+        var (isExternal, provider, externalId) = _localLibraryService.ParseSongId(id);
+
+        if (isExternal)
+        {
+            var album = await _metadataService.GetAlbumAsync(provider!, externalId!);
+            var url = album?.CoverArtUrl ?? "";
+            if (format == "json")
+                return _responseBuilder.CreateJsonResponse(new Dictionary<string, object>
+                {
+                    ["status"] = "ok",
+                    ["version"] = "1.16.1",
+                    ["albumInfo"] = new { notes = "", smallImageUrl = url, mediumImageUrl = url, largeImageUrl = url },
+                });
+            return _responseBuilder.CreateResponse(format, "albumInfo", new { });
+        }
+
+        var relay = await _proxyService.RelaySafeAsync("rest/getAlbumInfo2", parameters);
+        if (relay.Success && relay.Body != null)
+            return File(relay.Body, relay.ContentType ?? $"application/{format}");
+        return _responseBuilder.CreateResponse(format, "albumInfo", new { });
+    }
+
+    [HttpGet, HttpPost]
+    [Route("rest/getArtistInfo2")]
+    [Route("rest/getArtistInfo2.view")]
+    [Route("rest/getArtistInfo")]
+    [Route("rest/getArtistInfo.view")]
+    public async Task<IActionResult> GetArtistInfo2()
+    {
+        var parameters = await ExtractAllParameters();
+        var id = parameters.GetValueOrDefault("id", "");
+        var format = parameters.GetValueOrDefault("f", "xml");
+        var (isExternal, provider, externalId) = _localLibraryService.ParseSongId(id);
+
+        if (isExternal)
+        {
+            var artist = await _metadataService.GetArtistAsync(provider!, externalId!);
+            var url = artist?.ImageUrl ?? "";
+            if (format == "json")
+                return _responseBuilder.CreateJsonResponse(new Dictionary<string, object>
+                {
+                    ["status"] = "ok",
+                    ["version"] = "1.16.1",
+                    ["artistInfo2"] = new { biography = "", smallImageUrl = url, mediumImageUrl = url, largeImageUrl = url },
+                });
+            return _responseBuilder.CreateResponse(format, "artistInfo2", new { });
+        }
+
+        var relay = await _proxyService.RelaySafeAsync("rest/getArtistInfo2", parameters);
+        if (relay.Success && relay.Body != null)
+            return File(relay.Body, relay.ContentType ?? $"application/{format}");
+        return _responseBuilder.CreateResponse(format, "artistInfo2", new { });
+    }
+
     [Route("{**endpoint}")]
     public async Task<IActionResult> GenericEndpoint(string endpoint)
     {
