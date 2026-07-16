@@ -1778,6 +1778,8 @@ public class SubsonicController : ControllerBase
             // not just GET-shaped Subsonic calls.
             var raw = await _proxyService.RelayRawAsync(endpoint, parameters);
             Response.StatusCode = raw.Status;
+            foreach (var h in raw.ResponseHeaders)
+                Response.Headers[h.Key] = h.Value;
             Response.ContentType = raw.ContentType ?? $"application/{format}";
             await Response.Body.WriteAsync(raw.Body);
             return new EmptyResult();
@@ -1814,8 +1816,11 @@ public class SubsonicController : ControllerBase
     {
         if (string.IsNullOrEmpty(endpoint)) return false;
         var lower = endpoint.ToLowerInvariant();
+        // Only Octo's OWN paths. Navidrome's native API also lives under /api/*
+        // (api/album, api/song, ...), so we must NOT claim all of /api/ — only
+        // api/admin — or Navidrome-mode clients can't reach the native API.
         return lower.StartsWith("admin", StringComparison.Ordinal)
-            || lower.StartsWith("api/", StringComparison.Ordinal)
+            || lower.StartsWith("api/admin", StringComparison.Ordinal)
             || lower.StartsWith("assets/", StringComparison.Ordinal)
             || lower == "favicon.ico";
     }

@@ -58,7 +58,21 @@ public class SubsonicProxyService
     /// Navidrome's native POST /auth/login that some clients use to sign in.
     /// Requires request buffering (enabled in Program.cs) so the body is re-readable.
     /// </summary>
-    public async Task<(int Status, byte[] Body, string? ContentType)> RelayRawAsync(
+    // Headers forwarded to Navidrome so its native /api/* endpoints (used by
+    // Navidrome-mode clients like Feishin) authenticate and behave correctly.
+    private static readonly string[] ForwardRequestHeaders =
+    {
+        "Authorization", "X-Nd-Client-Unique-Id", "X-Nd-Authorization",
+        "Accept", "User-Agent", "If-None-Match", "If-Modified-Since", "Range",
+    };
+    // Response headers passed back to the client (notably the rotated ND token).
+    private static readonly string[] ForwardResponseHeaders =
+    {
+        "X-Nd-Authorization", "ETag", "Last-Modified", "Cache-Control",
+        "Content-Range", "Accept-Ranges", "Vary",
+    };
+
+    public async Task<RawRelayResult> RelayRawAsync(
         string endpoint,
         Dictionary<string, string> parameters)
     {
@@ -90,9 +104,27 @@ public class SubsonicProxyService
                 req.Content.Headers.TryAddWithoutValidation("Content-Type", incoming.ContentType);
         }
 
+        // Forward auth + conditional headers so native Navidrome endpoints work.
+        if (incoming != null)
+        {
+            foreach (var h in ForwardRequestHeaders)
+                if (incoming.Headers.TryGetValue(h, out var vals))
+                    req.Headers.TryAddWithoutValidation(h, vals.ToArray());
+        }
+
         using var response = await _httpClient.SendAsync(req);
         var body = await response.Content.ReadAsByteArrayAsync();
-        return ((int)response.StatusCode, body, response.Content.Headers.ContentType?.ToString());
+
+        var respHeaders = new List<KeyValuePair<string, string>>();
+        foreach (var h in ForwardResponseHeaders)
+        {
+            if (response.Headers.TryGetValues(h, out var v) ||
+                response.Content.Headers.TryGetValues(h, out v))
+                foreach (var val in v) respHeaders.Add(new(h, val));
+        }
+
+        return new RawRelayResult((int)response.StatusCode, body,
+            response.Content.Headers.ContentType?.ToString(), respHeaders);
     }
 
     /// <summary>
@@ -211,3 +243,7 @@ public class OctoNotConfiguredException : Exception
 {
     public OctoNotConfiguredException(string message) : base(message) { }
 }
+
+/// <summary>Result of a faithful (method/body/status/header-preserving) relay.</summary>
+public record RawRelayResult(
+    int Status, byte[] Body, string? ContentType, List<KeyValuePair<string, string>> ResponseHeaders);
