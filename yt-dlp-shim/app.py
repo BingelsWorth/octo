@@ -283,6 +283,68 @@ def _search_with_hint(q: str, duration_hint: int) -> Optional[dict]:
     return payload
 
 
+_META_CACHE_LOCK = threading.Lock()
+_META_CACHE: "OrderedDict[str, dict]" = OrderedDict()
+
+
+@app.get("/meta")
+def meta():
+    """Fast metadata-only lookup (flat search, NO url solve) for an accurate
+    duration on search rows. With a duration hint it picks the closest-length of
+    5 candidates (avoids long-form/compilation uploads); otherwise the top result.
+    Cached, so repeat searches are a dict lookup."""
+    q = request.args.get("q", "").strip()
+    if not q:
+        abort(400, "missing q")
+    hint_str = request.args.get("duration", "").strip()
+    duration_hint = int(hint_str) if hint_str.isdigit() else None
+
+    key = f"{q.lower()}|{duration_hint or ''}"
+    with _META_CACHE_LOCK:
+        c = _META_CACHE.get(key)
+        if c is not None:
+            _META_CACHE.move_to_end(key)
+            return jsonify(**c)
+
+    if duration_hint is not None:
+        out = _run([f"ytsearch5:{q}", "--flat-playlist", "--print", "%(.{id,title,duration})j"],
+                   timeout=20, label="meta5")
+        cands = []
+        for ln in (out or "").strip().split("\n"):
+            ln = ln.strip()
+            if ln:
+                try:
+                    cands.append(json.loads(ln))
+                except json.JSONDecodeError:
+                    pass
+        if not cands:
+            return jsonify(error="no_hit"), 404
+        cands.sort(key=lambda r: abs((r.get("duration") or 0) - duration_hint)
+                   if r.get("duration") else float("inf"))
+        data = cands[0]
+    else:
+        out = _run([f"ytsearch1:{q}", "--flat-playlist", "--print", "%(.{id,title,duration})j"],
+                   timeout=15, label="meta")
+        if out is None:
+            return jsonify(error="search_failed"), 502
+        line = next((ln.strip() for ln in out.strip().split("\n") if ln.strip()), "")
+        if not line:
+            return jsonify(error="no_hit"), 404
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            return jsonify(error="bad_yt_response"), 502
+
+    payload = {"video_id": data.get("id"), "title": data.get("title"), "duration": data.get("duration")}
+    if payload["video_id"]:
+        with _META_CACHE_LOCK:
+            _META_CACHE[key] = payload
+            _META_CACHE.move_to_end(key)
+            while len(_META_CACHE) > _SEARCH_CACHE_MAX:
+                _META_CACHE.popitem(last=False)
+    return jsonify(**payload)
+
+
 def _resolve_url(video_id: str) -> Optional[str]:
     cached = _url_cache_get(video_id)
     if cached:

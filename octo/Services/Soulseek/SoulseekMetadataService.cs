@@ -123,6 +123,43 @@ public class SoulseekMetadataService : IMusicMetadataService
         await Task.WhenAll(tasks);
     }
 
+    // Resolve the ACTUAL YouTube video for the top of the list at search time and
+    // use its duration. Deezer's duration is a different recording (e.g. "Fade"
+    // is 3:13 on Deezer but the YouTube upload that plays is 3:45), so the scrub
+    // bar overran and the client's advance logic broke. Storing the videoId also
+    // means playback reuses this exact video (durations match) and it is prewarmed.
+    private const int TopDurationResolveLimit = 8;
+
+    public async Task ResolveTopDurationsAsync(List<Song> songs, CancellationToken ct = default)
+    {
+        var sem = new SemaphoreSlim(6);
+        var tasks = songs.Where(s => !s.IsLocal).Take(TopDurationResolveLimit).Select(async song =>
+        {
+            await sem.WaitAsync(ct);
+            try
+            {
+                // Fast metadata-only lookup (flat search, no URL solve). Pass the
+                // Deezer duration as a hint so it picks the closest-length canonical
+                // video (not a long-form/compilation upload); playback reuses the
+                // stored videoId, so the shown length matches the audio.
+                var hit = await _youtube.MetaAsync($"{song.Artist} {song.Title}", song.Duration, ct);
+                if (hit is { VideoId.Length: > 0 } && hit.Duration is int d && d > 0)
+                {
+                    song.Duration = d;
+                    var routing = _idRegistry.Lookup(song.Id);
+                    if (routing != null)
+                    {
+                        routing.YouTubeId = hit.VideoId; // playback reuses this exact video
+                        routing.Duration = d;
+                    }
+                }
+            }
+            catch { /* best-effort; keeps the existing duration on a miss */ }
+            finally { sem.Release(); }
+        });
+        await Task.WhenAll(tasks);
+    }
+
     /// <summary>
     /// Fire-and-forget background prewarm: resolve the YouTube videoId (and via
     /// shim's automatic prefetch, the stream URL) for the first <paramref name="topN"/>

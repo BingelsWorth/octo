@@ -64,6 +64,39 @@ public class YouTubeResolver
     }
 
     /// <summary>
+    /// Fast metadata-only lookup via the shim's /meta (flat search, no URL
+    /// resolution). Returns the top video's id + duration for showing an accurate
+    /// length without paying the full /search extraction.
+    /// </summary>
+    public async Task<YouTubeHit?> MetaAsync(string query, int? durationHint = null, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(query)) return null;
+        var url = $"{_baseUrl}/meta?q={Uri.EscapeDataString(query)}"
+            + (durationHint is int dh && dh > 0 ? $"&duration={dh}" : "");
+        try
+        {
+            var http = _httpClientFactory.CreateClient(SearchClientName);
+            using var resp = await http.GetAsync(url, ct);
+            if (!resp.IsSuccessStatusCode) return null;
+            var json = await resp.Content.ReadAsStringAsync(ct);
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            var vid = root.TryGetProperty("video_id", out var v) ? v.GetString() : null;
+            if (string.IsNullOrEmpty(vid)) return null;
+            return new YouTubeHit
+            {
+                VideoId = vid,
+                Title = root.TryGetProperty("title", out var t) ? t.GetString() : null,
+                Duration = root.TryGetProperty("duration", out var d) && d.ValueKind == JsonValueKind.Number ? d.GetInt32() : null,
+            };
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
     /// Opens a streaming connection to the shim's /stream endpoint. The shim
     /// proxies bytes from YouTube's CDN to us; we hand the resulting stream
     /// off to ASP.NET which forwards it to the Subsonic client.

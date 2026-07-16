@@ -336,9 +336,11 @@ public class SubsonicController : ControllerBase
         // song via SoulseekMetadataService — no yt-dlp call until /rest/stream.
         var externalSongs = await BuildExternalSearchResultsAsync(cleanQuery, externalTarget);
 
-        // Fill real duration/album/year so the list stops showing every track at
-        // 3:00 (the placeholder). Bounded + cached; a provider miss keeps 180s.
+        // Album/art/year from Deezer (fast), then the ACCURATE duration for the top
+        // of the list from the real YouTube video (so the scrub bar matches the
+        // audio and the client advances correctly). Bounded + cached.
         await _metadataService.EnrichExternalSongsAsync(externalSongs);
+        await _metadataService.ResolveTopDurationsAsync(externalSongs);
 
         // Local pass-through. Albums/artists always get the full requested counts;
         // song-side gets the local target.
