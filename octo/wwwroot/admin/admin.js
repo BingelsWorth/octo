@@ -10,6 +10,9 @@ function activateTab(name) {
   navItems.forEach(b => b.classList.toggle('active', b.dataset.tab === name));
   panes.forEach(p => p.classList.toggle('active', p.dataset.pane === name));
   if (location.hash !== `#${name}`) location.hash = name;
+  // Segmented thumbs can only be measured once their pane is visible.
+  if (typeof syncSegments === 'function') syncSegments(false);
+  if (name === 'fetched' && typeof loadFetched === 'function') loadFetched();
 }
 
 navItems.forEach(btn => btn.addEventListener('click', () => activateTab(btn.dataset.tab)));
@@ -121,6 +124,10 @@ async function loadSettings() {
     slskdLink.href = `${here.protocol}//${here.hostname}:5030`;
     slskdLink.textContent = `${here.hostname}:5030`;
   }
+
+  updateDiscoveryBanner();
+  buildSegments();
+  syncSegments(false);
 
   // Initial dirty-check pass: all forms start clean.
   document.querySelectorAll('form[data-section]').forEach(form => {
@@ -381,6 +388,183 @@ document.getElementById('restart-btn').addEventListener('click', async () => {
   btn.disabled = false;
   if (label) label.textContent = 'Restart';
 });
+
+// ────────────────────────────────────────────────────────────────
+// Discovery-off banner: loud when no Last.fm key is set
+// ────────────────────────────────────────────────────────────────
+function updateDiscoveryBanner() {
+  const banner = document.getElementById('discovery-off-banner');
+  const keyInput = document.getElementById('f-lastfm-key');
+  if (!banner || !keyInput) return;
+  banner.hidden = !!keyInput.value.trim();
+}
+document.getElementById('f-lastfm-key')?.addEventListener('input', updateDiscoveryBanner);
+
+// ────────────────────────────────────────────────────────────────
+// Detect Subsonic/Navidrome server on the local network
+// ────────────────────────────────────────────────────────────────
+const detectBtn = document.getElementById('btn-detect-server');
+detectBtn?.addEventListener('click', async () => {
+  const urlInput = document.getElementById('f-subsonic-url');
+  const result = document.getElementById('detect-server-result');
+  detectBtn.disabled = true;
+  const original = detectBtn.textContent;
+  detectBtn.textContent = 'Scanning…';
+  if (result) { result.hidden = false; result.textContent = 'Scanning the local network…'; }
+  try {
+    const r = await fetch('/api/admin/discover-servers', { cache: 'no-store' });
+    const data = await r.json();
+    const servers = data.servers || [];
+    if (!servers.length) {
+      if (result) result.innerHTML =
+        'No server found on this network. If Octo runs in a Docker bridge network it cannot see your LAN — use host networking, or enter the URL manually.';
+    } else if (servers.length === 1) {
+      urlInput.value = servers[0].url;
+      urlInput.dispatchEvent(new Event('input', { bubbles: true }));
+      if (result) result.innerHTML =
+        `Found <strong>${servers[0].type || 'Subsonic'}</strong> ${servers[0].serverVersion || ''} at <code>${servers[0].url}</code> — filled in above. Save to apply.`;
+    } else {
+      const rows = servers.map(s =>
+        `<button type="button" class="btn btn-ghost detect-pick" data-url="${s.url}">${s.url} <span class="detect-tag">${s.type || 'subsonic'} ${s.serverVersion || ''}</span></button>`).join('');
+      if (result) result.innerHTML = `Found ${servers.length} servers — pick one:<div class="detect-list">${rows}</div>`;
+      result.querySelectorAll('.detect-pick').forEach(b =>
+        b.addEventListener('click', () => {
+          urlInput.value = b.dataset.url;
+          urlInput.dispatchEvent(new Event('input', { bubbles: true }));
+          if (typeof toast === 'function') toast('URL filled in — Save to apply.', 'ok');
+        }));
+    }
+  } catch (e) {
+    if (result) result.textContent = 'Scan failed: ' + (e?.message || 'unknown error');
+  } finally {
+    detectBtn.disabled = false;
+    detectBtn.textContent = original;
+  }
+});
+
+// ────────────────────────────────────────────────────────────────
+// Fetched songs — running download log
+// ────────────────────────────────────────────────────────────────
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+function relTime(iso) {
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return '';
+  const s = Math.max(0, (Date.now() - t) / 1000);
+  if (s < 60) return 'just now';
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  if (s < 604800) return `${Math.floor(s / 86400)}d ago`;
+  return new Date(t).toLocaleDateString();
+}
+function fmtSize(bytes) {
+  if (!bytes) return '';
+  const mb = bytes / 1048576;
+  return mb >= 1 ? `${mb.toFixed(1)} MB` : `${Math.round(bytes / 1024)} KB`;
+}
+async function loadFetched() {
+  const list = document.getElementById('fetched-list');
+  if (!list) return;
+  try {
+    const r = await fetch('/api/admin/downloads', { cache: 'no-store' });
+    const data = await r.json();
+    const items = data.downloads || [];
+    if (!items.length) {
+      list.innerHTML = '<div class="dl-empty">No downloads yet. Star a song in your music app and it will appear here.</div>';
+      return;
+    }
+    list.innerHTML = items.map(d => {
+      const fmt = (d.format || '?').toUpperCase();
+      const badgeClass = fmt === 'FLAC' ? 'flac' : 'mp3';
+      const art = d.coverArtUrl
+        ? `<img class="dl-art" src="${escapeHtml(d.coverArtUrl)}" alt="" loading="lazy" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'dl-art dl-art-ph'}))">`
+        : `<div class="dl-art dl-art-ph"></div>`;
+      const size = fmtSize(d.sizeBytes);
+      return `<div class="dl-item">
+        ${art}
+        <div class="dl-main">
+          <div class="dl-title">${escapeHtml(d.artist)} <span class="dl-dash">—</span> ${escapeHtml(d.title)}</div>
+          <div class="dl-path" title="${escapeHtml(d.path)}">${escapeHtml(d.path)}</div>
+        </div>
+        <div class="dl-side">
+          <div class="dl-tags"><span class="dl-badge ${badgeClass}">${escapeHtml(fmt)}</span><span class="dl-source">${escapeHtml(d.source)}</span></div>
+          <div class="dl-sub">${escapeHtml(relTime(d.downloadedAt))}${size ? ' · ' + size : ''}</div>
+        </div>
+      </div>`;
+    }).join('');
+  } catch (e) {
+    list.innerHTML = `<div class="dl-empty">Couldn't load the log: ${escapeHtml(e.message || 'error')}</div>`;
+  }
+}
+document.getElementById('fetched-refresh')?.addEventListener('click', loadFetched);
+
+// ────────────────────────────────────────────────────────────────
+// Segmented controls — buttons built from a hidden <select> they proxy to,
+// so the load/save logic keeps reading the select's name + value.
+// ────────────────────────────────────────────────────────────────
+function buildSegments() {
+  document.querySelectorAll('.seg[data-seg-for]').forEach(seg => {
+    if (seg.dataset.built) return;
+    const sel = document.getElementById(seg.dataset.segFor);
+    if (!sel) return;
+    Array.from(sel.options).forEach(opt => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = opt.textContent;
+      b.dataset.value = opt.value;
+      b.addEventListener('click', () => {
+        sel.value = opt.value;
+        sel.dispatchEvent(new Event('input', { bubbles: true }));
+        sel.dispatchEvent(new Event('change', { bubbles: true }));
+        syncSegment(seg, true);
+      });
+      seg.appendChild(b);
+    });
+    seg.dataset.built = '1';
+  });
+}
+function syncSegment(seg, animate) {
+  const sel = document.getElementById(seg.dataset.segFor);
+  if (!sel) return;
+  const thumb = seg.querySelector('.seg-thumb');
+  let active = null;
+  seg.querySelectorAll('button').forEach(b => {
+    const on = b.dataset.value === sel.value;
+    b.classList.toggle('active', on);
+    if (on) active = b;
+  });
+  if (active && thumb && active.offsetWidth) {
+    if (!animate) thumb.style.transition = 'none';
+    thumb.style.left = active.offsetLeft + 'px';
+    thumb.style.width = active.offsetWidth + 'px';
+    thumb.style.opacity = '1';
+    if (!animate) requestAnimationFrame(() => { thumb.style.transition = ''; });
+  }
+}
+function syncSegments(animate) {
+  document.querySelectorAll('.seg[data-seg-for]').forEach(s => syncSegment(s, animate));
+}
+buildSegments();
+window.addEventListener('resize', () => syncSegments(false));
+
+// ────────────────────────────────────────────────────────────────
+// "Point your apps at Octo" address + copy
+// ────────────────────────────────────────────────────────────────
+(function initOctoAddress() {
+  const el = document.getElementById('octo-address');
+  if (!el) return;
+  const here = new URL(location.href);
+  const addr = `${here.protocol}//${here.hostname}:${here.port || '5274'}`;
+  el.textContent = addr;
+  document.getElementById('copy-octo-address')?.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(addr);
+      if (typeof toast === 'function') toast('Address copied.', 'ok');
+    } catch { /* clipboard blocked; user can select manually */ }
+  });
+})();
 
 // ────────────────────────────────────────────────────────────────
 // Boot

@@ -29,10 +29,11 @@ public class YouTubeResolver
     /// <summary>
     /// Resolves "Artist - Title" to a single best YouTube hit via the shim.
     /// </summary>
-    public async Task<YouTubeHit?> SearchAsync(string query, CancellationToken ct = default)
+    public async Task<YouTubeHit?> SearchAsync(string query, int? durationHint = null, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(query)) return null;
-        var url = $"{_baseUrl}/search?q={Uri.EscapeDataString(query)}";
+        var url = $"{_baseUrl}/search?q={Uri.EscapeDataString(query)}"
+            + (durationHint is int dh && dh > 0 ? $"&duration={dh}" : "");
         try
         {
             var http = _httpClientFactory.CreateClient(SearchClientName);
@@ -58,6 +59,39 @@ public class YouTubeResolver
         catch (Exception ex)
         {
             _logger.LogWarning("shim /search failed for '{Q}': {Msg}", query, ex.Message);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Fast metadata-only lookup via the shim's /meta (flat search, no URL
+    /// resolution). Returns the top video's id + duration for showing an accurate
+    /// length without paying the full /search extraction.
+    /// </summary>
+    public async Task<YouTubeHit?> MetaAsync(string query, int? durationHint = null, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(query)) return null;
+        var url = $"{_baseUrl}/meta?q={Uri.EscapeDataString(query)}"
+            + (durationHint is int dh && dh > 0 ? $"&duration={dh}" : "");
+        try
+        {
+            var http = _httpClientFactory.CreateClient(SearchClientName);
+            using var resp = await http.GetAsync(url, ct);
+            if (!resp.IsSuccessStatusCode) return null;
+            var json = await resp.Content.ReadAsStringAsync(ct);
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            var vid = root.TryGetProperty("video_id", out var v) ? v.GetString() : null;
+            if (string.IsNullOrEmpty(vid)) return null;
+            return new YouTubeHit
+            {
+                VideoId = vid,
+                Title = root.TryGetProperty("title", out var t) ? t.GetString() : null,
+                Duration = root.TryGetProperty("duration", out var d) && d.ValueKind == JsonValueKind.Number ? d.GetInt32() : null,
+            };
+        }
+        catch
+        {
             return null;
         }
     }
@@ -115,6 +149,39 @@ public class YouTubeResolver
         {
             _logger.LogWarning("shim /stream failed for {Vid}: {Msg}", videoId, ex.Message);
             resp?.Dispose();
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Downloads a YouTube video as MP3 to {destWithoutExt}.mp3 via the shim's
+    /// /download endpoint, passing clean artist/title so the file is tagged for
+    /// the library. Returns the saved path, or null on failure. Uses the
+    /// infinite-timeout stream client because a download can take a while.
+    /// </summary>
+    public async Task<string?> DownloadAsync(string videoId, string destWithoutExt,
+        string? artist = null, string? title = null, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(videoId) || string.IsNullOrWhiteSpace(destWithoutExt)) return null;
+        var url = $"{_baseUrl}/download?id={Uri.EscapeDataString(videoId)}&dest={Uri.EscapeDataString(destWithoutExt)}"
+            + (string.IsNullOrEmpty(artist) ? "" : $"&artist={Uri.EscapeDataString(artist)}")
+            + (string.IsNullOrEmpty(title) ? "" : $"&title={Uri.EscapeDataString(title)}");
+        try
+        {
+            var http = _httpClientFactory.CreateClient(StreamClientName);
+            using var resp = await http.GetAsync(url, ct);
+            if (!resp.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("shim /download HTTP {Code} for vid={Vid}", (int)resp.StatusCode, videoId);
+                return null;
+            }
+            var json = await resp.Content.ReadAsStringAsync(ct);
+            using var doc = JsonDocument.Parse(json);
+            return doc.RootElement.TryGetProperty("path", out var p) ? p.GetString() : null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("shim /download failed for {Vid}: {Msg}", videoId, ex.Message);
             return null;
         }
     }

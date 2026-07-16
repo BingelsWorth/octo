@@ -50,7 +50,10 @@ public class LocalLibraryServiceTests : IDisposable
         var mockLogger = new Mock<ILogger<LocalLibraryService>>();
 
         var idRegistry = new Octo.Services.Soulseek.ExternalIdRegistry();
-        _service = new LocalLibraryService(configuration, _mockHttpClientFactory.Object, subsonicSettings, idRegistry, mockLogger.Object);
+        var navIdentity = new Octo.Services.Subsonic.NavidromeIdentityService(
+            subsonicSettings, _mockHttpClientFactory.Object,
+            new Mock<ILogger<Octo.Services.Subsonic.NavidromeIdentityService>>().Object);
+        _service = new LocalLibraryService(configuration, _mockHttpClientFactory.Object, subsonicSettings, idRegistry, navIdentity, mockLogger.Object);
     }
 
     public void Dispose()

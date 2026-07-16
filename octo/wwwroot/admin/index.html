@@ -35,6 +35,12 @@
             <span>Status</span>
             <span class="sidebar-nav-badge" data-status-badge></span>
           </button>
+          <button class="sidebar-nav-item" data-tab="fetched">
+            <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M2 4.5v7a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1v-7"/><path d="M8 2v6.5m0 0L5.5 6M8 8.5 10.5 6"/>
+            </svg>
+            <span>Fetched songs</span>
+          </button>
         </div>
 
         <div class="sidebar-nav-section">
@@ -44,6 +50,12 @@
               <path d="M2.5 3.5h11v9h-11z"/><path d="M5.5 6.5v3M8 6.5v3M10.5 6.5v3"/>
             </svg>
             <span>Library</span>
+          </button>
+          <button class="sidebar-nav-item" data-tab="downloads">
+            <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M8 2.5v7M5 7l3 3 3-3M3.5 13h9"/>
+            </svg>
+            <span>Downloads</span>
           </button>
           <button class="sidebar-nav-item" data-tab="subsonic">
             <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
@@ -125,6 +137,21 @@
           </button>
         </header>
 
+        <div class="callout callout-accent" id="point-at-octo">
+          <div class="callout-title">Point your music apps here, not at Navidrome</div>
+          <p>
+            Octo sits in front of Navidrome. In Feishin, Symfonium, Arpeggi, or any Subsonic app,
+            set the <strong>server address</strong> to Octo:
+          </p>
+          <div class="callout-address"><code id="octo-address">http://this-host:5274</code>
+            <button type="button" class="btn btn-ghost" id="copy-octo-address">Copy</button>
+          </div>
+          <p class="callout-fine">
+            Use your Subsonic username and password as usual. If an app points straight at Navidrome
+            it bypasses Octo, and discovery and download-on-star won't work.
+          </p>
+        </div>
+
         <div class="status-grid" id="status-grid">
           <article class="status-card" data-svc="octo">
             <div class="status-card-head">
@@ -174,6 +201,22 @@
         </div>
       </section>
 
+      <!-- ─── FETCHED SONGS ──────────────────────────────────── -->
+      <section data-pane="fetched">
+        <header class="page-header">
+          <div>
+            <h1>Fetched songs</h1>
+            <p>A running log of every song Octo has pulled into your library, newest first. Each one is tagged with real album metadata and cover art on the way in. See its source, format, save path, size, and when it landed.</p>
+          </div>
+          <button class="btn btn-ghost" id="fetched-refresh" aria-label="Refresh">
+            <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M13.5 2v3h-3"/>
+            </svg>
+          </button>
+        </header>
+        <div id="fetched-list" class="dl-list"><div class="dl-empty">Loading…</div></div>
+      </section>
+
       <!-- ─── LIBRARY ────────────────────────────────────────── -->
       <section data-pane="library">
         <header class="page-header">
@@ -183,52 +226,109 @@
           </div>
         </header>
 
-        <form data-section="library" class="settings-card">
-          <h3 class="settings-card-title">Storage</h3>
-          <div class="field">
-            <label for="f-download-path">Download path</label>
-            <input id="f-download-path" name="Library.DownloadPath" data-restart="true" placeholder="/music" />
-            <div class="field-help">Container path where downloaded files land. Must be a bind-mount that Navidrome scans.</div>
-          </div>
-        </form>
+        <div class="set-section">
+          <div class="set-head"><h3 class="set-title">Storage</h3></div>
+          <form data-section="library" class="set-card">
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Auto-detect download path from Navidrome</div>
+                <div class="set-info-d">Octo asks Navidrome where its music folder is and writes there, so downloads always land where Navidrome scans. Only adopts a path Octo can see; otherwise it uses the field below.</div>
+              </div>
+              <label class="switch"><input type="checkbox" id="f-autodetect-path" name="Subsonic.AutoDetectDownloadPath" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
+            <div class="set-row stack">
+              <div class="set-info">
+                <div class="set-info-t">Download path <span class="set-opt">override / fallback</span></div>
+                <div class="set-info-d">Container path where downloaded files land. With auto-detect on, this is only used until Navidrome's folder is detected. Turn auto-detect off to force this exact path.</div>
+              </div>
+              <input class="set-input" id="f-download-path" name="Library.DownloadPath" data-restart="true" placeholder="/music" />
+            </div>
+          </form>
+        </div>
 
-        <form data-section="subsonic-storage" class="settings-card">
-          <h3 class="settings-card-title">File layout</h3>
-          <div class="field">
-            <label for="f-folder-structure">Folder structure</label>
-            <select id="f-folder-structure" name="Subsonic.FolderStructure">
-              <option value="Flat">Flat — Artist - Title.flac (no folder)</option>
-              <option value="Organized">Organized — Artist/Title/file.flac</option>
-            </select>
+        <div class="set-section">
+          <div class="set-head"><h3 class="set-title">File layout</h3></div>
+          <form data-section="subsonic-storage" class="set-card">
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Folder structure</div>
+                <div class="set-info-d">Flat is <code>Artist - Title.flac</code>; Organized nests into <code>Artist/Title/</code>.</div>
+              </div>
+              <div class="set-ctrl">
+                <div class="seg" data-seg-for="f-folder-structure"><span class="seg-thumb"></span></div>
+                <select id="f-folder-structure" name="Subsonic.FolderStructure" class="seg-src" hidden>
+                  <option value="Flat">Flat</option>
+                  <option value="Organized">Organized</option>
+                </select>
+              </div>
+            </div>
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Storage mode</div>
+                <div class="set-info-d">Stream previews and download on star, keep every played track, or cache temporarily.</div>
+              </div>
+              <div class="set-ctrl">
+                <div class="seg" data-seg-for="f-storage-mode"><span class="seg-thumb"></span></div>
+                <select id="f-storage-mode" name="Subsonic.StorageMode" class="seg-src" hidden>
+                  <option value="Stream">Stream</option>
+                  <option value="Permanent">Permanent</option>
+                  <option value="Cache">Cache</option>
+                </select>
+              </div>
+            </div>
+            <div class="set-row stack">
+              <div class="set-info">
+                <div class="set-info-t">Cache duration (hours)</div>
+                <div class="set-info-d">How long Cache-mode files live before auto-cleanup.</div>
+              </div>
+              <input class="set-input" id="f-cache-hours" name="Subsonic.CacheDurationHours" type="number" min="1" />
+            </div>
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Use local staging</div>
+                <div class="set-info-d">Required when the download path is a cloud/FUSE mount (rclone, pCloud).</div>
+              </div>
+              <label class="switch"><input type="checkbox" id="f-local-staging" name="Subsonic.UseLocalStaging" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
+          </form>
+        </div>
+      </section>
+
+      <!-- ─── DOWNLOADS ──────────────────────────────────────── -->
+      <section data-pane="downloads">
+        <header class="page-header">
+          <div>
+            <h1>Downloads</h1>
+            <p>Where a starred song's permanent copy comes from, and when Octo fetches it.</p>
           </div>
-          <div class="field">
-            <label for="f-storage-mode">Storage mode</label>
-            <select id="f-storage-mode" name="Subsonic.StorageMode">
-              <option value="Stream">Stream — preview only, download on star</option>
-              <option value="Permanent">Permanent — download every played track</option>
-              <option value="Cache">Cache — temporary, auto-cleanup</option>
-            </select>
-          </div>
-          <div class="field field-check">
-            <input type="checkbox" id="f-download-on-star" name="Subsonic.DownloadOnStar" />
-            <label for="f-download-on-star">
-              <span class="field-check-label">Download a song when starred</span>
-              <span class="field-help">Stream/Cache modes only. Permanent already downloads every play.</span>
-            </label>
-          </div>
-          <div class="field">
-            <label for="f-cache-hours">Cache duration (hours)</label>
-            <input id="f-cache-hours" name="Subsonic.CacheDurationHours" type="number" min="1" />
-            <div class="field-help">How long Cache-mode files live before auto-cleanup.</div>
-          </div>
-          <div class="field field-check">
-            <input type="checkbox" id="f-local-staging" name="Subsonic.UseLocalStaging" />
-            <label for="f-local-staging">
-              <span class="field-check-label">Use local staging</span>
-              <span class="field-help">Required when download path is a cloud/FUSE mount (rclone, pCloud).</span>
-            </label>
-          </div>
-        </form>
+        </header>
+
+        <div class="set-section">
+          <div class="set-head"><h3 class="set-title">Source</h3></div>
+          <form data-section="downloads" class="set-card">
+            <div class="set-row stack">
+              <div class="set-info">
+                <div class="set-info-t">Download source</div>
+                <div class="set-info-d">Soulseek gives lossless FLAC but depends on a peer having the file. YouTube always resolves but is lossy MP3. "Soulseek, then YouTube" tries FLAC first and falls back to MP3 only when no peer delivers.</div>
+              </div>
+              <div class="set-ctrl">
+                <div class="seg" data-seg-for="f-download-source"><span class="seg-thumb"></span></div>
+                <select id="f-download-source" name="Subsonic.DownloadSource" class="seg-src" hidden>
+                  <option value="Soulseek">Soulseek</option>
+                  <option value="YouTube">YouTube</option>
+                  <option value="SoulseekThenYouTube">Soulseek → YouTube</option>
+                </select>
+              </div>
+            </div>
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Download a song when starred</div>
+                <div class="set-info-d">Stream/Cache modes only. Permanent already downloads every play.</div>
+              </div>
+              <label class="switch"><input type="checkbox" id="f-download-on-star" name="Subsonic.DownloadOnStar" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
+          </form>
+        </div>
       </section>
 
       <!-- ─── SUBSONIC ───────────────────────────────────────── -->
@@ -240,44 +340,79 @@
           </div>
         </header>
 
-        <form data-section="subsonic" class="settings-card">
-          <h3 class="settings-card-title">Connection</h3>
-          <div class="field">
-            <label for="f-subsonic-url">Navidrome URL</label>
-            <input id="f-subsonic-url" name="Subsonic.Url" data-restart="true" placeholder="http://192.168.1.10:4533" />
-            <div class="field-help">Use the LAN IP if Octo and Navidrome are on the same docker network.</div>
-          </div>
-        </form>
+        <div class="set-section">
+          <div class="set-head"><h3 class="set-title">Connection</h3></div>
+          <form data-section="subsonic" class="set-card">
+            <div class="set-row stack">
+              <div class="set-info">
+                <div class="set-info-t">Navidrome URL</div>
+                <div class="set-info-d">Leave blank to let Octo find it on the network at first run. "Detect on network" scans your LAN now. Use a LAN IP, not localhost, from inside a container.</div>
+              </div>
+              <div class="set-inline">
+                <input class="set-input" id="f-subsonic-url" name="Subsonic.Url" data-restart="true" placeholder="http://192.168.1.10:4533" />
+                <button type="button" id="btn-detect-server" class="btn btn-ghost">Detect on network</button>
+              </div>
+              <div id="detect-server-result" class="detect-result" hidden></div>
+            </div>
+            <div class="set-row stack">
+              <div class="set-info">
+                <div class="set-info-t">Admin credentials <span class="set-opt">optional</span></div>
+                <div class="set-info-d">Lets Octo detect the music folder and run authenticated rescans on its own. Leave blank to have Octo learn an admin token from a client sign-in instead.</div>
+              </div>
+              <div class="set-grid2">
+                <input class="set-input" id="f-admin-user" name="Subsonic.AdminUsername" placeholder="admin username" autocomplete="off" />
+                <input class="set-input" id="f-admin-pass" name="Subsonic.AdminPassword" type="password" placeholder="••••••••" autocomplete="off" />
+              </div>
+            </div>
+          </form>
+        </div>
 
-        <form data-section="subsonic-behavior" class="settings-card">
-          <h3 class="settings-card-title">Behavior</h3>
-          <div class="field">
-            <label for="f-download-mode">Download mode</label>
-            <select id="f-download-mode" name="Subsonic.DownloadMode">
-              <option value="Track">Track — only the played song</option>
-              <option value="Album">Album — fetch the whole album in background</option>
-            </select>
-          </div>
-          <div class="field">
-            <label for="f-explicit">Explicit content</label>
-            <select id="f-explicit" name="Subsonic.ExplicitFilter">
-              <option value="All">All</option>
-              <option value="ExplicitOnly">Explicit only</option>
-              <option value="CleanOnly">Clean only</option>
-            </select>
-          </div>
-          <div class="field field-check">
-            <input type="checkbox" id="f-playlists" name="Subsonic.EnableExternalPlaylists" />
-            <label for="f-playlists">
-              <span class="field-check-label">External playlist search</span>
-              <span class="field-help">Discover and download playlists from streaming providers.</span>
-            </label>
-          </div>
-          <div class="field">
-            <label for="f-playlists-dir">Playlists directory</label>
-            <input id="f-playlists-dir" name="Subsonic.PlaylistsDirectory" placeholder="playlists" />
-          </div>
-        </form>
+        <div class="set-section">
+          <div class="set-head"><h3 class="set-title">Behavior</h3></div>
+          <form data-section="subsonic-behavior" class="set-card">
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Download mode</div>
+                <div class="set-info-d">Fetch only the played song, or pull the whole album in the background.</div>
+              </div>
+              <div class="set-ctrl">
+                <div class="seg" data-seg-for="f-download-mode"><span class="seg-thumb"></span></div>
+                <select id="f-download-mode" name="Subsonic.DownloadMode" class="seg-src" hidden>
+                  <option value="Track">Track</option>
+                  <option value="Album">Album</option>
+                </select>
+              </div>
+            </div>
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Explicit content</div>
+                <div class="set-info-d">Filter external results by explicit-content tag (Deezer metadata).</div>
+              </div>
+              <div class="set-ctrl">
+                <div class="seg" data-seg-for="f-explicit"><span class="seg-thumb"></span></div>
+                <select id="f-explicit" name="Subsonic.ExplicitFilter" class="seg-src" hidden>
+                  <option value="All">All</option>
+                  <option value="ExplicitOnly">Explicit</option>
+                  <option value="CleanOnly">Clean</option>
+                </select>
+              </div>
+            </div>
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">External playlist search</div>
+                <div class="set-info-d">Discover and download playlists from streaming providers.</div>
+              </div>
+              <label class="switch"><input type="checkbox" id="f-playlists" name="Subsonic.EnableExternalPlaylists" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
+            <div class="set-row stack">
+              <div class="set-info">
+                <div class="set-info-t">Playlists directory</div>
+                <div class="set-info-d">Where downloaded playlists are written, relative to the library root.</div>
+              </div>
+              <input class="set-input" id="f-playlists-dir" name="Subsonic.PlaylistsDirectory" placeholder="playlists" />
+            </div>
+          </form>
+        </div>
       </section>
 
       <!-- ─── LAST.FM ────────────────────────────────────────── -->
@@ -289,35 +424,50 @@
           </div>
         </header>
 
-        <form data-section="lastfm" class="settings-card">
-          <h3 class="settings-card-title">Account</h3>
-          <div class="field">
-            <label for="f-lastfm-key">API key</label>
-            <input id="f-lastfm-key" name="LastFm.ApiKey" type="password" autocomplete="off" placeholder="32-char hex string" />
-            <div class="field-help">Required. Without it, search and radio fall back to local-only.</div>
-          </div>
-        </form>
+        <div id="discovery-off-banner" class="notice notice-warn" hidden>
+          <strong>Discovery is off.</strong> Octo needs a free Last.fm API key to find and recommend music. Without it, search and radio only return what's already in your library.
+          <a href="https://www.last.fm/api/account/create" target="_blank" rel="noopener">Create a key →</a> then paste it below and Save.
+        </div>
 
-        <form data-section="lastfm-radio" class="settings-card">
-          <h3 class="settings-card-title">Radio</h3>
-          <div class="field field-check">
-            <input type="checkbox" id="f-lastfm-radio" name="LastFm.EnableRadio" />
-            <label for="f-lastfm-radio">
-              <span class="field-check-label">Enable radio</span>
-              <span class="field-help">Powers <code>/rest/getSimilarSongs2</code> in your Subsonic clients.</span>
-            </label>
-          </div>
-          <div class="field">
-            <label for="f-lastfm-count">Track count</label>
-            <input id="f-lastfm-count" name="LastFm.RadioTrackCount" type="number" min="5" max="200" />
-            <div class="field-help">How many similar tracks Last.fm returns per radio request.</div>
-          </div>
-          <div class="field">
-            <label for="f-lastfm-cache">Cache (hours)</label>
-            <input id="f-lastfm-cache" name="LastFm.RadioCacheDurationHours" type="number" min="0" />
-            <div class="field-help">How long Last.fm responses are cached server-side.</div>
-          </div>
-        </form>
+        <div class="set-section">
+          <div class="set-head"><h3 class="set-title">Account</h3></div>
+          <form data-section="lastfm" class="set-card">
+            <div class="set-row stack">
+              <div class="set-info">
+                <div class="set-info-t">API key</div>
+                <div class="set-info-d">Required for discovery. Without it, search and radio fall back to your local library only.</div>
+              </div>
+              <input class="set-input" id="f-lastfm-key" name="LastFm.ApiKey" type="password" autocomplete="off" placeholder="32-char hex string" />
+            </div>
+          </form>
+        </div>
+
+        <div class="set-section">
+          <div class="set-head"><h3 class="set-title">Radio</h3></div>
+          <form data-section="lastfm-radio" class="set-card">
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Enable radio</div>
+                <div class="set-info-d">Powers <code>/rest/getSimilarSongs2</code> in your Subsonic clients.</div>
+              </div>
+              <label class="switch"><input type="checkbox" id="f-lastfm-radio" name="LastFm.EnableRadio" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
+            <div class="set-row stack">
+              <div class="set-info">
+                <div class="set-info-t">Track count</div>
+                <div class="set-info-d">How many similar tracks Last.fm returns per radio request.</div>
+              </div>
+              <input class="set-input" id="f-lastfm-count" name="LastFm.RadioTrackCount" type="number" min="5" max="200" />
+            </div>
+            <div class="set-row stack">
+              <div class="set-info">
+                <div class="set-info-t">Cache (hours)</div>
+                <div class="set-info-d">How long Last.fm responses are cached server-side.</div>
+              </div>
+              <input class="set-input" id="f-lastfm-cache" name="LastFm.RadioCacheDurationHours" type="number" min="0" />
+            </div>
+          </form>
+        </div>
       </section>
 
       <!-- ─── SOULSEEK ───────────────────────────────────────── -->
@@ -329,52 +479,54 @@
           </div>
         </header>
 
-        <form data-section="soulseek-conn" class="settings-card">
-          <h3 class="settings-card-title">Connection</h3>
-          <div class="field">
-            <label for="f-slskd-url">Base URL</label>
-            <input id="f-slskd-url" name="Soulseek.BaseUrl" data-restart="true" placeholder="http://slskd:5030" />
-            <div class="field-help">Default works inside the docker network.</div>
-          </div>
-          <div class="field-row">
-            <div class="field">
-              <label for="f-slskd-user">Web admin username</label>
-              <input id="f-slskd-user" name="Soulseek.Username" data-restart="true" autocomplete="off" />
+        <div class="set-section">
+          <div class="set-head"><h3 class="set-title">Connection</h3></div>
+          <form data-section="soulseek-conn" class="set-card">
+            <div class="set-row stack">
+              <div class="set-info">
+                <div class="set-info-t">Base URL</div>
+                <div class="set-info-d">The slskd API. Default works inside the docker network.</div>
+              </div>
+              <input class="set-input" id="f-slskd-url" name="Soulseek.BaseUrl" data-restart="true" placeholder="http://slskd:5030" />
             </div>
-            <div class="field">
-              <label for="f-slskd-pass">Web admin password</label>
-              <input id="f-slskd-pass" name="Soulseek.Password" type="password" data-restart="true" autocomplete="off" />
+            <div class="set-row stack">
+              <div class="set-info">
+                <div class="set-info-t">Web admin credentials</div>
+                <div class="set-info-d">These authenticate Octo against slskd's API. Not your Soulseek-network account — that's <code>SLSKD_SOULSEEK_USERNAME/PASSWORD</code> in <code>.env</code>.</div>
+              </div>
+              <div class="set-grid2">
+                <input class="set-input" id="f-slskd-user" name="Soulseek.Username" data-restart="true" placeholder="username" autocomplete="off" />
+                <input class="set-input" id="f-slskd-pass" name="Soulseek.Password" type="password" data-restart="true" placeholder="password" autocomplete="off" />
+              </div>
             </div>
-          </div>
-          <div class="field-help" style="margin-top: -8px;">These authenticate Octo against slskd's API. Not your Soulseek-network account — that's set in <code>SLSKD_SOULSEEK_USERNAME/PASSWORD</code> in <code>.env</code>.</div>
-        </form>
+          </form>
+        </div>
 
-        <form data-section="soulseek-search" class="settings-card">
-          <h3 class="settings-card-title">Search &amp; download</h3>
-          <div class="field-row">
-            <div class="field">
-              <label for="f-slskd-wait">Search wait (s)</label>
-              <input id="f-slskd-wait" name="Soulseek.SearchWaitSeconds" type="number" min="2" max="30" />
-              <div class="field-help">Time to wait for peer responses before picking.</div>
+        <div class="set-section">
+          <div class="set-head"><h3 class="set-title">Search &amp; download</h3></div>
+          <form data-section="soulseek-search" class="set-card">
+            <div class="set-row stack">
+              <div class="set-info">
+                <div class="set-info-t">Search wait / per-peer timeout <span class="set-opt">seconds</span></div>
+                <div class="set-info-d">How long to wait for peer responses, and how long each of up to 5 peer downloads may take.</div>
+              </div>
+              <div class="set-grid2">
+                <input class="set-input" id="f-slskd-wait" name="Soulseek.SearchWaitSeconds" type="number" min="2" max="30" />
+                <input class="set-input" id="f-slskd-timeout" name="Soulseek.DownloadTimeoutSeconds" type="number" min="30" />
+              </div>
             </div>
-            <div class="field">
-              <label for="f-slskd-timeout">Per-peer timeout (s)</label>
-              <input id="f-slskd-timeout" name="Soulseek.DownloadTimeoutSeconds" type="number" min="30" />
-              <div class="field-help">Octo tries up to 5 peers in sequence.</div>
+            <div class="set-row stack">
+              <div class="set-info">
+                <div class="set-info-t">Min file size <span class="set-opt">bytes</span> / extension</div>
+                <div class="set-info-d">Filter out clip-sized fakes and prefer a file type.</div>
+              </div>
+              <div class="set-grid2">
+                <input class="set-input" id="f-slskd-minsize" name="Soulseek.MinFileSizeBytes" type="number" min="0" />
+                <input class="set-input" id="f-slskd-ext" name="Soulseek.PreferredExtension" placeholder="flac" />
+              </div>
             </div>
-          </div>
-          <div class="field-row">
-            <div class="field">
-              <label for="f-slskd-minsize">Min file size (bytes)</label>
-              <input id="f-slskd-minsize" name="Soulseek.MinFileSizeBytes" type="number" min="0" />
-              <div class="field-help">Filters out clip-sized fakes.</div>
-            </div>
-            <div class="field">
-              <label for="f-slskd-ext">Extension</label>
-              <input id="f-slskd-ext" name="Soulseek.PreferredExtension" placeholder="flac" />
-            </div>
-          </div>
-        </form>
+          </form>
+        </div>
       </section>
 
       <!-- ─── YOUTUBE ────────────────────────────────────────── -->
@@ -386,14 +538,18 @@
           </div>
         </header>
 
-        <form data-section="youtube" class="settings-card">
-          <h3 class="settings-card-title">Shim</h3>
-          <div class="field">
-            <label for="f-yt-url">Shim URL</label>
-            <input id="f-yt-url" name="YouTube.ShimUrl" data-restart="true" placeholder="http://yt-dlp-shim:8080" />
-            <div class="field-help">Default works inside the docker network.</div>
-          </div>
-        </form>
+        <div class="set-section">
+          <div class="set-head"><h3 class="set-title">Shim</h3></div>
+          <form data-section="youtube" class="set-card">
+            <div class="set-row stack">
+              <div class="set-info">
+                <div class="set-info-t">Shim URL</div>
+                <div class="set-info-d">The yt-dlp sidecar. Default works inside the docker network.</div>
+              </div>
+              <input class="set-input" id="f-yt-url" name="YouTube.ShimUrl" data-restart="true" placeholder="http://yt-dlp-shim:8080" />
+            </div>
+          </form>
+        </div>
 
         <div class="info-card">
           <h3 class="info-card-title">How it works</h3>

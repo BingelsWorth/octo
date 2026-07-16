@@ -31,6 +31,22 @@ public interface IMusicMetadataService
     Task<List<Song>> SearchSongsByArtistTitleAsync(string artist, string title, int limit = 1, int? durationSeconds = null);
 
     /// <summary>
+    /// Fills in real duration/album/year on external placeholder songs (which
+    /// otherwise show a 3:00 fallback) from a metadata provider. Bounded, cached,
+    /// best-effort; does not block or fail the search if the provider is down.
+    /// </summary>
+    Task EnrichExternalSongsAsync(List<Song> songs, CancellationToken ct = default)
+        => Task.CompletedTask;
+
+    /// <summary>
+    /// Resolves the real YouTube video (and its duration) for the top of a search
+    /// result so the shown length matches the audio that plays. Bounded + cached;
+    /// also stores the videoId so playback reuses the same video.
+    /// </summary>
+    Task ResolveTopDurationsAsync(List<Song> songs, CancellationToken ct = default)
+        => Task.CompletedTask;
+
+    /// <summary>
     /// Best-effort pre-resolve of upstream identifiers (e.g. YouTube videoIds) for
     /// the first N songs of a freshly-built search result. Called fire-and-forget
     /// so search3 still returns instantly. Provider-specific (a Deezer/Qobuz

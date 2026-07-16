@@ -81,10 +81,51 @@ public enum FolderStructure
     Flat
 }
 
+/// <summary>
+/// Where a starred track's permanent copy comes from.
+/// </summary>
+public enum DownloadSource
+{
+    /// <summary>Lossless FLAC via Soulseek/slskd (default).</summary>
+    Soulseek,
+
+    /// <summary>Lossy MP3 via the yt-dlp shim.</summary>
+    YouTube,
+
+    /// <summary>Try Soulseek FLAC first; fall back to YouTube MP3 if it fails.</summary>
+    SoulseekThenYouTube
+}
+
 public class SubsonicSettings
 {
     public string? Url { get; set; }
-    
+
+    /// <summary>
+    /// Optional Navidrome admin username. When set (with AdminPassword), Octo can
+    /// authenticate to Navidrome for background work it does as a proxy: detecting
+    /// the music folder and triggering an authenticated rescan. If left empty, Octo
+    /// falls back to an admin token captured from a client's relayed native login.
+    /// Environment variable: SUBSONIC__ADMINUSERNAME
+    /// </summary>
+    public string? AdminUsername { get; set; }
+
+    /// <summary>
+    /// Optional Navidrome admin password paired with AdminUsername. See AdminUsername.
+    /// Environment variable: SUBSONIC__ADMINPASSWORD
+    /// </summary>
+    public string? AdminPassword { get; set; }
+
+    /// <summary>
+    /// Auto-detect the download destination from Navidrome's own music folder
+    /// (default: true). Octo is a proxy in front of Navidrome, so downloads should
+    /// land where Navidrome scans. When on, the effective download path is the
+    /// folder reported by Navidrome's /api/library; the Library:DownloadPath value
+    /// becomes a fallback used only until detection succeeds (or if it never does).
+    /// Turn off to always use Library:DownloadPath verbatim.
+    /// Environment variable: SUBSONIC__AUTODETECTDOWNLOADPATH
+    /// </summary>
+    public bool AutoDetectDownloadPath { get; set; } = true;
+
     /// <summary>
     /// Explicit content filter mode (default: All)
     /// Environment variable: EXPLICIT_FILTER
@@ -144,6 +185,13 @@ public class SubsonicSettings
     /// Values: "Organized" (Artist/Album/Track.flac), "Flat" (Artist - Title.flac)
     /// </summary>
     public FolderStructure FolderStructure { get; set; } = FolderStructure.Flat;
+
+    /// <summary>
+    /// Source for permanent downloads (default: Soulseek).
+    /// Environment variable: DOWNLOAD_SOURCE
+    /// Values: "Soulseek" (FLAC), "YouTube" (MP3), "SoulseekThenYouTube" (FLAC with MP3 fallback)
+    /// </summary>
+    public DownloadSource DownloadSource { get; set; } = DownloadSource.Soulseek;
     
     /// <summary>
     /// Use local staging for cloud storage mounts (default: false)

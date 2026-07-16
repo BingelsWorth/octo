@@ -9,11 +9,24 @@ services:
       ASPNETCORE_ENVIRONMENT: Production
 
       # ----- Subsonic / Navidrome upstream -----
-      Subsonic__Url: ${SUBSONIC_URL:-http://localhost:4533}
+      # Required. Your Navidrome server, reachable from THIS container (a LAN IP
+      # or service name, not localhost). Left blank on purpose so a missing value
+      # is detected and reported clearly instead of silently failing.
+      Subsonic__Url: ${SUBSONIC_URL:-}
+      # Optional Navidrome admin login. Lets Octo detect the music folder and run
+      # authenticated rescans on its own. Leave blank to have Octo learn an admin
+      # token from a client sign-in instead.
+      Subsonic__AdminUsername: ${SUBSONIC_ADMIN_USERNAME:-}
+      Subsonic__AdminPassword: ${SUBSONIC_ADMIN_PASSWORD:-}
+      # Auto-detect the download folder from Navidrome so downloads land where it
+      # scans. Only adopts a path Octo can actually see; otherwise falls back to
+      # Library__DownloadPath below. Set false to always use that path verbatim.
+      Subsonic__AutoDetectDownloadPath: ${AUTO_DETECT_DOWNLOAD_PATH:-true}
       Subsonic__StorageMode: ${STORAGE_MODE:-Stream}
       Subsonic__DownloadMode: ${DOWNLOAD_MODE:-Track}
       Subsonic__DownloadOnStar: ${DOWNLOAD_ON_STAR:-true}
       Subsonic__FolderStructure: ${FOLDER_STRUCTURE:-Flat}
+      Subsonic__DownloadSource: ${DOWNLOAD_SOURCE:-Soulseek}
       Subsonic__UseLocalStaging: ${USE_LOCAL_STAGING:-false}
       Subsonic__ExplicitFilter: ${EXPLICIT_FILTER:-All}
       Subsonic__CacheDurationHours: ${CACHE_DURATION_HOURS:-1}
@@ -60,8 +73,24 @@ services:
       SEARCH_CACHE_MAX: ${YTDLP_SEARCH_CACHE_MAX:-1024}
       URL_CACHE_MAX: ${YTDLP_URL_CACHE_MAX:-512}
       URL_CACHE_TTL: ${YTDLP_URL_CACHE_TTL:-3600}
+      # Root the /download endpoint may write under (matches the /music mount).
+      DOWNLOAD_ROOT: /music
+      # Persistent duration cache (SQLite). On the named volume below so resolved
+      # "artist - title -> {video_id, duration}" mappings survive container recreate.
+      META_DB_PATH: /var/lib/ytshim/meta.db
     expose:
       - "8080"
+    volumes:
+      # Persist yt-dlp's player/nsig cache so base.js + signature solving is not
+      # repeated on every fork, and survives container recreate. Named volume so
+      # ownership is correct and `docker compose down` does not touch host paths.
+      - ytdlp-cache:/root/.cache/yt-dlp
+      # Persistent duration cache DB (see META_DB_PATH above).
+      - ytshim-cache:/var/lib/ytshim
+      # Shared music root so YouTube-MP3 downloads (DownloadSource=YouTube) land
+      # where Navidrome scans; same host dir Octo and slskd mount, so dest paths
+      # line up across containers.
+      - ${DOWNLOAD_PATH:-./downloads}:/music
 
   # Soulseek client (slskd). Web UI on 5030, peer port 50300.
   # State (config, db, downloads-in-progress) persisted to ./slskd-state so the
@@ -82,3 +111,7 @@ services:
     volumes:
       - ./slskd-state:/app
       - ${DOWNLOAD_PATH:-./downloads}:/music
+
+volumes:
+  ytdlp-cache:
+  ytshim-cache:

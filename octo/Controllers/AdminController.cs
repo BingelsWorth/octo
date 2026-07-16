@@ -32,6 +32,8 @@ public class AdminController : ControllerBase
     private readonly IConfiguration _config;
     private readonly SoulseekClient _slskd;
     private readonly SubsonicProxyService _proxy;
+    private readonly SubsonicDiscoveryService _discovery;
+    private readonly Octo.Services.Local.DownloadHistoryService _history;
     private readonly IHttpClientFactory _httpFactory;
     private readonly IHostApplicationLifetime _lifetime;
     private readonly ILogger<AdminController> _logger;
@@ -44,6 +46,8 @@ public class AdminController : ControllerBase
         IConfiguration config,
         SoulseekClient slskd,
         SubsonicProxyService proxy,
+        SubsonicDiscoveryService discovery,
+        Octo.Services.Local.DownloadHistoryService history,
         IHttpClientFactory httpFactory,
         IHostApplicationLifetime lifetime,
         ILogger<AdminController> logger)
@@ -55,9 +59,31 @@ public class AdminController : ControllerBase
         _config = config;
         _slskd = slskd;
         _proxy = proxy;
+        _discovery = discovery;
+        _history = history;
         _httpFactory = httpFactory;
         _lifetime = lifetime;
         _logger = logger;
+    }
+
+    /// <summary>
+    /// Scans the local network for Subsonic/Navidrome servers so the setup UI can
+    /// offer a detected upstream URL instead of requiring it typed by hand. Returns
+    /// the found servers with their type/version. Empty when Octo can't see the LAN
+    /// (e.g. a Docker bridge network).
+    /// </summary>
+    [HttpGet("discover-servers")]
+    public async Task<IActionResult> DiscoverServers(CancellationToken ct)
+    {
+        var servers = await _discovery.ScanAsync(ct);
+        return Ok(new { servers });
+    }
+
+    /// <summary>The running log of songs Octo has fetched, newest first.</summary>
+    [HttpGet("downloads")]
+    public IActionResult Downloads()
+    {
+        return Ok(new { downloads = _history.GetRecent(200) });
     }
 
     /// <summary>

@@ -3,6 +3,7 @@ using System.Text.Json;
 using Octo.Models.Domain;
 using Octo.Models.Search;
 using Octo.Models.Subsonic;
+using Octo.Services.Metadata;
 using Octo.Services.YouTube;
 
 namespace Octo.Services.Soulseek;
@@ -24,15 +25,18 @@ public class SoulseekMetadataService : IMusicMetadataService
 
     private readonly YouTubeResolver _youtube;
     private readonly ExternalIdRegistry _idRegistry;
+    private readonly DeezerMetadataService _deezer;
     private readonly ILogger<SoulseekMetadataService> _logger;
 
     public SoulseekMetadataService(
         YouTubeResolver youtube,
         ExternalIdRegistry idRegistry,
+        DeezerMetadataService deezer,
         ILogger<SoulseekMetadataService> logger)
     {
         _youtube = youtube;
         _idRegistry = idRegistry;
+        _deezer = deezer;
         _logger = logger;
     }
 
@@ -85,6 +89,77 @@ public class SoulseekMetadataService : IMusicMetadataService
         });
     }
 
+    // Cap Deezer calls per search so a big result set (Feishin requests up to 200)
+    // does not add seconds of latency or trip Deezer's rate limit. The visible top
+    // of the list gets real data; the rest keep the 180s fallback. Cached, so a
+    // repeat search fills in more instantly.
+    private const int SearchEnrichLimit = 60;
+
+    public async Task EnrichExternalSongsAsync(List<Song> songs, CancellationToken ct = default)
+    {
+        var sem = new SemaphoreSlim(8);
+        var tasks = songs.Where(s => !s.IsLocal).Take(SearchEnrichLimit).Select(async song =>
+        {
+            await sem.WaitAsync(ct);
+            try
+            {
+                var meta = await _deezer.EnrichTrackAsync(song.Artist, song.Title, includeYear: true, ct: ct);
+                if (meta is null) return;
+                if (meta.Duration is int d && d > 0) song.Duration = d;
+                if (!string.IsNullOrWhiteSpace(meta.AlbumTitle)) song.Album = meta.AlbumTitle;
+                if (meta.Year is int y) song.Year = y;
+
+                // Reflect onto the shared routing so getSong stays consistent.
+                var routing = _idRegistry.Lookup(song.Id);
+                if (routing != null)
+                {
+                    if (meta.Duration is int rd && rd > 0) routing.Duration = rd;
+                    if (!string.IsNullOrWhiteSpace(meta.AlbumTitle)) routing.Album = meta.AlbumTitle;
+                }
+            }
+            catch { /* best-effort; a miss just leaves the 180s fallback */ }
+            finally { sem.Release(); }
+        });
+        await Task.WhenAll(tasks);
+    }
+
+    // Resolve the ACTUAL YouTube video for the top of the list at search time and
+    // use its duration. Deezer's duration is a different recording (e.g. "Fade"
+    // is 3:13 on Deezer but the YouTube upload that plays is 3:45), so the scrub
+    // bar overran and the client's advance logic broke. Storing the videoId also
+    // means playback reuses this exact video (durations match) and it is prewarmed.
+    private const int TopDurationResolveLimit = 8;
+
+    public async Task ResolveTopDurationsAsync(List<Song> songs, CancellationToken ct = default)
+    {
+        var sem = new SemaphoreSlim(6);
+        var tasks = songs.Where(s => !s.IsLocal).Take(TopDurationResolveLimit).Select(async song =>
+        {
+            await sem.WaitAsync(ct);
+            try
+            {
+                // Fast metadata-only lookup (flat search, no URL solve). Pass the
+                // Deezer duration as a hint so it picks the closest-length canonical
+                // video (not a long-form/compilation upload); playback reuses the
+                // stored videoId, so the shown length matches the audio.
+                var hit = await _youtube.MetaAsync($"{song.Artist} {song.Title}", song.Duration, ct);
+                if (hit is { VideoId.Length: > 0 } && hit.Duration is int d && d > 0)
+                {
+                    song.Duration = d;
+                    var routing = _idRegistry.Lookup(song.Id);
+                    if (routing != null)
+                    {
+                        routing.YouTubeId = hit.VideoId; // playback reuses this exact video
+                        routing.Duration = d;
+                    }
+                }
+            }
+            catch { /* best-effort; keeps the existing duration on a miss */ }
+            finally { sem.Release(); }
+        });
+        await Task.WhenAll(tasks);
+    }
+
     /// <summary>
     /// Fire-and-forget background prewarm: resolve the YouTube videoId (and via
     /// shim's automatic prefetch, the stream URL) for the first <paramref name="topN"/>
@@ -132,7 +207,7 @@ public class SoulseekMetadataService : IMusicMetadataService
             {
                 var routing = t.routing!;
                 if (!string.IsNullOrEmpty(routing.YouTubeId)) return;
-                var hit = await _youtube.SearchAsync($"{routing.Artist} {routing.Title}", ct);
+                var hit = await _youtube.SearchAsync($"{routing.Artist} {routing.Title}", routing.Duration, ct);
                 if (hit is { VideoId: { Length: > 0 } })
                 {
                     routing.YouTubeId = hit.VideoId;
@@ -178,11 +253,50 @@ public class SoulseekMetadataService : IMusicMetadataService
         });
     }
 
-    public Task<Album?> GetAlbumAsync(string externalProvider, string externalId)
-        => Task.FromResult<Album?>(null);
+    public async Task<Album?> GetAlbumAsync(string externalProvider, string externalId)
+    {
+        if (!string.Equals(externalProvider, ProviderName, StringComparison.OrdinalIgnoreCase)) return null;
+        var routing = _idRegistry.Lookup(externalId);
+        if (routing is null) return null;
 
-    public Task<Artist?> GetArtistAsync(string externalProvider, string externalId)
-        => Task.FromResult<Artist?>(null);
+        var placeholder = routing.Album ?? routing.Title ?? "";
+        // Enrich by the track title (the placeholder "album" is the song title) so
+        // Deezer returns the REAL album (e.g. "Creep" -> "Pablo Honey"). Degrades
+        // to the placeholder name if Deezer misses or is unreachable.
+        var meta = await _deezer.EnrichTrackAsync(routing.Artist, routing.Album ?? routing.Title);
+        var artistId = _idRegistry.Register(new SoulseekRouting { Kind = RoutingKind.Artist, Artist = routing.Artist });
+
+        return new Album
+        {
+            Id = externalId,
+            Title = meta?.AlbumTitle ?? placeholder,
+            Artist = routing.Artist ?? "",
+            ArtistId = artistId,
+            Year = meta?.Year,
+            CoverArtUrl = meta?.AlbumCoverUrl,
+            IsLocal = false,
+            ExternalProvider = ProviderName,
+            ExternalId = externalId,
+        };
+    }
+
+    public async Task<Artist?> GetArtistAsync(string externalProvider, string externalId)
+    {
+        if (!string.Equals(externalProvider, ProviderName, StringComparison.OrdinalIgnoreCase)) return null;
+        var routing = _idRegistry.Lookup(externalId);
+        if (routing is null) return null;
+
+        var meta = await _deezer.EnrichArtistAsync(routing.Artist);
+        return new Artist
+        {
+            Id = externalId,
+            Name = meta?.Name ?? routing.Artist ?? "",
+            ImageUrl = meta?.ImageUrl,
+            IsLocal = false,
+            ExternalProvider = ProviderName,
+            ExternalId = externalId,
+        };
+    }
 
     public Task<List<Album>> GetArtistAlbumsAsync(string externalProvider, string externalId)
         => Task.FromResult(new List<Album>());

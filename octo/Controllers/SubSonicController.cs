@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using System.Xml.Linq;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Microsoft.Extensions.Options;
 using Octo.Models.Domain;
 using Octo.Models.Settings;
@@ -37,6 +38,7 @@ public class SubsonicController : ControllerBase
     private readonly CoverArtAggregator? _coverArtAggregator;
     private readonly ExternalIdRegistry _idRegistry;
     private readonly RadioQueueStore _radioQueueStore;
+    private readonly NavidromeIdentityService _navIdentity;
     private readonly ILogger<SubsonicController> _logger;
 
     public SubsonicController(
@@ -50,6 +52,7 @@ public class SubsonicController : ControllerBase
         SubsonicProxyService proxyService,
         ExternalIdRegistry idRegistry,
         RadioQueueStore radioQueueStore,
+        NavidromeIdentityService navIdentity,
         ILogger<SubsonicController> logger,
         IOptions<LastFmSettings> lastFmSettings,
         PlaylistSyncService? playlistSyncService = null,
@@ -67,17 +70,53 @@ public class SubsonicController : ControllerBase
         _proxyService = proxyService;
         _idRegistry = idRegistry;
         _radioQueueStore = radioQueueStore;
+        _navIdentity = navIdentity;
         _playlistSyncService = playlistSyncService;
         _lastFmService = lastFmService;
         _lastFmSettings = lastFmSettings.Value;
         _coverArtService = coverArtService;
         _coverArtAggregator = coverArtAggregator;
         _logger = logger;
+        // No hard throw on a missing/blank Subsonic URL: that made every request
+        // fail opaquely. Misconfiguration is now reported per-request with an
+        // actionable message (see Ping and OctoNotConfiguredException), and the
+        // admin panel stays reachable so the user can fix it.
+    }
 
-        if (string.IsNullOrWhiteSpace(_subsonicSettings.Url))
+    // -------------------------------------------------------------------------
+    // ping — the first call every Subsonic client makes. We make it the moment a
+    // broken setup explains itself, instead of relaying blindly and returning an
+    // opaque error when the Navidrome URL is missing or unreachable.
+    // -------------------------------------------------------------------------
+    [HttpGet]
+    [HttpPost]
+    [Route("rest/ping")]
+    [Route("rest/ping.view")]
+    public async Task<IActionResult> Ping()
+    {
+        var parameters = await ExtractAllParameters();
+        var format = parameters.GetValueOrDefault("f", "xml");
+
+        if (string.IsNullOrWhiteSpace(_subsonicSettings.Url)
+            || !Uri.TryCreate(_subsonicSettings.Url, UriKind.Absolute, out _))
         {
-            throw new Exception("Error: Environment variable SUBSONIC_URL is not set.");
+            return _responseBuilder.CreateError(format, 0,
+                $"Octo isn't configured yet. Open {Request.Scheme}://{Request.Host}/admin and set " +
+                "your Navidrome URL (SUBSONIC_URL), then point this client at Octo instead of Navidrome.");
         }
+
+        // Relay to Navidrome so real credentials are validated there. A connection
+        // failure means Octo can't reach the configured URL; pass a successful
+        // (or auth-failed) Navidrome envelope straight through otherwise.
+        var relay = await _proxyService.RelaySafeAsync("rest/ping.view", parameters);
+        if (!relay.Success || relay.Body is null)
+        {
+            return _responseBuilder.CreateError(format, 0,
+                $"Octo can't reach Navidrome at {_subsonicSettings.Url}. Check the URL is correct and " +
+                "reachable from the Octo container (use a LAN IP or service name, not localhost).");
+        }
+
+        return File(relay.Body, relay.ContentType ?? $"application/{format}");
     }
 
     // ---------------------------------------------------------------------
@@ -300,6 +339,12 @@ public class SubsonicController : ControllerBase
         // tracks if we're short. Each Last.fm hit becomes an instant placeholder
         // song via SoulseekMetadataService — no yt-dlp call until /rest/stream.
         var externalSongs = await BuildExternalSearchResultsAsync(cleanQuery, externalTarget);
+
+        // Album/art/year from Deezer (fast), then the ACCURATE duration for the top
+        // of the list from the real YouTube video (so the scrub bar matches the
+        // audio and the client advances correctly). Bounded + cached.
+        await _metadataService.EnrichExternalSongsAsync(externalSongs);
+        await _metadataService.ResolveTopDurationsAsync(externalSongs);
 
         // Local pass-through. Albums/artists always get the full requested counts;
         // song-side gets the local target.
@@ -1575,6 +1620,140 @@ public class SubsonicController : ControllerBase
     // .NET 9 + Static Web Assets configurations), we don't accidentally turn
     // /admin/admin.css into a Navidrome HTML response.
     [HttpGet, HttpPost]
+    // OpenSubsonic reportPlayback: Feishin pings this on play-start and during
+    // playback (176 hits in one session). For external ids Navidrome has no such
+    // media and returns an error, so we ack with ok; local ids relay through so
+    // Navidrome's now-playing stays accurate.
+    [HttpGet, HttpPost]
+    [Route("rest/reportPlayback")]
+    [Route("rest/reportPlayback.view")]
+    public async Task<IActionResult> ReportPlayback()
+    {
+        var parameters = await ExtractAllParameters();
+        var format = parameters.GetValueOrDefault("f", "xml");
+        var mediaId = parameters.GetValueOrDefault("mediaId", parameters.GetValueOrDefault("id", ""));
+        var (isExternal, _, _) = _localLibraryService.ParseSongId(mediaId);
+
+        if (!isExternal && !string.IsNullOrEmpty(mediaId))
+        {
+            var relay = await _proxyService.RelaySafeAsync("rest/reportPlayback", parameters);
+            if (relay.Success && relay.Body != null)
+                return File(relay.Body, relay.ContentType ?? $"application/{format}");
+        }
+        return _responseBuilder.CreateResponse(format, "reportPlayback", new { });
+    }
+
+    // Octo has no jukebox device. Relaying surfaced a misleading "Error
+    // connecting to Subsonic server"; return a clean, plain "not supported" so
+    // the client just disables jukebox mode instead of logging a scary error.
+    [HttpGet, HttpPost]
+    [Route("rest/jukeboxControl")]
+    [Route("rest/jukeboxControl.view")]
+    public async Task<IActionResult> JukeboxControl()
+    {
+        var parameters = await ExtractAllParameters();
+        var format = parameters.GetValueOrDefault("f", "xml");
+        return _responseBuilder.CreateError(format, 0, "Jukebox is not supported");
+    }
+
+    // OpenSubsonic getLyricsBySongId — Feishin fetches this every time a song
+    // plays. External tracks have no lyrics in Navidrome, so it returned code 70
+    // "data not found" per play; return an empty-but-ok lyrics list instead.
+    // (Real synced lyrics from an open source like lrclib are a future add.)
+    [HttpGet, HttpPost]
+    [Route("rest/getLyricsBySongId")]
+    [Route("rest/getLyricsBySongId.view")]
+    public async Task<IActionResult> GetLyricsBySongId()
+    {
+        var parameters = await ExtractAllParameters();
+        var id = parameters.GetValueOrDefault("id", "");
+        var format = parameters.GetValueOrDefault("f", "xml");
+        var (isExternal, _, _) = _localLibraryService.ParseSongId(id);
+
+        if (isExternal)
+        {
+            if (format == "json")
+                return _responseBuilder.CreateJsonResponse(new Dictionary<string, object>
+                {
+                    ["status"] = "ok",
+                    ["version"] = "1.16.1",
+                    ["lyricsList"] = new { structuredLyrics = Array.Empty<object>() },
+                });
+            return _responseBuilder.CreateResponse(format, "lyricsList", new { });
+        }
+
+        var relay = await _proxyService.RelaySafeAsync("rest/getLyricsBySongId", parameters);
+        if (relay.Success && relay.Body != null)
+            return File(relay.Body, relay.ContentType ?? $"application/{format}");
+        return _responseBuilder.CreateResponse(format, "lyricsList", new { });
+    }
+
+    // Album/artist "info" panels. For external tracks these used to fall through
+    // to Navidrome (which has no such id) and return "data not found" — the error
+    // spam a client logs per row. Now they return a valid response with real
+    // Deezer art for external ids, and only relay for genuine local ids.
+    [HttpGet, HttpPost]
+    [Route("rest/getAlbumInfo2")]
+    [Route("rest/getAlbumInfo2.view")]
+    [Route("rest/getAlbumInfo")]
+    [Route("rest/getAlbumInfo.view")]
+    public async Task<IActionResult> GetAlbumInfo2()
+    {
+        var parameters = await ExtractAllParameters();
+        var id = parameters.GetValueOrDefault("id", "");
+        var format = parameters.GetValueOrDefault("f", "xml");
+        var (isExternal, provider, externalId) = _localLibraryService.ParseSongId(id);
+
+        if (isExternal)
+        {
+            var album = await _metadataService.GetAlbumAsync(provider!, externalId!);
+            var url = album?.CoverArtUrl ?? "";
+            return _responseBuilder.CreateInfoResponse(format, "albumInfo", new Dictionary<string, string>
+            {
+                ["notes"] = "",
+                ["smallImageUrl"] = url,
+                ["mediumImageUrl"] = url,
+                ["largeImageUrl"] = url,
+            });
+        }
+
+        var relay = await _proxyService.RelaySafeAsync("rest/getAlbumInfo2", parameters);
+        if (relay.Success && relay.Body != null)
+            return File(relay.Body, relay.ContentType ?? $"application/{format}");
+        return _responseBuilder.CreateResponse(format, "albumInfo", new { });
+    }
+
+    [HttpGet, HttpPost]
+    [Route("rest/getArtistInfo2")]
+    [Route("rest/getArtistInfo2.view")]
+    [Route("rest/getArtistInfo")]
+    [Route("rest/getArtistInfo.view")]
+    public async Task<IActionResult> GetArtistInfo2()
+    {
+        var parameters = await ExtractAllParameters();
+        var id = parameters.GetValueOrDefault("id", "");
+        var format = parameters.GetValueOrDefault("f", "xml");
+        var (isExternal, provider, externalId) = _localLibraryService.ParseSongId(id);
+
+        if (isExternal)
+        {
+            var artist = await _metadataService.GetArtistAsync(provider!, externalId!);
+            var url = artist?.ImageUrl ?? "";
+            return _responseBuilder.CreateInfoResponse(format, "artistInfo2", new Dictionary<string, string>
+            {
+                ["biography"] = "",
+                ["smallImageUrl"] = url,
+                ["mediumImageUrl"] = url,
+                ["largeImageUrl"] = url,
+            });
+        }
+
+        var relay = await _proxyService.RelaySafeAsync("rest/getArtistInfo2", parameters);
+        if (relay.Success && relay.Body != null)
+            return File(relay.Body, relay.ContentType ?? $"application/{format}");
+        return _responseBuilder.CreateResponse(format, "artistInfo2", new { });
+    }
+
     [Route("{**endpoint}")]
     public async Task<IActionResult> GenericEndpoint(string endpoint)
     {
@@ -1586,25 +1765,249 @@ public class SubsonicController : ControllerBase
         var parameters = await ExtractAllParameters();
         var format = parameters.GetValueOrDefault("f", "xml");
 
+        // Safety net (client-agnostic): any endpoint we don't explicitly handle,
+        // called with one of our external ids, would relay to Navidrome and come
+        // back "data not found" — Navidrome has no such id. Degrade to a graceful
+        // ok so a client we haven't specifically tested never errors on external
+        // tracks. Endpoints that need real external data have their own handlers.
+        if (HasExternalId(parameters))
+        {
+            return _responseBuilder.CreateResponse(format, ElementFor(endpoint), new { });
+        }
+
+        // Navidrome-native single-song detail for an external id. Native clients
+        // load the now-playing view via GET /api/song/{id}; the id lives in the
+        // path, not the query, so HasExternalId above (query-only) misses it and a
+        // relay would 500. Serve the synthetic native object instead.
+        var nativeSong = await TryServeNativeExternalSongAsync(endpoint);
+        if (nativeSong != null) return nativeSong;
+
+        // Navidrome-native discovery. Navidrome-mode clients (e.g. Feishin) search
+        // songs via GET /api/song?title=..., which otherwise relays straight through
+        // and only ever surfaces the local library. This mirrors the Subsonic
+        // search3 hijack onto the native API using the same discovery core, so
+        // discovery is a property of the request shape, not the client's mode.
+        var nativeSearch = await TryInjectNativeSongSearchAsync(endpoint, parameters);
+        if (nativeSearch != null) return nativeSearch;
+
         try
         {
-            var result = await _proxyService.RelayAsync(endpoint, parameters);
-            var contentType = result.ContentType ?? $"application/{format}";
-            return File(result.Body, contentType);
+            // Faithful relay: forward the caller's method + body + status so native
+            // Navidrome endpoints (e.g. the POST /auth/login some clients use) work,
+            // not just GET-shaped Subsonic calls.
+            var raw = await _proxyService.RelayRawAsync(endpoint, parameters);
+
+            // Learn Octo's own Navidrome identity from a client's native sign-in as
+            // it passes through, so background work (music-folder detection, an
+            // authenticated rescan) has an admin token without any extra config.
+            if (raw.Status == 200 && endpoint.Equals("auth/login", StringComparison.OrdinalIgnoreCase))
+                _navIdentity.CaptureLogin(raw.Body);
+
+            Response.StatusCode = raw.Status;
+            foreach (var h in raw.ResponseHeaders)
+                Response.Headers[h.Key] = h.Value;
+            Response.ContentType = raw.ContentType ?? $"application/{format}";
+            await Response.Body.WriteAsync(raw.Body);
+            return new EmptyResult();
         }
-        catch (HttpRequestException ex)
+        catch (Exception ex)
         {
-            // Return Subsonic-compatible error response
             return _responseBuilder.CreateError(format, 0, $"Error connecting to Subsonic server: {ex.Message}");
         }
     }
+
+    /// <summary>True if any id-shaped parameter is one of Octo's external ids.</summary>
+    private bool HasExternalId(Dictionary<string, string> parameters)
+    {
+        foreach (var key in new[] { "id", "mediaId", "albumId", "artistId" })
+        {
+            if (parameters.TryGetValue(key, out var v) && !string.IsNullOrEmpty(v)
+                && _localLibraryService.ParseSongId(v).isExternal)
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>rest/getSomething -> "something"; best-effort element name for an
+    /// empty-ok response (JSON ignores it; XML just needs a well-formed element).</summary>
+    private static string ElementFor(string endpoint)
+    {
+        var name = (endpoint.Split('/').LastOrDefault() ?? "response").Replace(".view", "");
+        if (name.StartsWith("get", StringComparison.OrdinalIgnoreCase) && name.Length > 3)
+            name = char.ToLowerInvariant(name[3]) + name[4..];
+        return string.IsNullOrEmpty(name) ? "response" : name;
+    }
+
+    /// <summary>
+    /// Native single-song fetch for one of Octo's external ids. Navidrome-mode
+    /// clients load the now-playing detail via GET /api/song/{id}; relaying an
+    /// external id to Navidrome 500s (it has no such song). Rebuild the song from
+    /// the id via the same metadata core getSong uses and return it in native shape.
+    /// Returns null (fall through to relay) for anything but a leaf external-id fetch.
+    /// </summary>
+    private async Task<IActionResult?> TryServeNativeExternalSongAsync(string endpoint)
+    {
+        const string prefix = "api/song/";
+        if (!endpoint.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return null;
+        var id = endpoint[prefix.Length..].Trim('/');
+        if (string.IsNullOrEmpty(id) || id.Contains('/')) return null; // leaf id only
+
+        var (isExternal, provider, externalId) = _localLibraryService.ParseSongId(id);
+        if (!isExternal) return null;
+
+        var song = await _metadataService.GetSongAsync(provider!, externalId!);
+        if (song == null) return null;
+
+        // Enrich (Deezer album/year/art) so the detail matches the search-list row
+        // exactly; without this a client that refreshes now-playing from the detail
+        // would blank the album. Cached, so this is cheap after the initial search.
+        var one = new List<Song> { song };
+        await _metadataService.EnrichExternalSongsAsync(one);
+
+        // Lazy-resolve the accurate YouTube duration at play. Navidrome-mode clients
+        // re-fetch this endpoint when a track starts, so this is where the scrub bar
+        // gets the real length for results past the search's top-N (which are already
+        // resolved). Backed by the shim's persistent cache, so it is a disk hit for
+        // anything seen before and resolved-once-then-instant otherwise.
+        await _metadataService.ResolveTopDurationsAsync(one);
+
+        var bytes = Encoding.UTF8.GetBytes(BuildNativeSongObject(song).ToJsonString());
+        Response.StatusCode = 200;
+        Response.ContentType = "application/json";
+        await Response.Body.WriteAsync(bytes);
+        return new EmptyResult();
+    }
+
+    /// <summary>
+    /// Native-API twin of the Subsonic search3 hijack. When a Navidrome-mode client
+    /// searches songs (GET /api/song?title=...), relay the real query, then append
+    /// external discovery results serialized in Navidrome's native song shape. Play
+    /// and cover art need no special handling: native clients stream via /rest/stream
+    /// and fetch art via /rest/getCoverArt using the salt+token from login, and our
+    /// existing handlers already resolve Octo's external ids there.
+    ///
+    /// Returns null to fall through to the normal faithful relay whenever this is not
+    /// a first-page native song search we should touch, so library browsing, paging,
+    /// and every other native endpoint stay pure passthrough.
+    /// </summary>
+    private async Task<IActionResult?> TryInjectNativeSongSearchAsync(
+        string endpoint, Dictionary<string, string> parameters)
+    {
+        if (!string.Equals(endpoint, "api/song", StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        // Only a text search carries discovery intent. No title filter = library
+        // browse; a non-zero _start = a later page. Both stay passthrough so we
+        // never duplicate injected rows across pages or disturb navigation.
+        var term = parameters.GetValueOrDefault("title", "").Trim();
+        if (string.IsNullOrWhiteSpace(term)) return null;
+        if (parameters.TryGetValue("_start", out var startStr)
+            && int.TryParse(startStr, out var start) && start > 0)
+            return null;
+
+        // Relay the real query first; we append to whatever the library returned.
+        RawRelayResult raw;
+        try { raw = await _proxyService.RelayRawAsync(endpoint, parameters); }
+        catch { return null; } // upstream trouble -> let the normal path surface it
+
+        if (raw.Status != 200) return null;
+
+        // Native list endpoints answer with a bare JSON array + X-Total-Count. If the
+        // body is any other shape (error object, unexpected version), don't touch it.
+        JsonArray? realArr;
+        try { realArr = JsonNode.Parse(raw.Body) as JsonArray; }
+        catch { return null; }
+        if (realArr == null) return null;
+
+        // Stay inside the page window the client asked for so a single page holds
+        // everything and the client never pages into a duplicated injection.
+        var end = parameters.TryGetValue("_end", out var endStr) && int.TryParse(endStr, out var e)
+            ? e : realArr.Count + 60;
+        const int MaxExternalNative = 60;
+        var target = Math.Min(Math.Max(0, end - realArr.Count), MaxExternalNative);
+        if (target <= 0) return null;
+
+        // Same discovery core as Subsonic search3: Last.fm fan-out, Deezer enrich,
+        // accurate YouTube durations for the top of the list.
+        var externalSongs = await BuildExternalSearchResultsAsync(term, target);
+        if (externalSongs.Count == 0) return null;
+        await _metadataService.EnrichExternalSongsAsync(externalSongs);
+        await _metadataService.ResolveTopDurationsAsync(externalSongs);
+
+        foreach (var s in externalSongs)
+            realArr.Add(BuildNativeSongObject(s));
+
+        // Register for the scrobble-driven prewarm, same as search3.
+        _radioQueueStore.Register(externalSongs.Select(s => s.Id));
+
+        var bytes = Encoding.UTF8.GetBytes(realArr.ToJsonString());
+        Response.StatusCode = 200;
+        foreach (var h in raw.ResponseHeaders)
+        {
+            if (string.Equals(h.Key, "X-Total-Count", StringComparison.OrdinalIgnoreCase)) continue;
+            Response.Headers[h.Key] = h.Value;
+        }
+        Response.Headers["X-Total-Count"] = realArr.Count.ToString();
+        Response.ContentType = raw.ContentType ?? "application/json";
+        await Response.Body.WriteAsync(bytes);
+        return new EmptyResult();
+    }
+
+    /// <summary>
+    /// Serializes one external Song into Navidrome's native song JSON shape. Only the
+    /// fields a Navidrome-mode client reads to render and play a row are populated.
+    /// The id is Octo's external id, which /rest/stream and /rest/getCoverArt resolve.
+    /// </summary>
+    private static JsonObject BuildNativeSongObject(Song s)
+    {
+        var artistId = string.IsNullOrEmpty(s.ArtistId) ? s.Id + "-ar" : s.ArtistId!;
+        var albumId = string.IsNullOrEmpty(s.AlbumId) ? s.Id + "-al" : s.AlbumId!;
+        var duration = s.Duration ?? 0;
+        const string suffix = "m4a";
+        const int bitRate = 128; // format 140 AAC ~128 kbps
+        long size = duration > 0 ? (long)duration * bitRate * 1000L / 8 : 0;
+
+        var o = new JsonObject
+        {
+            ["id"] = s.Id,
+            ["path"] = $"{Sanitize(s.Artist)}/{Sanitize(s.Album)}/{Sanitize(s.Title)}.{suffix}",
+            ["title"] = s.Title,
+            ["album"] = s.Album ?? "",
+            ["artist"] = s.Artist ?? "",
+            ["artistId"] = artistId,
+            ["albumArtist"] = string.IsNullOrEmpty(s.AlbumArtist) ? s.Artist : s.AlbumArtist,
+            ["albumArtistId"] = artistId,
+            ["albumId"] = albumId,
+            ["hasCoverArt"] = true,
+            ["trackNumber"] = s.Track ?? 0,
+            ["discNumber"] = s.DiscNumber ?? 1,
+            ["size"] = size,
+            ["suffix"] = suffix,
+            ["duration"] = duration,
+            ["bitRate"] = bitRate,
+            ["playCount"] = 0,
+            // Fixed old timestamp: injected tracks are not "recently added" library
+            // items, so they should never crowd a client's recently-added view.
+            ["createdAt"] = "2020-01-01T00:00:00Z",
+            ["updatedAt"] = "2020-01-01T00:00:00Z",
+        };
+        if (s.Year is int y && y > 0) o["year"] = y;
+        if (!string.IsNullOrEmpty(s.Genre)) o["genre"] = s.Genre;
+        return o;
+    }
+
+    private static string Sanitize(string? s) =>
+        string.IsNullOrEmpty(s) ? "Unknown" : s.Replace('/', '_').Replace('\\', '_');
 
     private static bool IsOctoOwnedPath(string endpoint)
     {
         if (string.IsNullOrEmpty(endpoint)) return false;
         var lower = endpoint.ToLowerInvariant();
+        // Only Octo's OWN paths. Navidrome's native API also lives under /api/*
+        // (api/album, api/song, ...), so we must NOT claim all of /api/ — only
+        // api/admin — or Navidrome-mode clients can't reach the native API.
         return lower.StartsWith("admin", StringComparison.Ordinal)
-            || lower.StartsWith("api/", StringComparison.Ordinal)
+            || lower.StartsWith("api/admin", StringComparison.Ordinal)
             || lower.StartsWith("assets/", StringComparison.Ordinal)
             || lower == "favicon.ico";
     }

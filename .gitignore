@@ -72,3 +72,6 @@ obj/
 
 # Downloaded music files
 octo/downloads/
+
+# local build artifacts
+*.tgz
