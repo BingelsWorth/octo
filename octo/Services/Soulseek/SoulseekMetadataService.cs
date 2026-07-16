@@ -103,7 +103,7 @@ public class SoulseekMetadataService : IMusicMetadataService
             await sem.WaitAsync(ct);
             try
             {
-                var meta = await _deezer.EnrichTrackAsync(song.Artist, song.Title, includeYear: false, ct: ct);
+                var meta = await _deezer.EnrichTrackAsync(song.Artist, song.Title, includeYear: true, ct: ct);
                 if (meta is null) return;
                 if (meta.Duration is int d && d > 0) song.Duration = d;
                 if (!string.IsNullOrWhiteSpace(meta.AlbumTitle)) song.Album = meta.AlbumTitle;

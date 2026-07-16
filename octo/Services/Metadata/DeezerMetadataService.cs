@@ -26,6 +26,9 @@ public class DeezerMetadataService
     private readonly ConcurrentDictionary<string, TrackMeta?> _trackCache = new();
     private readonly ConcurrentDictionary<string, ArtistMeta?> _artistCache = new();
     private readonly ConcurrentDictionary<long, int?> _albumYearCache = new();
+    // Single-flight the album-year fetch: many tracks in one search share an album
+    // (a whole album's tracks), so concurrent lookups collapse onto one HTTP call.
+    private readonly ConcurrentDictionary<long, Lazy<Task<int?>>> _albumYearTasks = new();
 
     public DeezerMetadataService(IHttpClientFactory httpFactory, ILogger<DeezerMetadataService> logger)
     {
@@ -109,19 +112,27 @@ public class DeezerMetadataService
         return meta;
     }
 
-    private async Task<int?> AlbumYearAsync(long albumId, CancellationToken ct)
+    private Task<int?> AlbumYearAsync(long albumId, CancellationToken ct)
     {
-        if (_albumYearCache.TryGetValue(albumId, out var y)) return y;
+        if (_albumYearCache.TryGetValue(albumId, out var y)) return Task.FromResult(y);
+        // Shared across concurrent callers for the same album id (single-flight).
+        return _albumYearTasks.GetOrAdd(albumId,
+            id => new Lazy<Task<int?>>(() => FetchAlbumYearAsync(id))).Value;
+    }
+
+    private async Task<int?> FetchAlbumYearAsync(long albumId)
+    {
         int? year = null;
         try
         {
-            using var doc = await GetJsonAsync($"{Base}/album/{albumId}", ct);
+            using var doc = await GetJsonAsync($"{Base}/album/{albumId}", CancellationToken.None);
             var rd = doc is null ? null : Str(doc.RootElement, "release_date");
             if (!string.IsNullOrEmpty(rd) && rd.Length >= 4 && int.TryParse(rd[..4], out var yr))
                 year = yr;
         }
         catch { /* best-effort */ }
         _albumYearCache[albumId] = year;
+        _albumYearTasks.TryRemove(albumId, out _);
         return year;
     }
 
