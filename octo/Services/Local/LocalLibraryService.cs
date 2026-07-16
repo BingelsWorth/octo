@@ -7,6 +7,7 @@ using Octo.Models.Search;
 using Octo.Models.Subsonic;
 using Octo.Services;
 using Octo.Services.Soulseek;
+using Octo.Services.Subsonic;
 
 namespace Octo.Services.Local;
 
@@ -21,6 +22,7 @@ public class LocalLibraryService : ILocalLibraryService
     private readonly HttpClient _httpClient;
     private readonly SubsonicSettings _subsonicSettings;
     private readonly ExternalIdRegistry _idRegistry;
+    private readonly NavidromeIdentityService _navIdentity;
     private readonly ILogger<LocalLibraryService> _logger;
     private Dictionary<string, LocalSongMapping>? _mappings;
     private readonly SemaphoreSlim _lock = new(1, 1);
@@ -34,6 +36,7 @@ public class LocalLibraryService : ILocalLibraryService
         IHttpClientFactory httpClientFactory,
         IOptions<SubsonicSettings> subsonicSettings,
         ExternalIdRegistry idRegistry,
+        NavidromeIdentityService navIdentity,
         ILogger<LocalLibraryService> logger)
     {
         _downloadDirectory = configuration["Library:DownloadPath"] ?? Path.Combine(Directory.GetCurrentDirectory(), "downloads");
@@ -41,6 +44,7 @@ public class LocalLibraryService : ILocalLibraryService
         _httpClient = httpClientFactory.CreateClient();
         _subsonicSettings = subsonicSettings.Value;
         _idRegistry = idRegistry;
+        _navIdentity = navIdentity;
         _logger = logger;
         
         if (!Directory.Exists(_downloadDirectory))
@@ -207,14 +211,20 @@ public class LocalLibraryService : ILocalLibraryService
         
         try
         {
-            // Call Subsonic API to trigger a scan
-            // Note: This endpoint works without authentication on most Subsonic/Navidrome servers
-            // when called from localhost. For remote servers requiring auth, this would need
-            // to be refactored to accept credentials from the controller layer.
-            var url = $"{_subsonicSettings.Url}/rest/startScan?f=json";
-            
-            _logger.LogInformation("Triggering Subsonic library scan...");
-            
+            // Navidrome's startScan requires an admin identity. Octo, as a proxy,
+            // gets one from the NavidromeIdentityService (captured from a client's
+            // relayed login or configured admin creds). When available we send the
+            // Subsonic u/t/s triplet; otherwise we fall back to the bare call, which
+            // only works on servers that allow unauthenticated localhost scans.
+            var auth = _navIdentity.GetScanAuth();
+            var url = auth is { } a
+                ? $"{_subsonicSettings.Url}/rest/startScan?f=json&c=octo&v=1.16.1" +
+                  $"&u={Uri.EscapeDataString(a.user)}&t={a.token}&s={a.salt}"
+                : $"{_subsonicSettings.Url}/rest/startScan?f=json";
+
+            _logger.LogInformation("Triggering Subsonic library scan ({Auth})...",
+                auth is null ? "unauthenticated" : "authenticated");
+
             var response = await _httpClient.GetAsync(url);
             
             if (response.IsSuccessStatusCode)

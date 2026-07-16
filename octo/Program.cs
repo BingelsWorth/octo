@@ -27,6 +27,11 @@ builder.Services.AddSwaggerGen();
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddSingleton<Octo.Services.Admin.SettingsFileWriter>(
     sp => new Octo.Services.Admin.SettingsFileWriter(SettingsFilePath));
+// Running log of fetched songs, stored next to the settings file (same
+// bind-mounted config dir, so it survives restarts).
+builder.Services.AddSingleton(sp => new Octo.Services.Local.DownloadHistoryService(
+    System.IO.Path.Combine(System.IO.Path.GetDirectoryName(SettingsFilePath)!, "downloads-history.json"),
+    sp.GetRequiredService<ILogger<Octo.Services.Local.DownloadHistoryService>>()));
 
 builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 builder.Services.AddProblemDetails();
@@ -70,6 +75,8 @@ builder.Services.AddHttpClient(YouTubeResolver.StreamClientName, c =>
 });
 builder.Services.AddSingleton<ExternalIdRegistry>();
 builder.Services.AddSingleton<RadioQueueStore>();
+builder.Services.AddSingleton<Octo.Services.Subsonic.NavidromeIdentityService>();
+builder.Services.AddSingleton<Octo.Services.Subsonic.SubsonicDiscoveryService>();
 builder.Services.AddSingleton<Octo.Services.Metadata.DeezerMetadataService>();
 builder.Services.AddSingleton<IMusicMetadataService, SoulseekMetadataService>();
 builder.Services.AddSingleton<IDownloadService, SoulseekDownloadService>();
@@ -104,6 +111,50 @@ builder.Services.AddCors(options =>
 });
 
 var app = builder.Build();
+
+// First-run automation (best-effort, background). Octo is an accessory to an
+// existing Navidrome, so it self-configures what it can: if no upstream URL is
+// set, scan the LAN and adopt the server when exactly one is found; then detect
+// the music folder from it. Anything ambiguous (several servers, none found) is
+// left for the dashboard so we never silently point at the wrong server.
+_ = Task.Run(async () =>
+{
+    var sp = app.Services;
+    var log = sp.GetRequiredService<ILogger<Program>>();
+    try
+    {
+        var subOpts = sp.GetRequiredService<Microsoft.Extensions.Options.IOptionsMonitor<Octo.Models.Settings.SubsonicSettings>>();
+        if (string.IsNullOrWhiteSpace(subOpts.CurrentValue.Url))
+        {
+            var servers = await sp.GetRequiredService<Octo.Services.Subsonic.SubsonicDiscoveryService>().ScanAsync();
+            if (servers.Count == 1)
+            {
+                sp.GetRequiredService<Octo.Services.Admin.SettingsFileWriter>().Merge(
+                    new System.Text.Json.Nodes.JsonObject
+                    {
+                        ["Subsonic"] = new System.Text.Json.Nodes.JsonObject { ["Url"] = servers[0].Url }
+                    });
+                // The URL is a restart-required setting (services bind it via IOptions
+                // at startup), so restart cleanly to apply it. A supervised deploy
+                // (compose restart policy / systemd) brings Octo straight back, now
+                // with the URL loaded; on next boot the URL is set so this is skipped.
+                log.LogInformation("First-run: auto-configured Navidrome URL -> {Url} ({Type} {Ver}). Restarting to apply.",
+                    servers[0].Url, servers[0].Type, servers[0].ServerVersion);
+                sp.GetRequiredService<IHostApplicationLifetime>().StopApplication();
+                return;
+            }
+            else if (servers.Count > 1)
+                log.LogInformation("First-run: {N} servers found; pick one in the dashboard.", servers.Count);
+            else
+                log.LogInformation("First-run: no Navidrome auto-detected; set the URL in the dashboard.");
+        }
+    }
+    catch (Exception ex) { log.LogWarning("First-run server auto-detect failed: {Msg}", ex.Message); }
+
+    // Detect the music folder from whatever URL we now have (configured or adopted).
+    await sp.GetRequiredService<Octo.Services.Subsonic.NavidromeIdentityService>()
+        .DetectMusicFolderAsync(force: true);
+});
 
 app.UseExceptionHandler(_ => { });
 
