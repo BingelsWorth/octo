@@ -89,6 +89,40 @@ public class SoulseekMetadataService : IMusicMetadataService
         });
     }
 
+    // Cap Deezer calls per search so a big result set (Feishin requests up to 200)
+    // does not add seconds of latency or trip Deezer's rate limit. The visible top
+    // of the list gets real data; the rest keep the 180s fallback. Cached, so a
+    // repeat search fills in more instantly.
+    private const int SearchEnrichLimit = 60;
+
+    public async Task EnrichExternalSongsAsync(List<Song> songs, CancellationToken ct = default)
+    {
+        var sem = new SemaphoreSlim(8);
+        var tasks = songs.Where(s => !s.IsLocal).Take(SearchEnrichLimit).Select(async song =>
+        {
+            await sem.WaitAsync(ct);
+            try
+            {
+                var meta = await _deezer.EnrichTrackAsync(song.Artist, song.Title, includeYear: false, ct: ct);
+                if (meta is null) return;
+                if (meta.Duration is int d && d > 0) song.Duration = d;
+                if (!string.IsNullOrWhiteSpace(meta.AlbumTitle)) song.Album = meta.AlbumTitle;
+                if (meta.Year is int y) song.Year = y;
+
+                // Reflect onto the shared routing so getSong stays consistent.
+                var routing = _idRegistry.Lookup(song.Id);
+                if (routing != null)
+                {
+                    if (meta.Duration is int rd && rd > 0) routing.Duration = rd;
+                    if (!string.IsNullOrWhiteSpace(meta.AlbumTitle)) routing.Album = meta.AlbumTitle;
+                }
+            }
+            catch { /* best-effort; a miss just leaves the 180s fallback */ }
+            finally { sem.Release(); }
+        });
+        await Task.WhenAll(tasks);
+    }
+
     /// <summary>
     /// Fire-and-forget background prewarm: resolve the YouTube videoId (and via
     /// shim's automatic prefetch, the stream URL) for the first <paramref name="topN"/>

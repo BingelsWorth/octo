@@ -14,7 +14,7 @@ namespace Octo.Services.Metadata;
 /// </summary>
 public class DeezerMetadataService
 {
-    public record TrackMeta(string? AlbumTitle, string? AlbumCoverUrl, int? Year,
+    public record TrackMeta(string? AlbumTitle, string? AlbumCoverUrl, int? Year, int? Duration,
         string? ArtistName, string? ArtistImageUrl);
     public record ArtistMeta(string? Name, string? ImageUrl);
 
@@ -40,8 +40,10 @@ public class DeezerMetadataService
         return c;
     }
 
-    /// <summary>Resolve "artist + title" to the real album + artist (name, art, year).</summary>
-    public async Task<TrackMeta?> EnrichTrackAsync(string? artist, string? title, CancellationToken ct = default)
+    /// <summary>Resolve "artist + title" to the real album + artist (name, art, year).
+    /// Pass includeYear=false to skip the extra album-detail call (bulk enrichment
+    /// wants duration + album fast; the year is fetched lazily by the album view).</summary>
+    public async Task<TrackMeta?> EnrichTrackAsync(string? artist, string? title, bool includeYear = true, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(artist) && string.IsNullOrWhiteSpace(title)) return null;
         var key = $"{artist}|{title}".ToLowerInvariant();
@@ -68,8 +70,10 @@ public class DeezerMetadataService
                     artName = Str(art, "name");
                     artImg = Str(art, "picture_xl") ?? Str(art, "picture_medium");
                 }
-                var year = albId > 0 ? await AlbumYearAsync(albId, ct) : null;
-                meta = new TrackMeta(albTitle, cover, year, artName, artImg);
+                int? duration = t.TryGetProperty("duration", out var du) && du.ValueKind == JsonValueKind.Number
+                    ? du.GetInt32() : null;
+                var year = includeYear && albId > 0 ? await AlbumYearAsync(albId, ct) : null;
+                meta = new TrackMeta(albTitle, cover, year, duration, artName, artImg);
             }
         }
         catch (Exception ex)

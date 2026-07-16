@@ -336,6 +336,10 @@ public class SubsonicController : ControllerBase
         // song via SoulseekMetadataService — no yt-dlp call until /rest/stream.
         var externalSongs = await BuildExternalSearchResultsAsync(cleanQuery, externalTarget);
 
+        // Fill real duration/album/year so the list stops showing every track at
+        // 3:00 (the placeholder). Bounded + cached; a provider miss keeps 180s.
+        await _metadataService.EnrichExternalSongsAsync(externalSongs);
+
         // Local pass-through. Albums/artists always get the full requested counts;
         // song-side gets the local target.
         var localProxyEndpoint = (Request.Path.Value ?? "").Contains("search2", StringComparison.OrdinalIgnoreCase)
