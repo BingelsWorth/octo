@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sqlite3
 import subprocess
 import threading
 import time
@@ -286,6 +287,72 @@ def _search_with_hint(q: str, duration_hint: int) -> Optional[dict]:
 _META_CACHE_LOCK = threading.Lock()
 _META_CACHE: "OrderedDict[str, dict]" = OrderedDict()
 
+# Persistent duration cache. YouTube is the single source of truth for a track's
+# length, and a resolved "artist - title" -> {video_id, duration} mapping is
+# stable forever, so it is worth surviving process restarts. This is what turns
+# the speed-vs-accuracy tradeoff into "both": once a track is resolved (by a real
+# search or a background warm) its accurate duration is a disk lookup for every
+# future search and play, in BOTH Subsonic and Navidrome modes. The in-memory
+# _META_CACHE stays as a hot front; this is the durable backing store.
+# Mount META_DB_PATH's directory as a volume to also survive container recreation.
+_META_DB_PATH = os.environ.get("META_DB_PATH", "/var/lib/ytshim/meta.db")
+_META_DB_LOCK = threading.Lock()
+
+
+def _norm_q(q: str) -> str:
+    """Normalize a query so trivially-different spellings share a cache row:
+    lowercase and collapse runs of whitespace. The duration hint is deliberately
+    NOT part of the key — a resolved track's YouTube length is what we trust, and
+    a slightly different Deezer hint next time must still hit the same row."""
+    return " ".join(q.lower().split())
+
+
+def _meta_db_init() -> None:
+    try:
+        os.makedirs(os.path.dirname(_META_DB_PATH) or ".", exist_ok=True)
+        with sqlite3.connect(_META_DB_PATH, timeout=5) as c:
+            c.execute("PRAGMA journal_mode=WAL")
+            c.execute(
+                "CREATE TABLE IF NOT EXISTS meta ("
+                "key TEXT PRIMARY KEY, video_id TEXT, title TEXT, "
+                "duration INTEGER, updated REAL)"
+            )
+    except Exception as e:  # a broken db must never take the shim down
+        log.warning("meta db init failed (%s); persistence disabled", e)
+
+
+def _meta_db_get(key: str) -> Optional[dict]:
+    try:
+        with sqlite3.connect(_META_DB_PATH, timeout=5) as c:
+            c.execute("PRAGMA busy_timeout=5000")
+            row = c.execute(
+                "SELECT video_id, title, duration FROM meta WHERE key=?", (key,)
+            ).fetchone()
+        if row and row[0]:
+            return {"video_id": row[0], "title": row[1], "duration": row[2]}
+    except Exception as e:
+        log.warning("meta db get failed: %s", e)
+    return None
+
+
+def _meta_db_put(key: str, payload: dict) -> None:
+    if not payload.get("video_id"):
+        return
+    try:
+        with _META_DB_LOCK, sqlite3.connect(_META_DB_PATH, timeout=5) as c:
+            c.execute("PRAGMA busy_timeout=5000")
+            c.execute(
+                "INSERT OR REPLACE INTO meta(key, video_id, title, duration, updated) "
+                "VALUES(?,?,?,?,?)",
+                (key, payload.get("video_id"), payload.get("title"),
+                 payload.get("duration"), time.time()),
+            )
+    except Exception as e:
+        log.warning("meta db put failed: %s", e)
+
+
+_meta_db_init()
+
 
 @app.get("/meta")
 def meta():
@@ -299,12 +366,20 @@ def meta():
     hint_str = request.args.get("duration", "").strip()
     duration_hint = int(hint_str) if hint_str.isdigit() else None
 
-    key = f"{q.lower()}|{duration_hint or ''}"
+    key = _norm_q(q)
+    # Hot front: exact repeat within this process.
     with _META_CACHE_LOCK:
         c = _META_CACHE.get(key)
         if c is not None:
             _META_CACHE.move_to_end(key)
             return jsonify(**c)
+    # Durable backing: resolved in a past search/warm, possibly a past process.
+    persisted = _meta_db_get(key)
+    if persisted is not None:
+        with _META_CACHE_LOCK:
+            _META_CACHE[key] = persisted
+            _META_CACHE.move_to_end(key)
+        return jsonify(**persisted)
 
     if duration_hint is not None:
         out = _run([f"ytsearch5:{q}", "--flat-playlist", "--print", "%(.{id,title,duration})j"],
@@ -342,6 +417,7 @@ def meta():
             _META_CACHE.move_to_end(key)
             while len(_META_CACHE) > _SEARCH_CACHE_MAX:
                 _META_CACHE.popitem(last=False)
+        _meta_db_put(key, payload)  # persist so it survives restarts, for both modes
     return jsonify(**payload)
 
 
