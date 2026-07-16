@@ -11,33 +11,33 @@
  */
 
 :root {
-  /* Surfaces */
-  --bg-0: #0b0d10;        /* page */
-  --bg-1: #111418;        /* sidebar */
-  --bg-2: #161a20;        /* card */
-  --bg-3: #1c2128;        /* card-hover, input bg */
-  --bg-4: #242a33;        /* input focus, hovered chip */
+  /* Surfaces — near-black base with a faint blue-gray (Winters' Glass) cast */
+  --bg-0: #0c0c0d;        /* page */
+  --bg-1: #0e1012;        /* sidebar */
+  --bg-2: #14181a;        /* card */
+  --bg-3: #191f22;        /* card-hover, input bg */
+  --bg-4: #222a2e;        /* input focus, hovered chip */
 
-  /* Borders */
-  --border:        rgba(255, 255, 255, 0.07);
-  --border-strong: rgba(255, 255, 255, 0.12);
+  /* Borders — the accent, held at low alpha (translucent, not hard lines) */
+  --border:        rgba(151, 177, 185, 0.12);
+  --border-strong: rgba(151, 177, 185, 0.22);
 
-  /* Text */
-  --fg:       #e6e8eb;
-  --fg-soft:  #b8bdc7;
-  --fg-mute:  #8a909a;
-  --fg-faint: #5a606b;
+  /* Text — the signature blue-gray carries secondary/muted */
+  --fg:       #f2f5f6;
+  --fg-soft:  #97b1b9;
+  --fg-mute:  rgba(151, 177, 185, 0.62);
+  --fg-faint: rgba(151, 177, 185, 0.40);
 
-  /* Accents */
-  --accent:        #6366f1;
-  --accent-hover:  #7c7fea;
-  --accent-soft:   rgba(99, 102, 241, 0.15);
-  --accent-ring:   rgba(99, 102, 241, 0.45);
+  /* Accent — Winters' blue-gray */
+  --accent:        #97b1b9;
+  --accent-hover:  #adc4cc;
+  --accent-soft:   rgba(151, 177, 185, 0.14);
+  --accent-ring:   rgba(151, 177, 185, 0.30);
 
   /* Status */
-  --good: #34d399;  --good-glow: rgba(52, 211, 153, 0.18);
-  --bad:  #f87171;  --bad-glow:  rgba(248, 113, 113, 0.18);
-  --warn: #fbbf24;  --warn-glow: rgba(251, 191, 36, 0.18);
+  --good: #22c55e;  --good-glow: rgba(34, 197, 94, 0.16);
+  --bad:  #ef4444;  --bad-glow:  rgba(239, 68, 68, 0.16);
+  --warn: #eab308;  --warn-glow: rgba(234, 179, 8, 0.16);
 
   /* Radii / motion */
   --r-1: 6px; --r-2: 8px; --r-3: 12px;
@@ -130,7 +130,7 @@ img { display: block; }
   /* If the logo's a transparent PNG, sit it on a subtle gradient so it
      doesn't disappear into the sidebar background on lighter palettes. */
   background:
-    radial-gradient(circle at 30% 30%, rgba(99,102,241,0.22), transparent 70%),
+    radial-gradient(circle at 30% 30%, rgba(151,177,185,0.22), transparent 70%),
     var(--bg-3);
   padding: 2px;
 }
@@ -206,7 +206,7 @@ img { display: block; }
   display: none;
 }
 .sidebar-nav-badge.bad   { display: inline; background: var(--bad-glow);  color: var(--bad); }
-.sidebar-nav-badge.good  { display: inline; background: rgba(52,211,153,0.15); color: var(--good); }
+.sidebar-nav-badge.good  { display: inline; background: rgba(34,197,94,0.15); color: var(--good); }
 
 .sidebar-footer {
   padding: 12px;
@@ -216,9 +216,9 @@ img { display: block; }
 /* ─── Content ────────────────────────────────────────────────── */
 .content {
   padding: 56px 64px 96px;
-  max-width: 960px;
+  max-width: 920px;
   width: 100%;
-  margin: 0;
+  margin: 0 auto;
   overflow-x: hidden;
 }
 
@@ -275,7 +275,8 @@ section[data-pane].active { display: block; }
 }
 .btn-primary {
   background: var(--accent);
-  color: white;
+  color: #0c0c0d;
+  font-weight: 600;
 }
 .btn-primary:hover { background: var(--accent-hover); }
 .btn-primary:active { transform: translateY(0.5px); }
@@ -373,13 +374,21 @@ section[data-pane].active { display: block; }
 .status-meta-time  { font-variant-numeric: tabular-nums; }
 
 /* ─── Settings card ──────────────────────────────────────────── */
+/* Winters' Glass surface: a faint accent-tinted panel over the dark page, a
+   1px translucent accent border, and a soft inset top-highlight for the bevel.
+   No outer glow — depth comes from the inset light edge, not a halo. */
 .settings-card,
 .info-card {
-  background: var(--bg-2);
+  background:
+    linear-gradient(var(--accent-soft), var(--accent-soft)),
+    var(--bg-2);
   border: 1px solid var(--border);
   border-radius: var(--r-3);
   padding: 32px 36px;
   margin-bottom: 24px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    var(--elev-1);
 }
 .settings-card-title,
 .info-card-title {
@@ -480,7 +489,7 @@ section[data-pane].active { display: block; }
 .field select {
   appearance: none;
   background-image:
-    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'><path d='M3 4.5l3 3 3-3' stroke='%238a909a' stroke-width='1.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'><path d='M3 4.5l3 3 3-3' stroke='%2397b1b9' stroke-width='1.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
   background-repeat: no-repeat;
   background-position: right 12px center;
   padding-right: 32px;
@@ -696,3 +705,231 @@ section[data-pane].active { display: block; }
   .page-header { flex-direction: column; align-items: stretch; gap: 8px; }
   .field-row { grid-template-columns: 1fr; }
 }
+
+/* Server detection (Subsonic URL field) */
+.field-inline { display: flex; gap: 8px; align-items: stretch; }
+.field-inline input { flex: 1 1 auto; min-width: 0; }
+.field-inline .btn { flex: 0 0 auto; white-space: nowrap; }
+.detect-result {
+  margin-top: 8px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--fg-mute);
+}
+.detect-result code { font-size: 12px; }
+.detect-list { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.detect-pick { justify-content: space-between; text-align: left; }
+.detect-tag { color: var(--fg-mute); font-size: 12px; }
+
+/* Inline notice banner (e.g. discovery-off warning) */
+.notice {
+  padding: 12px 14px;
+  border-radius: var(--r-2);
+  font-size: 13px;
+  line-height: 1.55;
+  margin-bottom: 16px;
+  border: 1px solid var(--border);
+  background: var(--bg-2);
+}
+.notice a { color: var(--accent-hover); }
+.notice-warn {
+  border-color: rgba(251, 191, 36, 0.35);
+  background: rgba(251, 191, 36, 0.08);
+  color: var(--fg-soft);
+}
+.notice-warn strong { color: var(--warn); }
+
+/* Setup callout — "point your apps at Octo" (Status pane) */
+.callout {
+  border-radius: var(--r-3);
+  padding: 20px 22px;
+  margin-bottom: 32px;
+  border: 1px solid var(--border);
+  background:
+    linear-gradient(var(--accent-soft), var(--accent-soft)),
+    var(--bg-2);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+.callout-accent { border-color: var(--accent-soft); border-left: 2px solid var(--accent); }
+.callout-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--fg);
+  margin-bottom: 8px;
+}
+.callout p { margin: 0 0 10px; color: var(--fg-soft); font-size: 13.5px; line-height: 1.6; }
+.callout p:last-child { margin-bottom: 0; }
+.callout strong { color: var(--fg); }
+.callout-fine { color: var(--fg-mute) !important; font-size: 12.5px !important; }
+.callout-address {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 12px 0;
+}
+.callout-address code {
+  font-size: 14px;
+  padding: 8px 12px;
+  background: var(--bg-0);
+  border: 1px solid var(--border);
+  color: var(--accent-hover);
+  letter-spacing: 0.01em;
+}
+
+/* ══════════════════════════════════════════════════════════════ */
+/*  Settings design system (StreamNook "Winters' Glass" patterns)   */
+/*  Section header ABOVE a faint slab card; horizontal rows with     */
+/*  info on the left and the control on the right; sliding toggles   */
+/*  and segmented controls instead of checkboxes and dropdowns.      */
+/* ══════════════════════════════════════════════════════════════ */
+.set-section { margin-bottom: 30px; }
+.set-head { padding: 0 4px 10px; }
+.set-title {
+  margin: 0;
+  font-size: 12px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.13em;
+  color: var(--fg);
+}
+.set-desc { margin: 4px 0 0; font-size: 12px; color: var(--fg-mute); line-height: 1.5; }
+
+/* Faint slab card — depth from the fill + hairlines, not a heavy border. */
+.set-card {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border);
+  border-radius: var(--r-3);
+  overflow: hidden;
+}
+
+.set-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 15px 18px;
+  transition: background var(--t-fast);
+}
+.set-row:hover { background: rgba(255, 255, 255, 0.035); }
+.set-row + .set-row { border-top: 1px solid rgba(151, 177, 185, 0.08); }
+.set-row.stack { flex-direction: column; align-items: stretch; gap: 12px; }
+
+.set-info { min-width: 0; }
+.set-info-t { font-size: 13px; font-weight: 500; color: var(--fg); }
+.set-info-d { margin-top: 3px; font-size: 12px; color: var(--fg-soft); line-height: 1.5; max-width: 52ch; }
+.set-opt { color: var(--fg-faint); font-weight: 400; }
+.set-ctrl { flex-shrink: 0; display: flex; align-items: center; gap: 8px; }
+
+.set-input {
+  width: 100%;
+  background: var(--bg-3);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: var(--r-2);
+  padding: 10px 13px;
+  font-size: 13.5px;
+  font-variant-numeric: tabular-nums;
+  outline: none;
+  transition: border-color var(--t-fast), box-shadow var(--t-fast);
+}
+.set-input::placeholder { color: var(--fg-faint); }
+.set-input:hover { border-color: var(--border-strong); }
+.set-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring); }
+.set-inline { display: flex; gap: 8px; }
+.set-inline .set-input { flex: 1 1 auto; min-width: 0; }
+.set-grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+/* ── Sliding toggle switch ── */
+.switch { position: relative; display: inline-block; width: 42px; height: 24px; flex-shrink: 0; cursor: pointer; }
+.switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+.sw-track {
+  position: absolute; inset: 0; border-radius: 999px;
+  background: rgba(151, 177, 185, 0.18);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.3);
+  transition: background var(--t-med);
+}
+.sw-thumb {
+  position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%;
+  background: #cdd8dc;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+  transition: transform 200ms cubic-bezier(.34, 1.4, .5, 1), background var(--t-med);
+}
+.switch input:checked ~ .sw-track { background: var(--accent); }
+.switch input:checked ~ .sw-thumb { transform: translateX(18px); background: #0c0c0d; }
+.switch input:focus-visible ~ .sw-track { outline: 2px solid var(--accent-hover); outline-offset: 2px; }
+
+/* ── Segmented control (recessed track + sliding thumb) ── */
+.seg {
+  position: relative; display: inline-flex; gap: 2px; padding: 3px; border-radius: 9px;
+  background: rgba(151, 177, 185, 0.06);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.32), inset 0 0 0 1px rgba(151, 177, 185, 0.12);
+}
+.seg-thumb {
+  position: absolute; top: 3px; bottom: 3px; border-radius: 7px;
+  background: rgba(151, 177, 185, 0.16);
+  box-shadow: 0 1px 1px rgba(0, 0, 0, 0.22), inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+  transition: left 280ms cubic-bezier(.34, 1.4, .5, 1), width 280ms cubic-bezier(.34, 1.4, .5, 1), opacity 140ms;
+  z-index: 0; opacity: 0;
+}
+.seg button {
+  position: relative; z-index: 1; border: none; background: transparent; cursor: pointer;
+  font: inherit; font-size: 12.5px; font-weight: 500; padding: 6px 13px; border-radius: 7px;
+  color: var(--fg-mute); transition: color var(--t-fast); white-space: nowrap;
+}
+.seg button:hover { color: var(--fg-soft); }
+.seg button.active { color: var(--fg); }
+
+/* Save bar as a proper footer inside the slab card (rows have no padding of
+   their own, so the injected .form-actions needs its own to line up). */
+.set-card .form-actions {
+  margin-top: 0;
+  padding: 13px 18px;
+  border-top: 1px solid rgba(151, 177, 185, 0.10);
+  background: rgba(151, 177, 185, 0.03);
+  gap: 14px;
+}
+.set-card .form-actions .btn-primary {
+  padding: 7px 18px;
+}
+
+/* ── Fetched songs (download log) ── */
+.dl-list {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border);
+  border-radius: var(--r-3);
+  overflow: hidden;
+}
+.dl-empty { padding: 40px 20px; text-align: center; color: var(--fg-mute); font-size: 13.5px; }
+.dl-item {
+  display: flex; align-items: center; gap: 14px;
+  padding: 12px 16px;
+  transition: background var(--t-fast);
+}
+.dl-item:hover { background: rgba(255, 255, 255, 0.035); }
+.dl-item + .dl-item { border-top: 1px solid rgba(151, 177, 185, 0.08); }
+.dl-art {
+  width: 46px; height: 46px; border-radius: var(--r-2); flex-shrink: 0;
+  object-fit: cover; background: var(--bg-3); border: 1px solid var(--border);
+}
+.dl-art-ph {
+  background:
+    radial-gradient(circle at 35% 30%, rgba(151,177,185,0.22), transparent 70%),
+    var(--bg-3);
+}
+.dl-main { min-width: 0; flex: 1; }
+.dl-title { font-size: 13.5px; font-weight: 500; color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dl-dash { color: var(--fg-faint); }
+.dl-path {
+  font-family: var(--mono, ui-monospace, "SF Mono", Menlo, Consolas, monospace);
+  font-size: 11.5px; color: var(--fg-mute);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  margin-top: 3px; direction: rtl; text-align: left;
+}
+.dl-side { flex-shrink: 0; display: flex; flex-direction: column; align-items: flex-end; gap: 5px; }
+.dl-tags { display: flex; align-items: center; gap: 7px; }
+.dl-badge {
+  font-size: 10px; font-weight: 700; letter-spacing: 0.04em;
+  padding: 2px 7px; border-radius: var(--r-1); text-transform: uppercase;
+}
+.dl-badge.flac { background: rgba(34, 197, 94, 0.14); color: var(--good); }
+.dl-badge.mp3  { background: rgba(151, 177, 185, 0.14); color: var(--accent-hover); }
+.dl-source { font-size: 12px; color: var(--fg-soft); }
+.dl-sub { font-size: 11.5px; color: var(--fg-mute); font-variant-numeric: tabular-nums; }
