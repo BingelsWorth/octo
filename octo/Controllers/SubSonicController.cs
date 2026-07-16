@@ -1610,6 +1610,42 @@ public class SubsonicController : ControllerBase
     // .NET 9 + Static Web Assets configurations), we don't accidentally turn
     // /admin/admin.css into a Navidrome HTML response.
     [HttpGet, HttpPost]
+    // OpenSubsonic reportPlayback: Feishin pings this on play-start and during
+    // playback (176 hits in one session). For external ids Navidrome has no such
+    // media and returns an error, so we ack with ok; local ids relay through so
+    // Navidrome's now-playing stays accurate.
+    [HttpGet, HttpPost]
+    [Route("rest/reportPlayback")]
+    [Route("rest/reportPlayback.view")]
+    public async Task<IActionResult> ReportPlayback()
+    {
+        var parameters = await ExtractAllParameters();
+        var format = parameters.GetValueOrDefault("f", "xml");
+        var mediaId = parameters.GetValueOrDefault("mediaId", parameters.GetValueOrDefault("id", ""));
+        var (isExternal, _, _) = _localLibraryService.ParseSongId(mediaId);
+
+        if (!isExternal && !string.IsNullOrEmpty(mediaId))
+        {
+            var relay = await _proxyService.RelaySafeAsync("rest/reportPlayback", parameters);
+            if (relay.Success && relay.Body != null)
+                return File(relay.Body, relay.ContentType ?? $"application/{format}");
+        }
+        return _responseBuilder.CreateResponse(format, "reportPlayback", new { });
+    }
+
+    // Octo has no jukebox device. Relaying surfaced a misleading "Error
+    // connecting to Subsonic server"; return a clean, plain "not supported" so
+    // the client just disables jukebox mode instead of logging a scary error.
+    [HttpGet, HttpPost]
+    [Route("rest/jukeboxControl")]
+    [Route("rest/jukeboxControl.view")]
+    public async Task<IActionResult> JukeboxControl()
+    {
+        var parameters = await ExtractAllParameters();
+        var format = parameters.GetValueOrDefault("f", "xml");
+        return _responseBuilder.CreateError(format, 0, "Jukebox is not supported");
+    }
+
     // Album/artist "info" panels. For external tracks these used to fall through
     // to Navidrome (which has no such id) and return "data not found" — the error
     // spam a client logs per row. Now they return a valid response with real
