@@ -7,6 +7,12 @@ on:
     types: [opened, synchronize, reopened]
     branches: [main]
 
+# Superseded PR pushes are pointless to finish, so cancel those. Never cancel on
+# main: a run there is the record of whether that commit is good.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   DOTNET_VERSION: "9.0.x"
 
@@ -16,10 +22,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v6
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
