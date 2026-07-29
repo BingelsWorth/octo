@@ -172,6 +172,9 @@ public class AdminController : ControllerBase
             {
                 ["ConfigFilePath"] = _settings.FilePath,
                 ["ConfigFileExists"] = System.IO.File.Exists(_settings.FilePath),
+                // So a bug report can name a build. Comes from <InformationalVersion>
+                // in octo.csproj, which is bumped when a release is tagged.
+                ["Version"] = OctoVersion,
             }
         };
         return new JsonResult(resp);
@@ -495,4 +498,16 @@ public class AdminController : ControllerBase
     }
 
     private record ServiceProbe(bool Ok, string Detail);
+
+    /// <summary>The release this build came from, e.g. "2026.07.29". Falls back to the
+    /// assembly version if the informational version was not stamped.</summary>
+    private static string OctoVersion =>
+        typeof(AdminController).Assembly
+            .GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
+            .OfType<System.Reflection.AssemblyInformationalVersionAttribute>()
+            .FirstOrDefault()?.InformationalVersion
+            // .NET appends "+<commit sha>" to the informational version; trim it.
+            ?.Split('+')[0]
+        ?? typeof(AdminController).Assembly.GetName().Version?.ToString()
+        ?? "unknown";
 }

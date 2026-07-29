@@ -98,6 +98,20 @@ git pull && ./install.sh
 
 Re-running the installer keeps your existing answers.
 
+Octo builds from source, so `git pull` is what actually updates it. `docker compose pull` only refreshes slskd.
+
+### Which version am I on
+
+Releases are dated, so `2026.07.29` is the release cut on that day. Your running version is shown under **About** in the admin dashboard, and it is the single most useful thing to include in a bug report.
+
+To pin to a release instead of tracking `main`:
+
+```bash
+git checkout 2026.07.29 && ./install.sh
+```
+
+Prebuilt multi-arch images are also published to `ghcr.io/winters27/octo`, tagged `latest`, the release date, and the commit sha.
+
 ## Admin dashboard
 
 `http://<your-host>:5274/admin`

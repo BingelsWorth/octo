@@ -118,6 +118,10 @@ async function loadSettings() {
   if (cfgPath && currentSettings?._meta?.ConfigFilePath) {
     cfgPath.textContent = currentSettings._meta.ConfigFilePath;
   }
+  const version = document.getElementById('meta-version');
+  if (version && currentSettings?._meta?.Version) {
+    version.textContent = currentSettings._meta.Version;
+  }
   const slskdLink = document.getElementById('slskd-link');
   if (slskdLink) {
     const here = new URL(location.href);
