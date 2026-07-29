@@ -41,7 +41,12 @@ public interface ILocalLibraryService
     /// <summary>
     /// Triggers a Subsonic library scan
     /// </summary>
-    Task<bool> TriggerLibraryScanAsync();
+    /// <param name="force">
+    /// Bypass the debounce. Needed when a caller must guarantee the scan actually runs,
+    /// e.g. after each track of an album download so the album fills in progressively
+    /// and the final tracks are never left stranded by a swallowed trigger.
+    /// </param>
+    Task<bool> TriggerLibraryScanAsync(bool force = false);
     
     /// <summary>
     /// Gets the current scan status

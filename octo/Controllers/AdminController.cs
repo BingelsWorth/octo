@@ -131,6 +131,11 @@ public class AdminController : ControllerBase
                 ["StorageMode"] = subsonic.StorageMode.ToString(),
                 ["DownloadMode"] = subsonic.DownloadMode.ToString(),
                 ["DownloadOnStar"] = subsonic.DownloadOnStar,
+                ["DownloadAlbumOnStar"] = subsonic.DownloadAlbumOnStar,
+                // These two are rendered by the dashboard but were missing here, so their
+                // fields never pre-filled with the saved value.
+                ["DownloadSource"] = subsonic.DownloadSource.ToString(),
+                ["AutoDetectDownloadPath"] = subsonic.AutoDetectDownloadPath,
                 ["FolderStructure"] = subsonic.FolderStructure.ToString(),
                 ["UseLocalStaging"] = subsonic.UseLocalStaging,
                 ["ExplicitFilter"] = subsonic.ExplicitFilter.ToString(),
@@ -243,6 +248,9 @@ public class AdminController : ControllerBase
                 ["StorageMode"] = subsonic.StorageMode.ToString(),
                 ["DownloadMode"] = subsonic.DownloadMode.ToString(),
                 ["DownloadOnStar"] = subsonic.DownloadOnStar,
+                ["DownloadAlbumOnStar"] = subsonic.DownloadAlbumOnStar,
+                ["DownloadSource"] = subsonic.DownloadSource.ToString(),
+                ["AutoDetectDownloadPath"] = subsonic.AutoDetectDownloadPath,
                 ["FolderStructure"] = subsonic.FolderStructure.ToString(),
                 ["UseLocalStaging"] = subsonic.UseLocalStaging,
                 ["ExplicitFilter"] = subsonic.ExplicitFilter.ToString(),
@@ -342,7 +350,9 @@ public class AdminController : ControllerBase
         var keys = new[]
         {
             "Subsonic:Url", "Subsonic:StorageMode", "Subsonic:DownloadMode",
-            "Subsonic:DownloadOnStar", "Subsonic:FolderStructure",
+            "Subsonic:DownloadOnStar", "Subsonic:DownloadAlbumOnStar",
+            "Subsonic:DownloadSource", "Subsonic:AutoDetectDownloadPath",
+            "Subsonic:FolderStructure",
             "Subsonic:UseLocalStaging", "Subsonic:ExplicitFilter",
             "Subsonic:CacheDurationHours", "Subsonic:EnableExternalPlaylists",
             "Subsonic:PlaylistsDirectory",

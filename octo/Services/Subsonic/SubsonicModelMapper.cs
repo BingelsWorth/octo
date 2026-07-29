@@ -136,9 +136,22 @@ public class SubsonicModelMapper
             .Concat(externalResult.Songs.Select(s => _responseBuilder.ConvertSongToJson(s)))
             .ToList();
         
-        // Merge albums with playlists (playlists appear as albums with genre "Playlist")
+        // Albums, deduplicated by artist+name so an album you own is not listed twice.
+        // Playlists follow, appearing as albums with genre "Playlist".
+        var localAlbumKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var album in localAlbums)
+        {
+            if (album is not Dictionary<string, object> dict) continue;
+            dict.TryGetValue("artist", out var artistObj);
+            dict.TryGetValue("name", out var nameObj);
+            var key = AlbumKey(artistObj?.ToString(), nameObj?.ToString());
+            if (key is not null) localAlbumKeys.Add(key);
+        }
+
         var mergedAlbums = localAlbums
-            .Concat(externalResult.Albums.Select(a => _responseBuilder.ConvertAlbumToJson(a)))
+            .Concat(externalResult.Albums
+                .Where(a => AlbumKey(a.Artist, a.Title) is not string k || !localAlbumKeys.Contains(k))
+                .Select(a => _responseBuilder.ConvertAlbumToJson(a)))
             .Concat(externalPlaylists.Select(p => ConvertPlaylistToAlbumJson(p)))
             .ToList();
         
@@ -198,15 +211,20 @@ public class SubsonicModelMapper
             }
         }
         
-        // Albums
+        // Albums, deduplicated by artist+name so an album you own is not listed twice.
+        var localAlbumKeysXml = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var mergedAlbums = new List<object>();
         foreach (var album in localAlbums.Cast<XElement>())
         {
+            var key = AlbumKey(album.Attribute("artist")?.Value, album.Attribute("name")?.Value);
+            if (key is not null) localAlbumKeysXml.Add(key);
             album.Name = ns + "album";
             mergedAlbums.Add(album);
         }
         foreach (var album in externalResult.Albums)
         {
+            var key = AlbumKey(album.Artist, album.Title);
+            if (key is not null && localAlbumKeysXml.Contains(key)) continue;
             mergedAlbums.Add(_responseBuilder.ConvertAlbumToXml(album, ns));
         }
         // Add playlists as albums
@@ -230,6 +248,11 @@ public class SubsonicModelMapper
         return (mergedSongs, mergedAlbums, mergedArtists);
     }
     
+    /// <summary>Dedup key for an album. Null when there is not enough to compare on,
+    /// which means "never treat this as a duplicate".</summary>
+    private static string? AlbumKey(string? artist, string? name)
+        => string.IsNullOrWhiteSpace(name) ? null : $"{artist?.Trim()}|{name.Trim()}";
+
     /// <summary>
     /// Converts an ExternalPlaylist to a JSON object representing an album.
     /// Playlists are represented as albums with genre "Playlist" and artist "🎵 {Provider} {Curator}".

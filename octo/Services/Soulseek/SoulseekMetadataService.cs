@@ -220,8 +220,48 @@ public class SoulseekMetadataService : IMusicMetadataService
         return Task.WhenAll(tasks);
     }
 
-    public Task<List<Album>> SearchAlbumsAsync(string query, int limit = 20)
-        => Task.FromResult(new List<Album>());
+    public async Task<List<Album>> SearchAlbumsAsync(string query, int limit = 20)
+    {
+        if (string.IsNullOrWhiteSpace(query) || limit <= 0) return new List<Album>();
+
+        var hits = await _deezer.SearchAlbumsAsync(query, limit);
+        var albums = new List<Album>(hits.Count);
+
+        foreach (var hit in hits)
+        {
+            // The registry id is the external id everywhere: getAlbum, getCoverArt and
+            // star all round-trip through it. The Deezer id rides along on the routing
+            // so album detail can fetch the exact tracklist without a name lookup.
+            var albumId = _idRegistry.Register(new SoulseekRouting
+            {
+                Kind = RoutingKind.Album,
+                Artist = hit.Artist,
+                Album = hit.Title,
+                ExternalAlbumId = hit.DeezerId,
+            });
+            var artistId = _idRegistry.Register(new SoulseekRouting
+            {
+                Kind = RoutingKind.Artist,
+                Artist = hit.Artist,
+            });
+
+            albums.Add(new Album
+            {
+                Id = albumId,
+                Title = hit.Title,
+                Artist = hit.Artist,
+                ArtistId = artistId,
+                Year = hit.Year,
+                SongCount = hit.TrackCount,
+                CoverArtUrl = hit.CoverUrl,
+                IsLocal = false,
+                ExternalProvider = ProviderName,
+                ExternalId = albumId,
+            });
+        }
+
+        return albums;
+    }
 
     public Task<List<Artist>> SearchArtistsAsync(string query, int limit = 20)
         => Task.FromResult(new List<Artist>());
@@ -245,7 +285,13 @@ public class SoulseekMetadataService : IMusicMetadataService
             Id = externalId,
             Title = routing.Title ?? "",
             Artist = routing.Artist ?? "",
-            Album = "",
+            // Carried from the routing so an album download tags the album the user
+            // actually hearted rather than whatever Deezer guesses from artist+title,
+            // and keeps its position so the album stays in order.
+            Album = routing.Album ?? "",
+            Track = routing.Track,
+            DiscNumber = routing.DiscNumber,
+            TotalTracks = routing.TotalTracks,
             Duration = routing.Duration,
             IsLocal = false,
             ExternalProvider = ProviderName,
@@ -263,10 +309,21 @@ public class SoulseekMetadataService : IMusicMetadataService
         // Enrich by the track title (the placeholder "album" is the song title) so
         // Deezer returns the REAL album (e.g. "Creep" -> "Pablo Honey"). Degrades
         // to the placeholder name if Deezer misses or is unreachable.
-        var meta = await _deezer.EnrichTrackAsync(routing.Artist, routing.Album ?? routing.Title);
         var artistId = _idRegistry.Register(new SoulseekRouting { Kind = RoutingKind.Artist, Artist = routing.Artist });
 
-        return new Album
+        // Resolve the Deezer album two ways. A search-derived routing already knows the
+        // exact id. One minted from a song row does not, so recover the REAL album name
+        // first (the placeholder is the song title, e.g. "Creep" -> "Pablo Honey") and
+        // look the id up by name.
+        DeezerMetadataService.TrackMeta? meta = null;
+        var deezerAlbumId = routing.ExternalAlbumId;
+        if (string.IsNullOrEmpty(deezerAlbumId))
+        {
+            meta = await _deezer.EnrichTrackAsync(routing.Artist, routing.Album ?? routing.Title);
+            deezerAlbumId = await _deezer.FindAlbumIdAsync(routing.Artist, meta?.AlbumTitle ?? placeholder);
+        }
+
+        var album = new Album
         {
             Id = externalId,
             Title = meta?.AlbumTitle ?? placeholder,
@@ -278,6 +335,64 @@ public class SoulseekMetadataService : IMusicMetadataService
             ExternalProvider = ProviderName,
             ExternalId = externalId,
         };
+
+        if (string.IsNullOrEmpty(deezerAlbumId)) return album;
+
+        var detail = await _deezer.GetAlbumDetailAsync(deezerAlbumId);
+        // An album with no resolvable tracklist must still render, so fall through with
+        // whatever we already have rather than failing the request.
+        if (detail is null) return album;
+
+        album.Title = detail.Title;
+        album.Year = detail.Year ?? album.Year;
+        album.Genre = detail.Genre;
+        album.CoverArtUrl = detail.CoverUrl ?? album.CoverArtUrl;
+        album.SongCount = detail.Tracks.Count;
+        if (!string.IsNullOrWhiteSpace(detail.Artist)) album.Artist = detail.Artist;
+
+        foreach (var track in detail.Tracks)
+        {
+            // Album is carried on the ROUTING as well as the Song. The download path
+            // re-resolves each track by id through GetSongAsync, and without this the
+            // tagger re-derives the album from artist+title alone, which for a well
+            // known single often lands on a greatest-hits record instead of this one.
+            var trackId = _idRegistry.Register(new SoulseekRouting
+            {
+                Kind = RoutingKind.Song,
+                Artist = track.Artist,
+                Title = track.Title,
+                Album = detail.Title,
+                Duration = track.Duration,
+                Track = track.TrackPosition,
+                DiscNumber = track.DiscNumber,
+                TotalTracks = detail.Tracks.Count,
+            });
+
+            album.Songs.Add(new Song
+            {
+                Id = trackId,
+                Title = track.Title,
+                Artist = track.Artist,
+                ArtistId = artistId,
+                Album = detail.Title,
+                AlbumId = externalId,
+                Duration = track.Duration,
+                Track = track.TrackPosition,
+                DiscNumber = track.DiscNumber,
+                Isrc = track.Isrc,
+                Year = detail.Year,
+                Genre = detail.Genre,
+                CoverArtUrl = detail.CoverUrl,
+                CoverArtUrlLarge = detail.CoverUrl,
+                AlbumArtist = detail.Artist,
+                Label = detail.Label,
+                IsLocal = false,
+                ExternalProvider = ProviderName,
+                ExternalId = trackId,
+            });
+        }
+
+        return album;
     }
 
     public async Task<Artist?> GetArtistAsync(string externalProvider, string externalId)
@@ -385,6 +500,23 @@ public class SoulseekRouting
     public string? Title { get; set; }
     public string? Album { get; set; }
     public int? Duration { get; set; }
+
+    /// <summary>Deezer album id, when an album search resolved one. Absent on album
+    /// routings minted from a song row, which fall back to a name lookup.</summary>
+    public string? ExternalAlbumId { get; set; }
+
+    /// <summary>Position within its album. Carried so a track downloaded as part of an
+    /// album keeps its ordering: the download path rebuilds the song from its id alone,
+    /// and without this every track lands untracked and sorts alphabetically.</summary>
+    public int? Track { get; set; }
+
+    /// <summary>Disc within a multi-disc release. Same reasoning as <see cref="Track"/>.</summary>
+    public int? DiscNumber { get; set; }
+
+    /// <summary>Track count of the album this came from. Without it the tagger fills the
+    /// "x of y" denominator from a per-track Deezer search that can match a different
+    /// release, producing nonsense like 5/10 on an 8-track album.</summary>
+    public int? TotalTracks { get; set; }
 
     public bool HasYouTube => !string.IsNullOrEmpty(YouTubeId);
     public bool HasArtistTitle => !string.IsNullOrEmpty(Artist) && !string.IsNullOrEmpty(Title);

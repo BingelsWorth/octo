@@ -37,6 +37,7 @@ Built for:
 - **Search finds music you don't own.** Tap a result to hear it instantly via YouTube preview.
 - **Radio works on every song.** Owned tracks play at full FLAC; missing ones preview from YouTube.
 - **Heart to keep.** Star a previewed song and Octo grabs the FLAC from Soulseek, adds it to your library, and tells Navidrome to rescan. Within a minute, the song is yours forever.
+- **Search and heart whole albums.** Albums you don't own show up in search with real cover art and tracklists. Star one and Octo fetches every track. Downloads run one at a time, so a full album takes a while — turn it off with `DOWNLOAD_ALBUM_ON_STAR=false`.
 
 Plug Octo in front of your Navidrome. Point your Subsonic apps (Feishin, Arpeggi, Narjo, etc.) at Octo instead. Nothing else changes.
 
@@ -200,7 +201,7 @@ The admin UI's "Config sources" tab shows the merged effective value for every k
 ### Folder layouts
 
 - `Flat` *(default)* — `Artist - Title.flac`.
-- `Organized` — `Artist/Title/file.flac`.
+- `Organized` — `Artist/Album/01 - Title.flac`. A track with no known album falls back to its own title as the folder. Existing files are never moved; this only affects new downloads.
 
 ### Subsonic API surface
 
@@ -208,11 +209,12 @@ Octo hijacks these endpoints; everything else proxies to Navidrome unchanged:
 
 | Endpoint | Why |
 |---|---|
-| `search3` | merge local + Last.fm-driven external results |
+| `search3` | merge local + Last.fm-driven external songs and Deezer-driven external albums |
 | `getSimilarSongs2` | radio queue with local-first preference |
 | `stream` | YouTube proxy with Range support, mp4/m4a passthrough |
 | `getCoverArt` | Deezer → iTunes → Last.fm aggregator with Octo watermark |
-| `star` | trigger Soulseek download (multi-peer retry, FLAC) |
+| `getAlbum` | external album tracklists, and fills in tracks you're missing from an album you own |
+| `star` | trigger Soulseek download (multi-peer retry, FLAC), or a whole album |
 | `scrobble` | sliding-window prewarm of next 8 in queue |
 | `getTranscodeDecision` | OpenSubsonic — return direct-play for Octo IDs |
 
@@ -228,6 +230,10 @@ When a song is starred, Octo:
 6. Renames per `FolderStructure` setting and triggers a Navidrome rescan.
 
 Around 30–50% of Soulseek peer requests get rejected ("overwhelmed", queue full, banned). Single-peer-try downloads were too fragile — multi-peer is the difference between "downloads sometimes work" and "downloads reliably work."
+
+Starring an album runs the same process once per track, in sequence.
+
+> **Hearting is "fetch", not "favorite".** Navidrome has never seen Octo's IDs for music you don't own yet, so there is nothing on its side to mark as starred. Once the files land and Navidrome rescans, they become ordinary library tracks — present, but not favorited. Star them again in your app if you want them flagged.
 
 ### Cover art aggregator
 

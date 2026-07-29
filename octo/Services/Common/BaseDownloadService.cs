@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Octo.Models.Domain;
 using Octo.Models.Settings;
 using Octo.Models.Download;
@@ -37,7 +38,11 @@ public abstract class BaseDownloadService : IDownloadService
     protected string DownloadPath => _navIdentity.EffectiveDownloadPath(_configuredDownloadPath);
     protected readonly string CachePath;
     
-    protected readonly Dictionary<string, DownloadInfo> ActiveDownloads = new();
+    // Concurrent because the album walk reads this WITHOUT holding DownloadLock while a
+    // request thread can be writing to it under the lock. Every write used to be lock
+    // guarded and the only unguarded reader was dead code; enabling album downloads makes
+    // that pattern live, and concurrent read+write on Dictionary is undefined.
+    protected readonly ConcurrentDictionary<string, DownloadInfo> ActiveDownloads = new();
     protected readonly SemaphoreSlim DownloadLock = new(1, 1);
     
     /// <summary>
@@ -241,6 +246,14 @@ public abstract class BaseDownloadService : IDownloadService
     /// Example: "ext-deezer-album-123456" -> "123456"
     /// </summary>
     protected abstract string? ExtractExternalIdFromAlbumId(string albumId);
+
+    /// <summary>
+    /// Re-assert any routing state a long-running batch depends on. An album download can
+    /// run for hours while searches keep filling the id registry, so a track's routing can
+    /// be evicted before its turn comes. Ids are a pure hash of the routing fields, so
+    /// re-registering the SAME fields restores the SAME id and is idempotent.
+    /// </summary>
+    protected virtual void EnsureRoutingRegistered(Song track) { }
     
     #endregion
     
@@ -249,7 +262,12 @@ public abstract class BaseDownloadService : IDownloadService
     /// <summary>
     /// Internal method for downloading a song with control over album download triggering
     /// </summary>
-    protected async Task<string> DownloadSongInternalAsync(string externalProvider, string externalId, bool triggerAlbumDownload, CancellationToken cancellationToken = default)
+    /// <param name="forcePermanent">
+    /// Treat this as a permanent download regardless of Cache storage mode. Cache mode
+    /// otherwise skips library registration, the fetched-songs log and the rescan, which
+    /// is wrong for a deliberate "keep this" gesture like hearting an album.
+    /// </param>
+    protected async Task<string> DownloadSongInternalAsync(string externalProvider, string externalId, bool triggerAlbumDownload, CancellationToken cancellationToken = default, bool forcePermanent = false)
     {
         if (externalProvider != ProviderName)
         {
@@ -257,7 +275,7 @@ public abstract class BaseDownloadService : IDownloadService
         }
 
         var songId = $"ext-{externalProvider}-{externalId}";
-        var isCache = SubsonicSettings.StorageMode == StorageMode.Cache;
+        var isCache = !forcePermanent && SubsonicSettings.StorageMode == StorageMode.Cache;
         
         // Acquire lock BEFORE checking existence to prevent race conditions with concurrent requests
         await DownloadLock.WaitAsync(cancellationToken);
@@ -461,6 +479,8 @@ public abstract class BaseDownloadService : IDownloadService
         {
             try
             {
+                EnsureRoutingRegistered(track);
+
                 var existingPath = await LocalLibraryService.GetLocalPathForExternalSongAsync(ProviderName, track.ExternalId!);
                 if (existingPath != null && IOFile.Exists(existingPath))
                 {
@@ -486,7 +506,13 @@ public abstract class BaseDownloadService : IDownloadService
                 }
 
                 Logger.LogInformation("Downloading track '{Title}' from album '{Album}'", track.Title, album.Title);
-                await DownloadSongInternalAsync(ProviderName, track.ExternalId!, triggerAlbumDownload: false, CancellationToken.None);
+                await DownloadSongInternalAsync(ProviderName, track.ExternalId!, triggerAlbumDownload: false, CancellationToken.None, forcePermanent: true);
+
+                // Force a rescan per track so the album fills in progressively in the
+                // client instead of appearing all at once at the end. The per-download
+                // scan inside DownloadSongInternalAsync is debounced, which during a
+                // batch swallows most triggers and can strand the final tracks entirely.
+                await LocalLibraryService.TriggerLibraryScanAsync(force: true);
             }
             catch (Exception ex)
             {
@@ -565,7 +591,13 @@ public abstract class BaseDownloadService : IDownloadService
     /// query (e.g. "No Surprises (Official Video)" -> "No Surprises"). Only used for
     /// the lookup, not the written title, so real "(feat. …)" tags are preserved.</summary>
     private static string StripBracketedJunk(string title)
-        => System.Text.RegularExpressions.Regex.Replace(title ?? string.Empty, @"\s*[\[\(][^\]\)]*[\]\)]", "").Trim();
+    {
+        var stripped = System.Text.RegularExpressions.Regex
+            .Replace(title ?? string.Empty, @"\s*[\[\(][^\]\)]*[\]\)]", "").Trim();
+        // A title that is entirely an annotation ("(Exchange)") strips to nothing, which
+        // would send an empty query to Deezer. Fall back to the original.
+        return stripped.Length == 0 ? (title ?? string.Empty).Trim() : stripped;
+    }
 
     protected async Task WriteMetadataAsync(string filePath, Song song, CancellationToken cancellationToken)
     {

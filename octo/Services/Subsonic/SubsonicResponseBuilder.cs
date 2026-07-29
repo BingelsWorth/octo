@@ -166,7 +166,7 @@ public class SubsonicResponseBuilder
                     new XAttribute("id", album.Id),
                     new XAttribute("name", album.Title),
                     new XAttribute("artist", album.Artist ?? ""),
-                    new XAttribute("songCount", album.SongCount ?? 0),
+                    new XAttribute("songCount", album.Songs.Count > 0 ? album.Songs.Count : (album.SongCount ?? 0)),
                     new XAttribute("year", album.Year ?? 0),
                     new XAttribute("coverArt", album.Id),
                     album.Songs.Select(s => ConvertSongToXml(s, ns))

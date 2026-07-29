@@ -196,11 +196,13 @@ public class LocalLibraryService : ILocalLibraryService
 
     public string GetDownloadDirectory() => _downloadDirectory;
 
-    public async Task<bool> TriggerLibraryScanAsync()
+    public async Task<bool> TriggerLibraryScanAsync(bool force = false)
     {
-        // Debounce: avoid triggering too many successive scans
+        // Debounce: avoid triggering too many successive scans. A forced call skips it —
+        // otherwise the last track of a batch can have its scan swallowed and stay
+        // invisible until some unrelated trigger happens along.
         var now = DateTime.UtcNow;
-        if (now - _lastScanTrigger < _scanDebounceInterval)
+        if (!force && now - _lastScanTrigger < _scanDebounceInterval)
         {
             _logger.LogDebug("Scan debounced - last scan was {Elapsed}s ago", 
                 (now - _lastScanTrigger).TotalSeconds);

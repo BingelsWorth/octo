@@ -52,7 +52,35 @@ public class SoulseekDownloadService : BaseDownloadService
 
     public override Task<bool> IsAvailableAsync() => _slskd.IsReachableAsync();
 
-    protected override string? ExtractExternalIdFromAlbumId(string albumId) => null;
+    // Octo's album ids ARE the external id, so this is identity plus a kind check that
+    // stops a song or artist id being walked as if it were an album.
+    protected override string? ExtractExternalIdFromAlbumId(string albumId)
+        => _idRegistry.Lookup(albumId)?.Kind == RoutingKind.Album ? albumId : null;
+
+    /// <summary>
+    /// Restore an album track's routing if the registry evicted it mid-download.
+    /// The fields here MUST match what SoulseekMetadataService.GetAlbumAsync registered
+    /// (YouTubeId left null, the Song's own Duration) or this hashes to a different id and
+    /// fails to restore anything. Routings are mutated in place elsewhere, so rebuild from
+    /// the Song, which still carries the values used at registration time.
+    /// </summary>
+    protected override void EnsureRoutingRegistered(Song track)
+    {
+        if (string.IsNullOrEmpty(track.ExternalId)) return;
+        if (_idRegistry.Lookup(track.ExternalId) is not null) return;
+
+        _idRegistry.Register(new SoulseekRouting
+        {
+            Kind = RoutingKind.Song,
+            Artist = track.Artist,
+            Title = track.Title,
+            Album = track.Album,
+            Duration = track.Duration,
+            Track = track.Track,
+            DiscNumber = track.DiscNumber,
+            TotalTracks = track.TotalTracks,
+        });
+    }
 
     // =========================================================================
     // Streaming path (every play of an unowned radio track)
@@ -166,7 +194,8 @@ public class SoulseekDownloadService : BaseDownloadService
         var ytTitle  = SanitizeForFs(NormalizeTitle(routing.Title ?? "", routing.Artist ?? "")) ?? "Unknown Title";
         var destWithoutExt = SubsonicSettings.FolderStructure switch
         {
-            Models.Settings.FolderStructure.Organized => Path.Combine(DownloadPath, ytArtist, ytTitle, $"{ytArtist} - {ytTitle}"),
+            // Extension is left empty: the shim appends .mp3 itself.
+            Models.Settings.FolderStructure.Organized => BuildOrganizedPath(routing, ytArtist, ytTitle, ""),
             _ => Path.Combine(DownloadPath, $"{ytArtist} - {ytTitle}"),
         };
 
@@ -267,7 +296,7 @@ public class SoulseekDownloadService : BaseDownloadService
     ///
     /// Layouts (driven by <c>Subsonic__FolderStructure</c>):
     ///   Flat       → <c>{DownloadPath}/{Artist} - {Title}.flac</c>   (no subfolder)
-    ///   Organized  → <c>{DownloadPath}/{Artist}/{Title}/{originalFilename}</c>
+    ///   Organized  → <c>{DownloadPath}/{Artist}/{Album}/{NN - Title}.flac</c>
     ///
     /// Returns the new path, or null if the move failed (caller falls back to
     /// the original path so the song still ends up registered).
@@ -289,7 +318,7 @@ public class SoulseekDownloadService : BaseDownloadService
                 Models.Settings.FolderStructure.Flat
                     => Path.Combine(DownloadPath, $"{artist} - {title}{ext}"),
                 Models.Settings.FolderStructure.Organized
-                    => Path.Combine(DownloadPath, artist, title, Path.GetFileName(currentPath)),
+                    => BuildOrganizedPath(routing, artist, title, ext),
                 _ => currentPath,
             };
 
@@ -321,6 +350,24 @@ public class SoulseekDownloadService : BaseDownloadService
                 SubsonicSettings.FolderStructure, currentPath);
             return null;
         }
+    }
+
+    /// <summary>
+    /// Organized layout: <c>{DownloadPath}/{Artist}/{Album}/{NN - Title}{ext}</c>.
+    ///
+    /// The album folder is what makes a hearted album land as one album on disk. Before
+    /// albums existed Octo only fetched standalone singles, so this used the TRACK title
+    /// as the folder and scattered an album's tracks into a folder each. The routing now
+    /// carries the album, so use it, falling back to the title for a track that genuinely
+    /// has no album (which reproduces the old shape).
+    ///
+    /// Existing files are never moved: this only names the download currently in flight,
+    /// so an upgrade leaves previously-downloaded files exactly where they are.
+    /// </summary>
+    private string BuildOrganizedPath(SoulseekRouting routing, string artist, string title, string ext)
+    {
+        var album = string.IsNullOrWhiteSpace(routing.Album) ? title : routing.Album!;
+        return PathHelper.BuildTrackPath(DownloadPath, artist, album, title, routing.Track, ext);
     }
 
     private static string? SanitizeForFs(string? s)
@@ -389,6 +436,12 @@ public class SoulseekDownloadService : BaseDownloadService
 
         // Collapse runs of whitespace
         t = System.Text.RegularExpressions.Regex.Replace(t, @"\s+", " ").Trim();
+
+        // Some titles ARE an annotation, e.g. Mezzanine's "(Exchange)" or a bare
+        // "(Interlude)". Stripping leaves nothing, which used to surface as an
+        // "Unknown Title" filename and an empty search query. Keep the original.
+        if (t.Length == 0) return (title ?? "").Trim();
+
         return t;
     }
 

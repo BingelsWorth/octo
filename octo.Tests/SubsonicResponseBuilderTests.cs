@@ -212,6 +212,37 @@ public class SubsonicResponseBuilderTests
     }
 
     [Fact]
+    public void CreateAlbumResponse_XmlFormat_DerivesSongCountFromTracklist()
+    {
+        // An external album knows its count from the tracklist, not SongCount. The XML
+        // branch used to report 0 in that case while the JSON branch reported the real
+        // number, so an XML client saw an empty-looking album.
+        var album = new Album
+        {
+            Id = "album123",
+            Title = "Test Album",
+            Artist = "Test Artist",
+            Songs = new List<Song>
+            {
+                new Song { Id = "song1", Title = "Song 1" },
+                new Song { Id = "song2", Title = "Song 2" },
+                new Song { Id = "song3", Title = "Song 3" }
+            }
+        };
+
+        // Act
+        var result = _builder.CreateAlbumResponse("xml", album);
+
+        // Assert
+        var contentResult = Assert.IsType<ContentResult>(result);
+        var doc = XDocument.Parse(contentResult.Content!);
+        var ns = doc.Root!.GetDefaultNamespace();
+        var albumElement = doc.Root!.Element(ns + "album");
+        Assert.NotNull(albumElement);
+        Assert.Equal("3", albumElement!.Attribute("songCount")?.Value);
+    }
+
+    [Fact]
     public void CreateArtistResponse_JsonFormat_ReturnsArtistData()
     {
         // Arrange
