@@ -25,6 +25,7 @@ services:
       Subsonic__StorageMode: ${STORAGE_MODE:-Stream}
       Subsonic__DownloadMode: ${DOWNLOAD_MODE:-Track}
       Subsonic__DownloadOnStar: ${DOWNLOAD_ON_STAR:-true}
+      Subsonic__DownloadAlbumOnStar: ${DOWNLOAD_ALBUM_ON_STAR:-true}
       Subsonic__FolderStructure: ${FOLDER_STRUCTURE:-Flat}
       Subsonic__DownloadSource: ${DOWNLOAD_SOURCE:-Soulseek}
       Subsonic__UseLocalStaging: ${USE_LOCAL_STAGING:-false}

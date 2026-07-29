@@ -178,6 +178,14 @@ public class SubsonicSettings
     /// When enabled in Stream/Cache mode, starring a track triggers permanent download
     /// </summary>
     public bool DownloadOnStar { get; set; } = true;
+
+    /// <summary>
+    /// Auto-download every track when a whole album is starred (default: true)
+    /// Environment variable: DOWNLOAD_ALBUM_ON_STAR
+    /// Works in every storage mode. Downloads run one at a time, so a full album is a
+    /// long job; turn this off to keep song-starring without the larger commitment.
+    /// </summary>
+    public bool DownloadAlbumOnStar { get; set; } = true;
     
     /// <summary>
     /// Folder structure for downloaded tracks (default: Flat)

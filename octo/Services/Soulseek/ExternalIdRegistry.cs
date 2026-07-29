@@ -25,6 +25,18 @@ public class ExternalIdRegistry
     public string Register(SoulseekRouting routing)
     {
         var id = MakeShortId(routing);
+
+        // A song row mints an album routing with no Deezer id (ConvertSongToJson), and it
+        // hashes to the same id as the one an album search already resolved. Registering it
+        // must not erase that id. Best-effort only: this is an optimization, and losing the
+        // race just sends GetAlbumAsync down its cached name-lookup fallback.
+        if (routing.ExternalAlbumId is null
+            && _byId.TryGetValue(id, out var existing)
+            && existing.ExternalAlbumId is not null)
+        {
+            routing.ExternalAlbumId = existing.ExternalAlbumId;
+        }
+
         _byId[id] = routing;
         Touch(id);
         Trim();

@@ -221,6 +221,89 @@ public class SubsonicModelMapperTests
     }
 
     [Fact]
+    public void MergeSearchResults_Json_MergesExternalAlbums()
+    {
+        // Arrange
+        var localAlbums = new List<object>
+        {
+            new Dictionary<string, object> { ["id"] = "local1", ["name"] = "Owned Album", ["artist"] = "Someone" }
+        };
+        var externalResult = new SearchResult
+        {
+            Songs = new List<Song>(),
+            Albums = new List<Album>
+            {
+                new Album { Id = "ext1", Title = "Discovered Album", Artist = "Someone Else" }
+            },
+            Artists = new List<Artist>()
+        };
+
+        // Act
+        var (_, mergedAlbums, _) = _mapper.MergeSearchResults(
+            new List<object>(), localAlbums, new List<object>(), externalResult, new List<ExternalPlaylist>(), true);
+
+        // Assert
+        Assert.Equal(2, mergedAlbums.Count);
+    }
+
+    [Fact]
+    public void MergeSearchResults_Json_DeduplicatesAlbumAgainstLocal()
+    {
+        // An album you already own must not be listed twice, matched case-insensitively.
+        var localAlbums = new List<object>
+        {
+            new Dictionary<string, object> { ["id"] = "local1", ["name"] = "In Rainbows", ["artist"] = "Radiohead" }
+        };
+        var externalResult = new SearchResult
+        {
+            Songs = new List<Song>(),
+            Albums = new List<Album>
+            {
+                new Album { Id = "ext1", Title = "in rainbows", Artist = "radiohead" },
+                new Album { Id = "ext2", Title = "Kid A", Artist = "Radiohead" }
+            },
+            Artists = new List<Artist>()
+        };
+
+        // Act
+        var (_, mergedAlbums, _) = _mapper.MergeSearchResults(
+            new List<object>(), localAlbums, new List<object>(), externalResult, new List<ExternalPlaylist>(), true);
+
+        // Assert: the local one plus only the album that isn't a duplicate.
+        Assert.Equal(2, mergedAlbums.Count);
+    }
+
+    [Fact]
+    public void MergeSearchResults_Xml_DeduplicatesAlbumAgainstLocal()
+    {
+        // Arrange
+        var localAlbums = new List<object>
+        {
+            new XElement("album",
+                new XAttribute("id", "local1"),
+                new XAttribute("name", "In Rainbows"),
+                new XAttribute("artist", "Radiohead"))
+        };
+        var externalResult = new SearchResult
+        {
+            Songs = new List<Song>(),
+            Albums = new List<Album>
+            {
+                new Album { Id = "ext1", Title = "in rainbows", Artist = "radiohead" },
+                new Album { Id = "ext2", Title = "Kid A", Artist = "Radiohead" }
+            },
+            Artists = new List<Artist>()
+        };
+
+        // Act
+        var (_, mergedAlbums, _) = _mapper.MergeSearchResults(
+            new List<object>(), localAlbums, new List<object>(), externalResult, new List<ExternalPlaylist>(), false);
+
+        // Assert
+        Assert.Equal(2, mergedAlbums.Count);
+    }
+
+    [Fact]
     public void MergeSearchResults_Xml_MergesSongsCorrectly()
     {
         // Arrange

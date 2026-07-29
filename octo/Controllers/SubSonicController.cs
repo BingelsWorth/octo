@@ -338,6 +338,13 @@ public class SubsonicController : ControllerBase
         // anywhere in the query), then top up with the canonical artist's top
         // tracks if we're short. Each Last.fm hit becomes an instant placeholder
         // song via SoulseekMetadataService — no yt-dlp call until /rest/stream.
+        // Album discovery runs concurrently with the Last.fm song fan-out so it costs no
+        // serial latency. It needs no Last.fm key (Deezer's catalog is keyless), so albums
+        // still appear for a user who has not set one up.
+        var albumTask = requestedAlbums > 0
+            ? _metadataService.SearchAlbumsAsync(cleanQuery, Math.Min(requestedAlbums, 20))
+            : Task.FromResult(new List<Album>());
+
         var externalSongs = await BuildExternalSearchResultsAsync(cleanQuery, externalTarget);
 
         // Album/art/year from Deezer (fast), then the ACCURATE duration for the top
@@ -362,10 +369,20 @@ public class SubsonicController : ControllerBase
             ? await _metadataService.SearchPlaylistsAsync(cleanQuery, requestedAlbums)
             : new List<ExternalPlaylist>();
 
+        // Degrade to no albums rather than failing the whole search if Deezer is slow,
+        // throttled or unreachable.
+        List<Album> externalAlbums;
+        try { externalAlbums = await albumTask; }
+        catch (Exception ex)
+        {
+            _logger.LogDebug("external album search failed for '{Q}': {M}", cleanQuery, ex.Message);
+            externalAlbums = new List<Album>();
+        }
+
         var externalResult = new SearchResult
         {
             Songs = externalSongs,
-            Albums = new List<Album>(),
+            Albums = externalAlbums,
             Artists = new List<Artist>(),
         };
 
@@ -885,7 +902,9 @@ public class SubsonicController : ControllerBase
                 candidate.Artist.Equals(artistName, StringComparison.OrdinalIgnoreCase) &&
                 candidate.Title.Equals(albumName, StringComparison.OrdinalIgnoreCase))
             {
-                deezerAlbum = await _metadataService.GetAlbumAsync("deezer", candidate.ExternalId!);
+                // The provider must come from the candidate. A hardcoded "deezer" never
+                // matches the metadata service's provider name, so this always returned null.
+                deezerAlbum = await _metadataService.GetAlbumAsync(candidate.ExternalProvider!, candidate.ExternalId!);
                 break;
             }
         }
@@ -900,7 +919,7 @@ public class SubsonicController : ControllerBase
                     (candidate.Title.Contains(albumName, StringComparison.OrdinalIgnoreCase) ||
                      albumName.Contains(candidate.Title, StringComparison.OrdinalIgnoreCase)))
                 {
-                    deezerAlbum = await _metadataService.GetAlbumAsync("deezer", candidate.ExternalId!);
+                    deezerAlbum = await _metadataService.GetAlbumAsync(candidate.ExternalProvider!, candidate.ExternalId!);
                     break;
                 }
             }
@@ -1208,6 +1227,56 @@ public class SubsonicController : ControllerBase
             return _responseBuilder.CreateResponse(format, "starred", new { });
         }
         
+        // Starring a whole album. Subsonic sends the album under albumId, though some
+        // clients reuse id, so accept either.
+        //
+        // Two lookups with different jobs: the REGISTRY decides whether this is an album,
+        // because ParseSongId reports every registry id as a "song" and would otherwise
+        // send an entire album down the single-track download path. ParseSongId still
+        // supplies the provider string.
+        var albumCandidate = !string.IsNullOrEmpty(itemId) ? itemId : parameters.GetValueOrDefault("albumId", "");
+        if (!string.IsNullOrEmpty(albumCandidate)
+            && _idRegistry.Lookup(albumCandidate)?.Kind == RoutingKind.Album)
+        {
+            if (!_subsonicSettings.DownloadAlbumOnStar)
+            {
+                _logger.LogInformation("Starred album {AlbumId} but DownloadAlbumOnStar is off; ignoring", albumCandidate);
+                return _responseBuilder.CreateResponse(format, "starred", new { });
+            }
+
+            // No storage-mode gate here, unlike the song branch. That gate exists because
+            // Permanent mode already downloads a song when it is played; an album star is
+            // a request for tracks the user has NOT played, so it must work in every mode.
+            var albumProviderName = _localLibraryService.ParseSongId(albumCandidate).provider
+                                    ?? SoulseekMetadataService.ProviderName;
+
+            _logger.LogInformation("Starring external album {AlbumId}, triggering full album download", albumCandidate);
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    // Log the size up front: downloads are serialized, so a large album is
+                    // a multi-hour job and the user should be able to see what they started.
+                    var album = await _metadataService.GetAlbumAsync(albumProviderName, albumCandidate);
+                    _logger.LogInformation(
+                        "Album star: '{Title}' by {Artist} has {Count} track(s); downloads run one at a time",
+                        album?.Title, album?.Artist, album?.Songs.Count ?? 0);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug("Could not pre-read album {AlbumId} for logging: {M}", albumCandidate, ex.Message);
+                }
+            });
+
+            // An empty exclude means "download every track". The engine already skips
+            // tracks that are downloaded or in flight and isolates per-track failures.
+            _downloadService.DownloadRemainingAlbumTracksInBackground(albumProviderName, albumCandidate, "");
+
+            // Navidrome has never seen this id, so relaying the star would just error.
+            return _responseBuilder.CreateResponse(format, "starred", new { });
+        }
+
         // Check if this is an external song (enables download-on-star)
         var (isExternal, provider, externalId) = _localLibraryService.ParseSongId(itemId);
         
@@ -1790,6 +1859,22 @@ public class SubsonicController : ControllerBase
         var nativeSearch = await TryInjectNativeSongSearchAsync(endpoint, parameters);
         if (nativeSearch != null) return nativeSearch;
 
+        // Native album detail for an external id. Same path-vs-query problem as the
+        // song case above: HasExternalId can't see an id carried in the path.
+        var nativeAlbum = await TryServeNativeExternalAlbumAsync(endpoint);
+        if (nativeAlbum != null) return nativeAlbum;
+
+        // Native album search, the twin of the search3 album injection.
+        var nativeAlbumSearch = await TryInjectNativeAlbumSearchAsync(endpoint, parameters);
+        if (nativeAlbumSearch != null) return nativeAlbumSearch;
+
+        // Native album tracklist. In Navidrome mode a client does NOT get an album's
+        // tracks from the album object; it asks for them separately by album_id. Note
+        // the parameter is snake_case, so HasExternalId (which checks "albumId") never
+        // intercepts it and this handler gets its chance.
+        var nativeAlbumSongs = await TryServeNativeAlbumSongsAsync(endpoint, parameters);
+        if (nativeAlbumSongs != null) return nativeAlbumSongs;
+
         try
         {
             // Faithful relay: forward the caller's method + body + status so native
@@ -1993,6 +2078,179 @@ public class SubsonicController : ControllerBase
         };
         if (s.Year is int y && y > 0) o["year"] = y;
         if (!string.IsNullOrEmpty(s.Genre)) o["genre"] = s.Genre;
+        return o;
+    }
+
+    /// <summary>
+    /// Native-API twin of the search3 album injection. Navidrome filters albums with a
+    /// full-text "name" parameter. Returns null for anything that is not a first-page
+    /// album search, so library browsing and paging stay pure passthrough.
+    ///
+    /// NOTE: Feishin 1.3.0 does NOT reach this. Its album search goes through
+    /// rest/search3.view even in Navidrome mode, and every /api/album call it makes is
+    /// browsing (_sort=name|random|max_year|play_count|recently_added, artist_id=) with
+    /// no "name" filter. This is kept for clients that DO filter by name, matching the
+    /// same client-agnostic reasoning as the external-id interceptor in GenericEndpoint;
+    /// album detail (/api/album/{id}) and its tracklist (/api/song?album_id=) are the
+    /// two native handlers Feishin actually depends on.
+    /// </summary>
+    private async Task<IActionResult?> TryInjectNativeAlbumSearchAsync(
+        string endpoint, Dictionary<string, string> parameters)
+    {
+        if (!string.Equals(endpoint, "api/album", StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        var term = parameters.GetValueOrDefault("name", "").Trim();
+        if (string.IsNullOrWhiteSpace(term)) return null;
+        if (parameters.TryGetValue("_start", out var startStr)
+            && int.TryParse(startStr, out var start) && start > 0)
+            return null;
+
+        RawRelayResult raw;
+        try { raw = await _proxyService.RelayRawAsync(endpoint, parameters); }
+        catch { return null; }
+        if (raw.Status != 200) return null;
+
+        JsonArray? realArr;
+        try { realArr = JsonNode.Parse(raw.Body) as JsonArray; }
+        catch { return null; }
+        if (realArr == null) return null;
+
+        var end = parameters.TryGetValue("_end", out var endStr) && int.TryParse(endStr, out var e)
+            ? e : realArr.Count + 20;
+        const int MaxExternalAlbums = 20;
+        var target = Math.Min(Math.Max(0, end - realArr.Count), MaxExternalAlbums);
+        if (target <= 0) return null;
+
+        List<Album> externalAlbums;
+        try { externalAlbums = await _metadataService.SearchAlbumsAsync(term, target); }
+        catch { return null; }
+        if (externalAlbums.Count == 0) return null;
+
+        // Newer Navidrome is multi-library and rows carry a libraryId. Inherit it from a
+        // real row rather than hardcoding, so injected albums belong to the same library.
+        var libraryId = 1;
+        if (realArr.Count > 0 && realArr[0] is JsonObject first
+            && first.TryGetPropertyValue("libraryId", out var lib) && lib is not null
+            && int.TryParse(lib.ToString(), out var parsedLib))
+            libraryId = parsedLib;
+
+        // Don't inject an album the library already returned.
+        var localKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var node in realArr)
+        {
+            if (node is not JsonObject o) continue;
+            var name = o.TryGetPropertyValue("name", out var n) ? n?.ToString() : null;
+            var aa = o.TryGetPropertyValue("albumArtist", out var v) ? v?.ToString() : null;
+            if (!string.IsNullOrWhiteSpace(name)) localKeys.Add($"{aa?.Trim()}|{name.Trim()}");
+        }
+
+        var added = 0;
+        foreach (var album in externalAlbums)
+        {
+            if (localKeys.Contains($"{album.Artist?.Trim()}|{album.Title?.Trim()}")) continue;
+            realArr.Add(BuildNativeAlbumObject(album, libraryId));
+            added++;
+        }
+        if (added == 0) return null;
+
+        var bytes = Encoding.UTF8.GetBytes(realArr.ToJsonString());
+        Response.StatusCode = 200;
+        foreach (var h in raw.ResponseHeaders)
+        {
+            if (string.Equals(h.Key, "X-Total-Count", StringComparison.OrdinalIgnoreCase)) continue;
+            Response.Headers[h.Key] = h.Value;
+        }
+        Response.Headers["X-Total-Count"] = realArr.Count.ToString();
+        Response.ContentType = raw.ContentType ?? "application/json";
+        await Response.Body.WriteAsync(bytes);
+        return new EmptyResult();
+    }
+
+    /// <summary>
+    /// Native single-album detail: GET /api/album/{id} for one of Octo's album ids.
+    /// </summary>
+    private async Task<IActionResult?> TryServeNativeExternalAlbumAsync(string endpoint)
+    {
+        const string prefix = "api/album/";
+        if (!endpoint.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return null;
+        var id = endpoint[prefix.Length..].Trim('/');
+        if (string.IsNullOrEmpty(id) || id.Contains('/')) return null; // leaf id only
+
+        if (_idRegistry.Lookup(id)?.Kind != RoutingKind.Album) return null;
+
+        var album = await _metadataService.GetAlbumAsync(SoulseekMetadataService.ProviderName, id);
+        if (album == null) return null;
+
+        var bytes = Encoding.UTF8.GetBytes(BuildNativeAlbumObject(album, 1).ToJsonString());
+        Response.StatusCode = 200;
+        Response.ContentType = "application/json";
+        await Response.Body.WriteAsync(bytes);
+        return new EmptyResult();
+    }
+
+    /// <summary>
+    /// Native album tracklist: GET /api/song?album_id={externalAlbumId}. A Navidrome-mode
+    /// client fetches an album's tracks separately from the album object, so without this
+    /// an injected album opens empty.
+    /// </summary>
+    private async Task<IActionResult?> TryServeNativeAlbumSongsAsync(
+        string endpoint, Dictionary<string, string> parameters)
+    {
+        if (!string.Equals(endpoint, "api/song", StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        var albumId = parameters.GetValueOrDefault("album_id", "").Trim();
+        if (string.IsNullOrEmpty(albumId)) return null;
+        if (_idRegistry.Lookup(albumId)?.Kind != RoutingKind.Album) return null;
+
+        var album = await _metadataService.GetAlbumAsync(SoulseekMetadataService.ProviderName, albumId);
+        if (album == null) return null;
+
+        var arr = new JsonArray();
+        foreach (var song in album.Songs) arr.Add(BuildNativeSongObject(song));
+
+        var bytes = Encoding.UTF8.GetBytes(arr.ToJsonString());
+        Response.StatusCode = 200;
+        Response.Headers["X-Total-Count"] = album.Songs.Count.ToString();
+        Response.ContentType = "application/json";
+        await Response.Body.WriteAsync(bytes);
+        return new EmptyResult();
+    }
+
+    /// <summary>
+    /// Serializes one external Album into Navidrome's native album JSON shape.
+    /// Note Navidrome's album model has NO "artist"/"artistId" field — it uses
+    /// albumArtist/albumArtistId — and "duration" is seconds as a float.
+    /// </summary>
+    private static JsonObject BuildNativeAlbumObject(Album a, int libraryId)
+    {
+        var duration = a.Songs.Sum(s => s.Duration ?? 0);
+        var songCount = a.Songs.Count > 0 ? a.Songs.Count : (a.SongCount ?? 0);
+        var year = a.Year ?? 0;
+
+        var o = new JsonObject
+        {
+            ["id"] = a.Id,
+            ["libraryId"] = libraryId,
+            ["name"] = a.Title,
+            ["albumArtist"] = a.Artist ?? "",
+            ["albumArtistId"] = string.IsNullOrEmpty(a.ArtistId) ? a.Id + "-ar" : a.ArtistId!,
+            ["maxYear"] = year,
+            ["minYear"] = year,
+            ["compilation"] = false,
+            // Explicitly not missing: a client that respects this flag hides rows otherwise.
+            ["missing"] = false,
+            ["songCount"] = songCount,
+            ["duration"] = (double)duration,
+            ["size"] = 0,
+            ["playCount"] = 0,
+            // Fixed old timestamp, same reasoning as BuildNativeSongObject: injected rows
+            // must never crowd a client's recently-added view.
+            ["createdAt"] = "2020-01-01T00:00:00Z",
+            ["updatedAt"] = "2020-01-01T00:00:00Z",
+        };
+        if (!string.IsNullOrEmpty(a.Genre)) o["genre"] = a.Genre;
         return o;
     }
 
