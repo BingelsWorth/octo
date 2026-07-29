@@ -7,9 +7,16 @@ on:
     # second pattern a dated tag pushes silently and never builds an image.
     tags: ['v*', '[0-9][0-9][0-9][0-9].*']
     branches: [main]
-  pull_request:
-    types: [closed]
-    branches: [main]
+  # No pull_request trigger. A merge already arrives here as a push to main, so
+  # building on `closed` too meant every merge built the same commit twice.
+
+# Serialise image builds. Concurrent runs export to the same GitHub Actions cache
+# and collide with "failed to reserve cache". Queue rather than cancel: a half
+# published image is worse than a slow one, and tagging a release legitimately
+# overlaps with the merge that preceded it.
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   DOTNET_VERSION: "9.0.x"
@@ -22,10 +29,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v6
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
@@ -41,11 +48,9 @@ jobs:
   docker:
     needs: build-and-test
     runs-on: ubuntu-latest
-    # Only run docker build/push on merged PRs, tags, or manual triggers
-    if: |
-      github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'push' ||
-      (github.event_name == 'pull_request' && github.event.pull_request.merged == true)
+    # No `if` needed: the only triggers left are push and workflow_dispatch, both of
+    # which should publish. The old condition also allowed merged pull_request events,
+    # which no longer reach this workflow.
 
     permissions:
       contents: read
@@ -53,16 +58,16 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -70,7 +75,7 @@ jobs:
 
       - name: Extract metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
@@ -88,7 +93,7 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64
