@@ -89,16 +89,27 @@ public class SoulseekMetadataService : IMusicMetadataService
         });
     }
 
-    // Cap Deezer calls per search so a big result set (Feishin requests up to 200)
-    // does not add seconds of latency or trip Deezer's rate limit. The visible top
-    // of the list gets real data; the rest keep the 180s fallback. Cached, so a
-    // repeat search fills in more instantly.
-    private const int SearchEnrichLimit = 60;
+    // Deezer's real ceiling is ~50 requests per 5 seconds, and this runs on search3's
+    // critical path, so the AWAITED set has to stay small. 60 rows at 8-way concurrency
+    // was roughly 65 requests/second on its own, which is what exhausted the quota and
+    // poisoned the metadata caches (issue #8).
+    //
+    // 12 is the same "first page" figure PrewarmYouTubeIdsAsync already uses. It must
+    // stay above TopDurationResolveLimit, or the rows that get a YouTube length hint
+    // would be reading a duration nobody resolved.
+    private const int SearchEnrichLimit = 12;
+
+    // Rows past the first page are warmed off the critical path, so per-row detail
+    // calls (getSong, the native song endpoint) hit a populated cache instead of
+    // paying for the lookup while a user waits.
+    private const int BackgroundEnrichLimit = 60;
 
     public async Task EnrichExternalSongsAsync(List<Song> songs, CancellationToken ct = default)
     {
+        var external = songs.Where(s => !s.IsLocal).ToList();
+
         var sem = new SemaphoreSlim(8);
-        var tasks = songs.Where(s => !s.IsLocal).Take(SearchEnrichLimit).Select(async song =>
+        var tasks = external.Take(SearchEnrichLimit).Select(async song =>
         {
             await sem.WaitAsync(ct);
             try
@@ -121,6 +132,33 @@ public class SoulseekMetadataService : IMusicMetadataService
             finally { sem.Release(); }
         });
         await Task.WhenAll(tasks);
+
+        WarmRemainingInBackground(external.Skip(SearchEnrichLimit).Take(BackgroundEnrichLimit - SearchEnrichLimit).ToList());
+    }
+
+    /// <summary>
+    /// Populate the Deezer cache for rows below the first page.
+    ///
+    /// These deliberately do NOT write back to the Song or its routing. Those objects
+    /// are being serialised into the response as this runs, and Song.Duration is an
+    /// int? whose non-atomic write can be read back as 0 — which is precisely the value
+    /// that stops a client drawing a scrub bar. Writing Album mid-loop would also split
+    /// one album across two synthetic ids. Cache only.
+    /// </summary>
+    private void WarmRemainingInBackground(List<Song> songs)
+    {
+        if (songs.Count == 0) return;
+
+        _ = Task.Run(async () =>
+        {
+            foreach (var song in songs)
+            {
+                // Sequential on purpose: this has no deadline, and fanning out here is
+                // what would eat the quota the awaited set needs.
+                try { await _deezer.EnrichTrackAsync(song.Artist, song.Title, includeYear: false); }
+                catch { /* best-effort */ }
+            }
+        });
     }
 
     // Resolve the ACTUAL YouTube video for the top of the list at search time and
