@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
+using Microsoft.Extensions.Caching.Memory;
 
 namespace Octo.Services.Metadata;
 
@@ -12,7 +13,7 @@ namespace Octo.Services.Metadata;
 /// returns null, and callers fall back to a synthetic entity. Nothing on this
 /// path ever blocks or fails playback.
 /// </summary>
-public class DeezerMetadataService
+public class DeezerMetadataService : IDisposable
 {
     public record TrackMeta(string? AlbumTitle, string? AlbumCoverUrl, int? Year, int? Duration,
         string? ArtistName, string? ArtistImageUrl);
@@ -40,18 +41,80 @@ public class DeezerMetadataService
     private const string Base = "https://api.deezer.com";
     private const int MaxCache = 4096;
 
+    /// <summary>
+    /// The only Deezer error code meaning "this genuinely does not exist". Everything
+    /// else, including quota (code 4) and any code we do not recognise, is treated as
+    /// transient. Caching an error we do not understand is exactly how one throttled
+    /// call turned into an album that reported zero tracks for the life of the process.
+    /// </summary>
+    private const int DefinitiveErrorCode = 800;
+
+    /// <summary>
+    /// Result of one Deezer call. Deezer answers HTTP 200 even when it is refusing the
+    /// request, so "we parsed a document" is not the same as "the call succeeded", and
+    /// callers must never cache anything derived from a transient failure.
+    /// </summary>
+    private sealed class DeezerResponse : IDisposable
+    {
+        public JsonDocument? Doc { get; init; }
+
+        /// <summary>Failed in a way that may succeed later. Nothing about this call
+        /// may be written to a cache.</summary>
+        public bool Transient { get; init; }
+
+        public void Dispose() => Doc?.Dispose();
+    }
+
+    /// <summary>Good answers are stable, so this only needs to be short enough that a
+    /// long-lived container eventually picks up catalog corrections.</summary>
+    private static readonly TimeSpan PositiveTtl = TimeSpan.FromHours(12);
+
+    /// <summary>"Deezer answered and this does not exist." Still expires, because the
+    /// catalog gains releases.</summary>
+    private static readonly TimeSpan NegativeTtl = TimeSpan.FromMinutes(5);
+
+    /// <summary>A tracklist we know is incomplete. Usable now, refetched soon.</summary>
+    private static readonly TimeSpan PartialTtl = TimeSpan.FromMinutes(10);
+
     private readonly IHttpClientFactory _httpFactory;
     private readonly ILogger<DeezerMetadataService> _logger;
-    private readonly ConcurrentDictionary<string, TrackMeta?> _trackCache = new();
-    private readonly ConcurrentDictionary<string, FullTrackMeta?> _fullCache = new();
-    private readonly ConcurrentDictionary<string, ArtistMeta?> _artistCache = new();
-    private readonly ConcurrentDictionary<long, int?> _albumYearCache = new();
-    private readonly ConcurrentDictionary<string, List<AlbumHit>> _albumSearchCache = new();
-    private readonly ConcurrentDictionary<string, string?> _albumIdCache = new();
-    private readonly ConcurrentDictionary<string, AlbumDetail?> _albumDetailCache = new();
+
+    // Owned rather than injected from DI: metadata records are tens of bytes and
+    // cover-art blobs are hundreds of kilobytes, so a single shared SizeLimit cannot
+    // be right for both. Every entry counts as 1, so the limit is an entry count.
+    private readonly MemoryCache _cache = new(new MemoryCacheOptions { SizeLimit = MaxCache });
+
     // Single-flight the album-year fetch: many tracks in one search share an album
     // (a whole album's tracks), so concurrent lookups collapse onto one HTTP call.
-    private readonly ConcurrentDictionary<long, Lazy<Task<int?>>> _albumYearTasks = new();
+    private readonly ConcurrentDictionary<long, Lazy<Task<(int? Year, bool Transient)>>> _albumYearTasks = new();
+
+    /// <summary>Wrapper so a cached null is distinguishable from a cache miss.</summary>
+    private sealed record Entry<T>(T Value);
+
+    private bool TryGetCached<T>(string key, out T? value)
+    {
+        if (_cache.TryGetValue(key, out Entry<T>? e)) { value = e!.Value; return true; }
+        value = default;
+        return false;
+    }
+
+    private void Put<T>(string key, T value, TimeSpan ttl) =>
+        _cache.Set(key, new Entry<T>(value), new MemoryCacheEntryOptions
+        {
+            Size = 1,
+            AbsoluteExpirationRelativeToNow = ttl,
+        });
+
+    /// <summary>Drop every cached answer. Exposed so a poisoned cache can be cleared
+    /// without restarting the container.</summary>
+    public void ClearCaches()
+    {
+        _cache.Clear();
+        _albumYearTasks.Clear();
+        _logger.LogInformation("deezer metadata caches cleared");
+    }
+
+    public void Dispose() => _cache.Dispose();
 
     public DeezerMetadataService(IHttpClientFactory httpFactory, ILogger<DeezerMetadataService> logger)
     {
@@ -61,7 +124,9 @@ public class DeezerMetadataService
 
     private HttpClient Client()
     {
-        var c = _httpFactory.CreateClient();
+        // Named so the rate-limiting handler is in the chain. Resolving the default
+        // client here would silently bypass Deezer's budget.
+        var c = _httpFactory.CreateClient(DeezerRateLimiter.ClientName);
         c.Timeout = TimeSpan.FromSeconds(8);
         return c;
     }
@@ -69,18 +134,20 @@ public class DeezerMetadataService
     /// <summary>Resolve "artist + title" to the real album + artist (name, art, year).
     /// Pass includeYear=false to skip the extra album-detail call (bulk enrichment
     /// wants duration + album fast; the year is fetched lazily by the album view).</summary>
-    public async Task<TrackMeta?> EnrichTrackAsync(string? artist, string? title, bool includeYear = true, CancellationToken ct = default)
+    public async Task<TrackMeta?> EnrichTrackAsync(string? artist, string? title, bool includeYear = true,
+        bool background = false, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(artist) && string.IsNullOrWhiteSpace(title)) return null;
-        var key = $"{artist}|{title}".ToLowerInvariant();
-        if (_trackCache.TryGetValue(key, out var cached)) return cached;
+        var key = $"t|{artist}|{title}".ToLowerInvariant();
+        if (TryGetCached<TrackMeta?>(key, out var cached)) return cached;
 
         TrackMeta? meta = null;
         try
         {
             var q = Uri.EscapeDataString($"artist:\"{artist}\" track:\"{title}\"");
-            using var doc = await GetJsonAsync($"{Base}/search?q={q}&limit=1", ct);
-            if (FirstData(doc) is JsonElement t)
+            using var r = await GetJsonAsync($"{Base}/search?q={q}&limit=1", ct, background);
+            if (r.Transient) return null;
+            if (FirstData(r.Doc) is JsonElement t)
             {
                 string? albTitle = null, cover = null, artName = null, artImg = null;
                 long albId = 0;
@@ -98,7 +165,15 @@ public class DeezerMetadataService
                 }
                 int? duration = t.TryGetProperty("duration", out var du) && du.ValueKind == JsonValueKind.Number
                     ? du.GetInt32() : null;
-                var year = includeYear && albId > 0 ? await AlbumYearAsync(albId, ct) : null;
+                int? year = null;
+                if (includeYear && albId > 0)
+                {
+                    var (y, yearTransient) = await AlbumYearAsync(albId, ct);
+                    // A throttled year lookup would otherwise be cached as "this track
+                    // has no year", permanently, on an otherwise good result.
+                    if (yearTransient) return null;
+                    year = y;
+                }
                 meta = new TrackMeta(albTitle, cover, year, duration, artName, artImg);
             }
         }
@@ -107,7 +182,7 @@ public class DeezerMetadataService
             _logger.LogDebug("deezer enrich track '{A} - {T}' failed: {M}", artist, title, ex.Message);
         }
 
-        Cache(_trackCache, key, meta);
+        Put(key, meta, meta is null ? NegativeTtl : PositiveTtl);
         return meta;
     }
 
@@ -120,14 +195,15 @@ public class DeezerMetadataService
     {
         if (string.IsNullOrWhiteSpace(artist) && string.IsNullOrWhiteSpace(title)) return null;
         var key = $"full|{artist}|{title}".ToLowerInvariant();
-        if (_fullCache.TryGetValue(key, out var cached)) return cached;
+        if (TryGetCached<FullTrackMeta?>(key, out var cached)) return cached;
 
         FullTrackMeta? meta = null;
         try
         {
             var q = Uri.EscapeDataString($"artist:\"{artist}\" track:\"{title}\"");
-            using var doc = await GetJsonAsync($"{Base}/search?q={q}&limit=1", ct);
-            if (FirstData(doc) is JsonElement t)
+            using var r = await GetJsonAsync($"{Base}/search?q={q}&limit=1", ct);
+            if (r.Transient) return null;
+            if (FirstData(r.Doc) is JsonElement t)
             {
                 string? albTitle = null, cover = null, artName = null;
                 var isrc = Str(t, "isrc");
@@ -145,10 +221,11 @@ public class DeezerMetadataService
                 string? genre = null, label = null, releaseDate = null;
                 if (albId > 0)
                 {
-                    using var adoc = await GetJsonAsync($"{Base}/album/{albId}", ct);
-                    if (adoc != null)
+                    using var ar = await GetJsonAsync($"{Base}/album/{albId}", ct);
+                    if (ar.Transient) return null;
+                    if (ar.Doc != null)
                     {
-                        var root = adoc.RootElement;
+                        var root = ar.Doc.RootElement;
                         releaseDate = Str(root, "release_date");
                         if (!string.IsNullOrEmpty(releaseDate) && releaseDate.Length >= 4 && int.TryParse(releaseDate[..4], out var yr))
                             year = yr;
@@ -169,7 +246,7 @@ public class DeezerMetadataService
             _logger.LogDebug("deezer full enrich '{A} - {T}' failed: {M}", artist, title, ex.Message);
         }
 
-        Cache(_fullCache, key, meta);
+        Put(key, meta, meta is null ? NegativeTtl : PositiveTtl);
         return meta;
     }
 
@@ -177,15 +254,16 @@ public class DeezerMetadataService
     public async Task<ArtistMeta?> EnrichArtistAsync(string? artist, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(artist)) return null;
-        var key = artist.ToLowerInvariant();
-        if (_artistCache.TryGetValue(key, out var cached)) return cached;
+        var key = $"a|{artist}".ToLowerInvariant();
+        if (TryGetCached<ArtistMeta?>(key, out var cached)) return cached;
 
         ArtistMeta? meta = null;
         try
         {
             var q = Uri.EscapeDataString(artist);
-            using var doc = await GetJsonAsync($"{Base}/search/artist?q={q}&limit=1", ct);
-            if (FirstData(doc) is JsonElement a)
+            using var r = await GetJsonAsync($"{Base}/search/artist?q={q}&limit=1", ct);
+            if (r.Transient) return null;
+            if (FirstData(r.Doc) is JsonElement a)
                 meta = new ArtistMeta(Str(a, "name"), Str(a, "picture_xl") ?? Str(a, "picture_medium"));
         }
         catch (Exception ex)
@@ -193,7 +271,7 @@ public class DeezerMetadataService
             _logger.LogDebug("deezer enrich artist '{A}' failed: {M}", artist, ex.Message);
         }
 
-        Cache(_artistCache, key, meta);
+        Put(key, meta, meta is null ? NegativeTtl : PositiveTtl);
         return meta;
     }
 
@@ -202,16 +280,19 @@ public class DeezerMetadataService
     public async Task<List<AlbumHit>> SearchAlbumsAsync(string query, int limit, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(query) || limit <= 0) return new List<AlbumHit>();
-        var key = $"{query}|{limit}".ToLowerInvariant();
-        if (_albumSearchCache.TryGetValue(key, out var cached)) return cached;
+        var key = $"as|{query}|{limit}".ToLowerInvariant();
+        if (TryGetCached<List<AlbumHit>>(key, out var cached)) return cached!;
 
         var hits = new List<AlbumHit>();
         try
         {
             var q = Uri.EscapeDataString(query);
-            using var doc = await GetJsonAsync($"{Base}/search/album?q={q}&limit={limit}", ct);
-            if (doc is not null
-                && doc.RootElement.TryGetProperty("data", out var data)
+            using var r = await GetJsonAsync($"{Base}/search/album?q={q}&limit={limit}", ct);
+            // Caching an empty list here is what would make external albums silently
+            // vanish from search3 for the rest of the process.
+            if (r.Transient) return new List<AlbumHit>();
+            if (r.Doc is not null
+                && r.Doc.RootElement.TryGetProperty("data", out var data)
                 && data.ValueKind == JsonValueKind.Array)
             {
                 // Materialize everything before the JsonDocument is disposed.
@@ -240,7 +321,7 @@ public class DeezerMetadataService
             _logger.LogDebug("deezer album search '{Q}' failed: {M}", query, ex.Message);
         }
 
-        Cache(_albumSearchCache, key, hits);
+        Put(key, hits, hits.Count == 0 ? NegativeTtl : PositiveTtl);
         return hits;
     }
 
@@ -249,16 +330,17 @@ public class DeezerMetadataService
     public async Task<string?> FindAlbumIdAsync(string? artist, string? album, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(album)) return null;
-        var key = $"{artist}|{album}".ToLowerInvariant();
-        if (_albumIdCache.TryGetValue(key, out var cached)) return cached;
+        var key = $"ai|{artist}|{album}".ToLowerInvariant();
+        if (TryGetCached<string?>(key, out var cached)) return cached;
 
         string? id = null;
         try
         {
             var q = Uri.EscapeDataString(
                 string.IsNullOrWhiteSpace(artist) ? $"album:\"{album}\"" : $"artist:\"{artist}\" album:\"{album}\"");
-            using var doc = await GetJsonAsync($"{Base}/search/album?q={q}&limit=1", ct);
-            if (FirstData(doc) is JsonElement a
+            using var r = await GetJsonAsync($"{Base}/search/album?q={q}&limit=1", ct);
+            if (r.Transient) return null;
+            if (FirstData(r.Doc) is JsonElement a
                 && a.TryGetProperty("id", out var aid) && aid.ValueKind == JsonValueKind.Number)
             {
                 id = aid.GetInt64().ToString();
@@ -269,7 +351,7 @@ public class DeezerMetadataService
             _logger.LogDebug("deezer album id lookup '{A} - {Al}' failed: {M}", artist, album, ex.Message);
         }
 
-        Cache(_albumIdCache, key, id);
+        Put(key, id, id is null ? NegativeTtl : PositiveTtl);
         return id;
     }
 
@@ -279,19 +361,29 @@ public class DeezerMetadataService
     public async Task<AlbumDetail?> GetAlbumDetailAsync(string deezerId, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(deezerId)) return null;
-        if (_albumDetailCache.TryGetValue(deezerId, out var cached)) return cached;
+        var cacheKey = $"ad|{deezerId}";
+        if (TryGetCached<AlbumDetail?>(cacheKey, out var cached)) return cached;
 
         AlbumDetail? detail = null;
+        // A tracklist we know is short gets a shorter life than a complete one, so a
+        // truncated or partly-skipped album repairs itself instead of sticking.
+        var partial = false;
         try
         {
             string title = "", artist = "", genre = "", label = "", cover = "";
             int? year = null;
+            // Declared out here on purpose: the document below is disposed before the
+            // tracklist call, and this is what tells an empty tracklist apart from an
+            // album that genuinely has no tracks.
+            int? nbTracks = null;
 
-            using (var doc = await GetJsonAsync($"{Base}/album/{deezerId}", ct))
+            using (var r = await GetJsonAsync($"{Base}/album/{deezerId}", ct))
             {
-                if (doc is not null)
+                if (r.Transient) return null;
+                if (r.Doc is not null)
                 {
-                    var root = doc.RootElement;
+                    var root = r.Doc.RootElement;
+                    nbTracks = Int(root, "nb_tracks");
                     title = Str(root, "title") ?? "";
                     cover = Str(root, "cover_xl") ?? Str(root, "cover_medium") ?? "";
                     label = Str(root, "label") ?? "";
@@ -307,13 +399,19 @@ public class DeezerMetadataService
                 }
             }
 
-            if (string.IsNullOrWhiteSpace(title)) { Cache(_albumDetailCache, deezerId, null); return null; }
+            // Deezer answered and there is no such album. Cacheable, but not forever.
+            if (string.IsNullOrWhiteSpace(title)) { Put(cacheKey, (AlbumDetail?)null, NegativeTtl); return null; }
 
             var tracks = new List<AlbumTrack>();
-            using (var doc = await GetJsonAsync($"{Base}/album/{deezerId}/tracks?limit=300", ct))
+            using (var tr = await GetJsonAsync($"{Base}/album/{deezerId}/tracks?limit=300", ct))
             {
-                if (doc is not null
-                    && doc.RootElement.TryGetProperty("data", out var data)
+                // The album call can succeed while the tracklist call is throttled. That
+                // built a perfectly valid AlbumDetail carrying title, year and genre with
+                // an empty tracklist, cached it permanently, and is why getAlbum reported
+                // songCount 0 forever while still showing real metadata.
+                if (tr.Transient) return null;
+                if (tr.Doc is not null
+                    && tr.Doc.RootElement.TryGetProperty("data", out var data)
                     && data.ValueKind == JsonValueKind.Array)
                 {
                     foreach (var t in data.EnumerateArray())
@@ -326,13 +424,31 @@ public class DeezerMetadataService
                             Int(t, "track_position"), Int(t, "disk_number"), Str(t, "isrc")));
                     }
 
-                    var total = Int(doc.RootElement, "total");
+                    var total = Int(tr.Doc.RootElement, "total");
                     if (total is int n && n > tracks.Count)
+                    {
+                        partial = true;
                         _logger.LogWarning(
                             "deezer album '{Title}' ({Id}) returned {Got} of {Total} tracks; tracklist is truncated",
                             title, deezerId, tracks.Count, n);
+                    }
                 }
             }
+
+            // An empty tracklist on an album Deezer says HAS tracks is a failure, not an
+            // answer. Note the null check is load-bearing: Int() returns int?, and a lifted
+            // `nbTracks > 0` is FALSE when nb_tracks is absent, so testing that alone would
+            // let the empty result through and cache it exactly as before.
+            if (tracks.Count == 0 && (nbTracks is null || nbTracks > 0))
+            {
+                _logger.LogWarning(
+                    "deezer album '{Title}' ({Id}) reports {Expected} track(s) but returned none; not caching",
+                    title, deezerId, nbTracks?.ToString() ?? "an unknown number of");
+                return null;
+            }
+
+            // Fewer tracks than the album claims, e.g. entries skipped for a blank title.
+            if (nbTracks is int expected && tracks.Count < expected) partial = true;
 
             tracks = tracks
                 .OrderBy(t => t.DiscNumber ?? 1)
@@ -350,40 +466,76 @@ public class DeezerMetadataService
             _logger.LogDebug("deezer album detail {Id} failed: {M}", deezerId, ex.Message);
         }
 
-        Cache(_albumDetailCache, deezerId, detail);
+        Put(cacheKey, detail, detail is null ? NegativeTtl : partial ? PartialTtl : PositiveTtl);
         return detail;
     }
 
-    private Task<int?> AlbumYearAsync(long albumId, CancellationToken ct)
+    private Task<(int? Year, bool Transient)> AlbumYearAsync(long albumId, CancellationToken ct)
     {
-        if (_albumYearCache.TryGetValue(albumId, out var y)) return Task.FromResult(y);
+        if (TryGetCached<int?>($"y|{albumId}", out var y)) return Task.FromResult<(int?, bool)>((y, false));
         // Shared across concurrent callers for the same album id (single-flight).
         return _albumYearTasks.GetOrAdd(albumId,
-            id => new Lazy<Task<int?>>(() => FetchAlbumYearAsync(id))).Value;
+            id => new Lazy<Task<(int? Year, bool Transient)>>(() => FetchAlbumYearAsync(id))).Value;
     }
 
-    private async Task<int?> FetchAlbumYearAsync(long albumId)
+    private async Task<(int? Year, bool Transient)> FetchAlbumYearAsync(long albumId)
     {
         int? year = null;
-        try
-        {
-            using var doc = await GetJsonAsync($"{Base}/album/{albumId}", CancellationToken.None);
-            var rd = doc is null ? null : Str(doc.RootElement, "release_date");
-            if (!string.IsNullOrEmpty(rd) && rd.Length >= 4 && int.TryParse(rd[..4], out var yr))
-                year = yr;
-        }
-        catch { /* best-effort */ }
-        _albumYearCache[albumId] = year;
+        using var r = await GetJsonAsync($"{Base}/album/{albumId}", CancellationToken.None);
         _albumYearTasks.TryRemove(albumId, out _);
-        return year;
+
+        // This used to be a raw indexer write after a bare catch, so it bypassed the
+        // cache helper entirely and a throttled year lookup stuck permanently.
+        if (r.Transient) return (null, true);
+
+        var rd = r.Doc is null ? null : Str(r.Doc.RootElement, "release_date");
+        if (!string.IsNullOrEmpty(rd) && rd.Length >= 4 && int.TryParse(rd[..4], out var yr))
+            year = yr;
+        Put($"y|{albumId}", year, year is null ? NegativeTtl : PositiveTtl);
+        return (year, false);
     }
 
-    private async Task<JsonDocument?> GetJsonAsync(string url, CancellationToken ct)
+    private async Task<DeezerResponse> GetJsonAsync(string url, CancellationToken ct, bool background = false)
     {
-        using var resp = await Client().GetAsync(url, ct);
-        if (!resp.IsSuccessStatusCode) return null;
-        var s = await resp.Content.ReadAsStringAsync(ct);
-        return JsonDocument.Parse(s);
+        JsonDocument? doc = null;
+        try
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Get, url);
+            if (background) req.Options.Set(DeezerRateLimitHandler.BackgroundLane, true);
+
+            using var resp = await Client().SendAsync(req, ct);
+            // A 429 here is usually our OWN limiter shedding load rather than Deezer's,
+            // and either way it is transient, so nothing derived from it is cached.
+            if (!resp.IsSuccessStatusCode) return new DeezerResponse { Transient = true };
+
+            var s = await resp.Content.ReadAsStringAsync(ct);
+            doc = JsonDocument.Parse(s);
+
+            // Deezer reports throttling as 200 + {"error":{"code":4,...}}, which parses
+            // perfectly and then reads as "the album has no tracks". Catching it here is
+            // what stops a quota blip becoming permanent cached state.
+            if (doc.RootElement.ValueKind == JsonValueKind.Object
+                && doc.RootElement.TryGetProperty("error", out var err)
+                && err.ValueKind == JsonValueKind.Object)
+            {
+                var code = Int(err, "code");
+                var definitive = code == DefinitiveErrorCode;
+                _logger.LogWarning("deezer refused {Url}: {Type} \"{Msg}\" (code {Code}, treated as {Kind})",
+                    url, Str(err, "type"), Str(err, "message"), code, definitive ? "definitive" : "transient");
+                doc.Dispose();
+                return new DeezerResponse { Transient = !definitive };
+            }
+
+            var ok = new DeezerResponse { Doc = doc };
+            doc = null;
+            return ok;
+        }
+        catch (Exception ex)
+        {
+            doc?.Dispose();
+            _logger.LogDebug("deezer request {Url} failed: {M}", url, ex.Message);
+            return new DeezerResponse { Transient = true };
+        }
     }
 
     private static JsonElement? FirstData(JsonDocument? doc)
@@ -400,9 +552,4 @@ public class DeezerMetadataService
     private static int? Int(JsonElement e, string name)
         => e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetInt32() : (int?)null;
 
-    private static void Cache<TK, TV>(ConcurrentDictionary<TK, TV> cache, TK key, TV val) where TK : notnull
-    {
-        cache[key] = val;
-        if (cache.Count > MaxCache) cache.Clear();  // crude bound; simple and safe
-    }
 }
