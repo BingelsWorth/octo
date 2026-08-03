@@ -23,6 +23,12 @@
     </ItemGroup>
 
     <ItemGroup>
+        <!-- Candidate matching decides which recording a peer sends us, and its rules are
+             easiest to pin at the unit level against known-bad real-world filenames. -->
+        <InternalsVisibleTo Include="octo.Tests" />
+    </ItemGroup>
+
+    <ItemGroup>
         <PackageReference Include="BouncyCastle.Cryptography" Version="2.6.2" />
         <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="9.0.4" />
         <PackageReference Include="SixLabors.ImageSharp" Version="3.1.12" />
