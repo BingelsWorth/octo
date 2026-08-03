@@ -12,9 +12,10 @@ namespace Octo.Services.Soulseek;
 /// <summary>
 /// Hybrid download service:
 ///   - GetDirectStreamAsync   -> instant lossy preview via YouTube (yt-dlp)
-///   - DownloadTrackAsync     -> permanent FLAC fetch via slskd, triggered ONLY
-///                              when the user stars a track. Soulseek is searched
-///                              here on demand using the encoded artist+title.
+///   - DownloadTrackAsync     -> permanent FLAC fetch via slskd. Runs when the user
+///                              stars a track, and in Permanent mode when one is
+///                              played. Soulseek is searched here on demand using
+///                              the encoded artist+title.
 /// </summary>
 public class SoulseekDownloadService : BaseDownloadService
 {
@@ -138,7 +139,7 @@ public class SoulseekDownloadService : BaseDownloadService
     }
 
     // =========================================================================
-    // Permanent download path (only when the user stars a track)
+    // Permanent download path (a star, or a play while in Permanent mode)
     // Search Soulseek, walk the top-N peers in quality order, first successful
     // transfer wins. ~30-50% of Soulseek peer requests are rejected (queue
     // full / overwhelmed / banned), so trying just the top hit fails too often.

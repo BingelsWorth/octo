@@ -112,6 +112,10 @@ public abstract class BaseDownloadService : IDownloadService
         return IOFile.OpenRead(localPath);
     }
     
+    public Task<string> ExecuteAcquisitionAsync(string externalProvider, string externalId,
+        bool triggerAlbumDownload, bool forcePermanent, CancellationToken cancellationToken) =>
+        DownloadSongInternalAsync(externalProvider, externalId, triggerAlbumDownload, cancellationToken, forcePermanent);
+
     public DownloadInfo? GetDownloadStatus(string songId)
     {
         ActiveDownloads.TryGetValue(songId, out var info);
@@ -279,7 +283,12 @@ public abstract class BaseDownloadService : IDownloadService
         
         // Acquire lock BEFORE checking existence to prevent race conditions with concurrent requests
         await DownloadLock.WaitAsync(cancellationToken);
-        
+        // The in-progress branch below releases early so it can wait without holding the
+        // lock, and the finally would then release a second time. On a SemaphoreSlim(1,1)
+        // that either throws from inside a finally, discarding a successful return, or
+        // worse succeeds and lets two callers hold a mutex that permits one.
+        var lockHeld = true;
+
         try
         {
             // Check if already downloaded (skip for cache mode as we want to check cache folder)
@@ -311,7 +320,8 @@ public abstract class BaseDownloadService : IDownloadService
                 Logger.LogInformation("Download already in progress for {SongId}, waiting...", songId);
                 // Release lock while waiting
                 DownloadLock.Release();
-                
+                lockHeld = false;
+
                 while (ActiveDownloads.TryGetValue(songId, out activeDownload) && activeDownload.Status == DownloadStatus.InProgress)
                 {
                     await Task.Delay(500, cancellationToken);
@@ -458,10 +468,10 @@ public abstract class BaseDownloadService : IDownloadService
         }
         finally
         {
-            DownloadLock.Release();
+            if (lockHeld) DownloadLock.Release();
         }
     }
-    
+
     protected async Task DownloadRemainingAlbumTracksAsync(string albumExternalId, string excludeTrackExternalId)
     {
         Logger.LogInformation("Starting background download for album {AlbumId} (excluding track {TrackId})", 
