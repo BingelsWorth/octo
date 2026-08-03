@@ -92,6 +92,16 @@ builder.Services.AddHttpClient(Octo.Services.Metadata.DeezerRateLimiter.ClientNa
 builder.Services.AddSingleton<IMusicMetadataService, SoulseekMetadataService>();
 builder.Services.AddSingleton<IDownloadService, SoulseekDownloadService>();
 
+// Permanent-copy fetches run here, never inside the request that asked for one. A client
+// giving up on a slow play must not cancel a transfer slskd is going to finish anyway.
+builder.Services.AddSingleton<Octo.Services.Common.TrackAcquisitionQueue>();
+builder.Services.AddHostedService<Octo.Services.Common.AcquisitionWorker>();
+
+// Long enough for an already-downloaded file to finish being tagged and registered, and
+// no longer: sizing this for the transfer itself would tax every restart for a benefit
+// that only lands when a download happens to be seconds from done.
+builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = TimeSpan.FromSeconds(10));
+
 builder.Services.AddHttpClient<LastFmService>();
 builder.Services.AddSingleton<LastFmService>();
 

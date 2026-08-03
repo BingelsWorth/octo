@@ -186,7 +186,25 @@ public class SubsonicSettings
     /// long job; turn this off to keep song-starring without the larger commitment.
     /// </summary>
     public bool DownloadAlbumOnStar { get; set; } = true;
-    
+
+    /// <summary>
+    /// In Permanent mode, block the first play until the lossless copy has been fetched
+    /// (default: false).
+    /// Environment variable: WAIT_FOR_LOSSLESS_ON_PLAY
+    ///
+    /// This also decides what search results DECLARE for external tracks, which is why it
+    /// is restart-required. A Subsonic client picks its decoder from the declared suffix
+    /// and content type, so those have to describe the bytes that will actually arrive:
+    /// off, an external id is always the lossy stream and the lossless copy shows up as a
+    /// separate library track after the rescan; on, the id is declared lossless and the
+    /// request waits for it.
+    ///
+    /// Off by default because a Soulseek fetch routinely runs for minutes, and no client
+    /// waits that long — turning it on means the first play of each track appears to fail
+    /// while the file lands in the background.
+    /// </summary>
+    public bool WaitForLosslessOnPlay { get; set; } = false;
+
     /// <summary>
     /// Folder structure for downloaded tracks (default: Flat)
     /// Environment variable: FOLDER_STRUCTURE

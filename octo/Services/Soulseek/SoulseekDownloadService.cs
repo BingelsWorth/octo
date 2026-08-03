@@ -5,6 +5,7 @@ using Octo.Services.Common;
 using Octo.Services.Local;
 using Octo.Services.Subsonic;
 using Octo.Services.YouTube;
+using System.Text.RegularExpressions;
 using IOFile = System.IO.File;
 
 namespace Octo.Services.Soulseek;
@@ -12,9 +13,10 @@ namespace Octo.Services.Soulseek;
 /// <summary>
 /// Hybrid download service:
 ///   - GetDirectStreamAsync   -> instant lossy preview via YouTube (yt-dlp)
-///   - DownloadTrackAsync     -> permanent FLAC fetch via slskd, triggered ONLY
-///                              when the user stars a track. Soulseek is searched
-///                              here on demand using the encoded artist+title.
+///   - DownloadTrackAsync     -> permanent FLAC fetch via slskd. Runs when the user
+///                              stars a track, and in Permanent mode when one is
+///                              played. Soulseek is searched here on demand using
+///                              the encoded artist+title.
 /// </summary>
 public class SoulseekDownloadService : BaseDownloadService
 {
@@ -138,7 +140,7 @@ public class SoulseekDownloadService : BaseDownloadService
     }
 
     // =========================================================================
-    // Permanent download path (only when the user stars a track)
+    // Permanent download path (a star, or a play while in Permanent mode)
     // Search Soulseek, walk the top-N peers in quality order, first successful
     // transfer wins. ~30-50% of Soulseek peer requests are rejected (queue
     // full / overwhelmed / banned), so trying just the top hit fails too often.
@@ -159,8 +161,11 @@ public class SoulseekDownloadService : BaseDownloadService
             case DownloadSource.YouTube:
                 return await DownloadViaYouTubeAsync(routing, cancellationToken);
             case DownloadSource.SoulseekThenYouTube:
+                // The filter matters: a cancelled token means nobody is waiting for
+                // this any more, so falling back would start a second download only
+                // to have it throw on the same token.
                 try { return await DownloadViaSoulseekAsync(routing, cancellationToken); }
-                catch (Exception ex)
+                catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
                 {
                     Logger.LogWarning("Soulseek download failed ({Msg}); falling back to YouTube MP3", ex.Message);
                     return await DownloadViaYouTubeAsync(routing, cancellationToken);
@@ -222,7 +227,7 @@ public class SoulseekDownloadService : BaseDownloadService
         Logger.LogInformation("Soulseek search-for-star: '{Query}'", primaryQuery);
         var hits = await _slskd.SearchAsync(primaryQuery, _settings.MinFileSizeBytes > 0 ? 30 : 10, cancellationToken);
 
-        var ranked = RankCandidates(hits, routing.Title!);
+        var ranked = RankCandidates(hits, routing.Title!, routing.Duration);
 
         // Fallback search: if the artist+title combo returned nothing usable,
         // try with just the cleaned title. Catches cases where the Last.fm
@@ -232,7 +237,7 @@ public class SoulseekDownloadService : BaseDownloadService
         {
             Logger.LogInformation("Soulseek primary query returned no usable hits; retrying with title-only");
             hits = await _slskd.SearchAsync(cleanTitle, _settings.MinFileSizeBytes > 0 ? 30 : 10, cancellationToken);
-            ranked = RankCandidates(hits, routing.Title!);
+            ranked = RankCandidates(hits, routing.Title!, routing.Duration);
         }
 
         if (ranked.Count == 0)
@@ -248,6 +253,9 @@ public class SoulseekDownloadService : BaseDownloadService
             Logger.LogInformation("Soulseek attempt {N}/{Total}: {User} -> {File} (queue={Q}, speed={S})",
                 attemptIdx, ranked.Count, hit.Username, hit.Filename, hit.QueueLength, hit.UploadSpeed);
 
+            // Used to decide whether a rejected file is ours to delete.
+            var attemptStartedUtc = DateTime.UtcNow;
+
             try
             {
                 await _slskd.EnqueueDownloadAsync(hit.Username, hit.Filename, hit.Size, cancellationToken);
@@ -259,7 +267,26 @@ public class SoulseekDownloadService : BaseDownloadService
                 continue;
             }
 
-            var state = await _slskd.WaitForCompletionAsync(hit.Username, hit.Filename, PerAttemptTimeoutSeconds, cancellationToken);
+            // Cancelling the WAIT must never cancel the TRANSFER. slskd already
+            // accepted the enqueue and keeps going on its own, so letting this
+            // throw straight out of the loop is what used to lose a finished
+            // download: the disk check, the move, the registration and the
+            // rescan were all skipped while the file quietly landed anyway.
+            SoulseekTransferState? state = null;
+            Exception? waitError = null;
+            try
+            {
+                state = await _slskd.WaitForCompletionAsync(hit.Username, hit.Filename, PerAttemptTimeoutSeconds, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                waitError = ex;
+            }
+
+            // An slskd HTTP timeout and a client disconnect both surface as
+            // TaskCanceledException, so the token is the only reliable way to
+            // tell "the caller left" from "slskd was slow".
+            var callerGaveUp = cancellationToken.IsCancellationRequested;
 
             // Regardless of slskd's reported final state, the authoritative
             // signal is the filesystem. slskd sometimes drops successful
@@ -267,18 +294,49 @@ public class SoulseekDownloadService : BaseDownloadService
             // polls, so we'd see Errored/timeout even though the file landed
             // on disk a second ago. Check disk first; fall back to "this
             // peer failed, try the next" only when the file truly isn't there.
-            var localPath = ResolveLocalPath(hit.Filename, hit.Size);
+            //
+            // The usual 64KB size tolerance absorbs slskd's own size drift, but
+            // an interrupted transfer is far more likely to be genuinely
+            // truncated, so demand an exact match before promoting one.
+            var localPath = ResolveLocalPath(hit.Filename, hit.Size, requireExactSize: callerGaveUp);
             if (!string.IsNullOrEmpty(localPath))
             {
+                // Last line of defence, and the only one that inspects the actual audio.
+                // A peer can advertise a length it does not deliver, and the tagger runs
+                // straight after this and would stamp the RIGHT title onto the wrong
+                // recording, leaving a library that looks correct and plays wrong.
+                if (!DownloadedDurationMatches(localPath, routing.Duration, out var actualSecs))
+                {
+                    Logger.LogWarning(
+                        "Soulseek attempt {N} delivered the wrong recording for '{Artist} - {Title}': "
+                        + "{Actual}s against an expected {Expected}s; discarding and advancing",
+                        attemptIdx, routing.Artist, routing.Title, actualSecs, routing.Duration);
+                    DiscardRejectedDownload(localPath, attemptStartedUtc);
+                    lastError = new Exception(
+                        $"peer delivered a {actualSecs}s file for a {routing.Duration}s track");
+                    continue;
+                }
+
                 // Apply the configured FolderStructure: slskd dumps to whatever
                 // path the peer used (e.g. ".../MyMusic/Mark Morrison/Return of
                 // the Mack/05 ...flac"), which is unpredictable per-peer. Move
                 // to the canonical location now so Navidrome scans it under a
                 // consistent layout.
                 localPath = MoveToConfiguredLayout(localPath, routing) ?? localPath;
-                Logger.LogInformation("Soulseek download complete (attempt {N}, slskd state={State}): {Path}",
-                    attemptIdx, state, localPath);
+                Logger.LogInformation("Soulseek download complete (attempt {N}, slskd state={State}{Aborted}): {Path}",
+                    attemptIdx, state?.ToString() ?? "interrupted", callerGaveUp ? ", caller had already left" : "", localPath);
                 return localPath;
+            }
+
+            if (waitError is not null)
+            {
+                // Nothing on disk and the caller is gone: no later peer attempt
+                // has anywhere to be delivered, so stop instead of burning the
+                // rest of the list.
+                if (callerGaveUp) throw waitError;
+                Logger.LogWarning("Soulseek attempt {N} wait failed ({Msg}); advancing", attemptIdx, waitError.Message);
+                lastError = waitError;
+                continue;
             }
 
             Logger.LogInformation("Soulseek attempt {N} failed (state={State}, no file on disk), advancing", attemptIdx, state);
@@ -445,38 +503,177 @@ public class SoulseekDownloadService : BaseDownloadService
         return t;
     }
 
-    private List<SoulseekFileHit> RankCandidates(List<SoulseekFileHit> hits, string title)
+    /// <summary>
+    /// Correct rips of the same recording drift by a second or two between masterings.
+    /// A different recording does not.
+    ///
+    /// Measured over two full walks of the same album: every correctly-matched track came
+    /// in within 4s of the catalog length, while wrong ones were 11s, 12s, 93s, 98s and
+    /// 140s out. 8 sits in that gap. An earlier 15 was too generous and let two dub mixes
+    /// through at 11s and 12s.
+    /// </summary>
+    private const int DurationToleranceSeconds = 8;
+
+    /// <summary>
+    /// Words that mean "a different recording of this song". When the title we asked for
+    /// carries none of these and a candidate does, it is the wrong version. This is the
+    /// only signal that separates "Group Four" from "Group Four (Security Forces dub)",
+    /// whose runtimes are two seconds apart.
+    /// </summary>
+    private static readonly string[] VariantMarkers =
+    {
+        "dub", "remix", "live", "instrumental", "acoustic", "edit", "mix",
+        "version", "demo", "session", "karaoke", "cover", "reprise",
+    };
+
+    private List<SoulseekFileHit> RankCandidates(List<SoulseekFileHit> hits, string title, int? expectedDuration)
         => hits
             .Where(h => string.Equals(h.Extension, _settings.PreferredExtension, StringComparison.OrdinalIgnoreCase))
             .Where(h => h.Size >= _settings.MinFileSizeBytes)
             .Where(h => FilenamePlausiblyMatchesTitle(h.Filename, title))
-            .OrderBy(h => h.QueueLength ?? int.MaxValue)
+            .Where(h => DurationPlausible(h.Length, expectedDuration))
+            // Variant mixes sort last rather than being dropped: sometimes a remix really
+            // is what was asked for, and sometimes it is all a peer has.
+            .OrderBy(h => VariantPenalty(h.Filename, title))
+            .ThenBy(h => h.QueueLength ?? int.MaxValue)
             .ThenByDescending(h => h.UploadSpeed ?? 0)
             .ThenByDescending(h => h.Size)
             .Take(MaxPeerAttempts)
             .ToList();
 
-    /// <summary>
-    /// Light sanity check: does the filename contain at least one significant
-    /// token from the song title? Catches the "user shared a discography
-    /// folder" case where the search hit's filename is unrelated to what we
-    /// asked for. Only runs on tokens >=3 chars to avoid false negatives on
-    /// short titles like "DNA." or "M.I.A.".
-    /// </summary>
-    private static bool FilenamePlausiblyMatchesTitle(string filename, string title)
-    {
-        if (string.IsNullOrEmpty(filename) || string.IsNullOrEmpty(title)) return true;
-        var fn = filename.ToLowerInvariant();
-        var tokens = title.ToLowerInvariant()
+    private static string LeafOf(string path) =>
+        path.Replace('\\', '/').Split('/', StringSplitOptions.RemoveEmptyEntries) is { Length: > 0 } s
+            ? s[^1] : path;
+
+    private static List<string> TitleTokens(string title) =>
+        title.ToLowerInvariant()
             .Split(new[] { ' ', '-', '(', ')', '[', ']', '_', '.', ',', '\'', '"' },
                    StringSplitOptions.RemoveEmptyEntries)
             .Where(t => t.Length >= 3)
             .ToList();
+
+    /// <summary>
+    /// Does the FILENAME look like the track we asked for?
+    ///
+    /// Two things here were wrong and both let the wrong song through. It matched the
+    /// whole path, so a folder named "Mezzanine Remix Tapes '98" satisfied a search for
+    /// the track "Mezzanine" while the file inside was a different song entirely. And it
+    /// accepted any single token, so "Group Four" would have been satisfied by "Four
+    /// Seasons". Now every significant token must appear in the leaf name. Tokens are
+    /// >=3 chars so short titles like "DNA." or "M.I.A." are not over-filtered.
+    /// </summary>
+    internal static bool FilenamePlausiblyMatchesTitle(string filename, string title)
+    {
+        if (string.IsNullOrEmpty(filename) || string.IsNullOrEmpty(title)) return true;
+        var leaf = LeafOf(filename).ToLowerInvariant();
+        var tokens = TitleTokens(title);
         if (tokens.Count == 0) return true;
-        return tokens.Any(t => fn.Contains(t));
+        return tokens.All(t => leaf.Contains(t));
     }
 
-    private string? ResolveLocalPath(string remoteFilename, long expectedSize)
+    /// <summary>Reject a candidate whose advertised length is nowhere near the known one.</summary>
+    internal static bool DurationPlausible(int? candidateSeconds, int? expectedSeconds)
+    {
+        // Unknown either side is not evidence of a bad match, so let it through and let
+        // the post-download check have the final say.
+        if (candidateSeconds is not int c || expectedSeconds is not int e || c <= 0 || e <= 0) return true;
+        return Math.Abs(c - e) <= DurationToleranceSeconds;
+    }
+
+    /// <summary>
+    /// How many "this is a different recording" signals the candidate carries that the
+    /// requested title never asked for.
+    ///
+    /// The generic half matters more than the word list. "Angel (Angel Dust)" and
+    /// "Inertia Creeps (Floating on Dubwise)" are both dub mixes, and neither contains a
+    /// keyword any sane list would hold — but both are bracketed additions the title did
+    /// not ask for, and that is the thing they have in common with every other wrong take.
+    ///
+    /// Ranked rather than rejected: sometimes a remaster is all a peer has, and sometimes
+    /// the remix genuinely is what was requested.
+    /// </summary>
+    internal static int VariantPenalty(string filename, string title)
+    {
+        var leaf = LeafOf(filename);
+        var leafLower = leaf.ToLowerInvariant();
+        var wanted = (title ?? "").ToLowerInvariant();
+
+        var penalty = VariantMarkers.Count(m =>
+            Regex.IsMatch(leafLower, $@"\b{m}\b") && !Regex.IsMatch(wanted, $@"\b{m}\b"));
+
+        foreach (Match group in Regex.Matches(leaf, @"[\(\[]([^\)\]]*)[\)\]]"))
+        {
+            var inner = group.Groups[1].Value.Trim().ToLowerInvariant();
+            if (inner.Length == 0) continue;
+            // A year or a format tag is how peers label a good rip, not a different take.
+            if (Regex.IsMatch(inner, @"^(19|20)\d{2}$")) continue;
+            if (inner is "flac" or "hi-res" or "hires" or "16-44" or "24-96" or "24-44") continue;
+            if (!wanted.Contains(inner)) penalty++;
+        }
+
+        return penalty;
+    }
+
+    /// <summary>
+    /// Read the real duration off the downloaded file and compare it against what the
+    /// catalog says the track should be. Anything unknown or unreadable passes: this
+    /// exists to catch a confidently wrong file, not to reject an unusual one.
+    /// </summary>
+    private bool DownloadedDurationMatches(string path, int? expectedSeconds, out int actualSeconds)
+    {
+        actualSeconds = 0;
+        if (expectedSeconds is not int expected || expected <= 0) return true;
+
+        try
+        {
+            using var file = TagLib.File.Create(path);
+            actualSeconds = (int)Math.Round(file.Properties.Duration.TotalSeconds);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogDebug("Could not read duration of {Path}: {M}", path, ex.Message);
+            return true;
+        }
+
+        if (actualSeconds <= 0) return true;
+        return Math.Abs(actualSeconds - expected) <= DurationToleranceSeconds;
+    }
+
+    /// <summary>
+    /// Remove a file we have judged to be the wrong recording, so it does not sit in the
+    /// music folder waiting to be scanned or matched by a later ResolveLocalPath.
+    ///
+    /// Only deletes what this attempt actually created. ResolveLocalPath matches on leaf
+    /// name and approximate size across the whole library, so without that guard a bad
+    /// match could delete a file the user already owned.
+    /// </summary>
+    private void DiscardRejectedDownload(string path, DateTime attemptStartedUtc)
+    {
+        try
+        {
+            if (!IOFile.Exists(path)) return;
+
+            if (IOFile.GetCreationTimeUtc(path) < attemptStartedUtc.AddSeconds(-5))
+            {
+                Logger.LogWarning(
+                    "Leaving {Path} in place: it predates this download, so it is not ours to delete", path);
+                return;
+            }
+
+            IOFile.Delete(path);
+            Logger.LogInformation("Deleted mismatched download {Path}", path);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning("Could not delete mismatched download {Path}: {M}", path, ex.Message);
+        }
+    }
+
+    /// <param name="requireExactSize">
+    /// Drop the usual near-miss tolerance. Used when a transfer was interrupted,
+    /// where a slightly-short file is more likely truncated than size drift.
+    /// </param>
+    private string? ResolveLocalPath(string remoteFilename, long expectedSize, bool requireExactSize = false)
     {
         var segments = remoteFilename
             .Replace('\\', '/')
@@ -495,10 +692,10 @@ public class SoulseekDownloadService : BaseDownloadService
             if (parent != null)
             {
                 var candidate = Path.Combine(root, parent, leaf);
-                if (FileMatches(candidate, expectedSize)) return candidate;
+                if (FileMatches(candidate, expectedSize, requireExactSize)) return candidate;
             }
             var flat = Path.Combine(root, leaf);
-            if (FileMatches(flat, expectedSize)) return flat;
+            if (FileMatches(flat, expectedSize, requireExactSize)) return flat;
         }
 
         foreach (var root in roots)
@@ -508,7 +705,7 @@ public class SoulseekDownloadService : BaseDownloadService
             {
                 var matches = Directory
                     .EnumerateFiles(root, leaf, SearchOption.AllDirectories)
-                    .Where(p => FileMatches(p, expectedSize))
+                    .Where(p => FileMatches(p, expectedSize, requireExactSize))
                     .OrderByDescending(p => IOFile.GetCreationTimeUtc(p))
                     .ToList();
                 if (matches.Count > 0) return matches[0];
@@ -522,13 +719,14 @@ public class SoulseekDownloadService : BaseDownloadService
         return null;
     }
 
-    private static bool FileMatches(string path, long expectedSize)
+    private static bool FileMatches(string path, long expectedSize, bool requireExactSize = false)
     {
         try
         {
             if (!IOFile.Exists(path)) return false;
             var actual = new FileInfo(path).Length;
-            return actual == expectedSize || Math.Abs(actual - expectedSize) < 64 * 1024;
+            if (actual == expectedSize) return true;
+            return !requireExactSize && Math.Abs(actual - expectedSize) < 64 * 1024;
         }
         catch
         {

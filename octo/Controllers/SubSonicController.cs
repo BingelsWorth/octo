@@ -37,6 +37,7 @@ public class SubsonicController : ControllerBase
     private readonly CoverArtService? _coverArtService;
     private readonly CoverArtAggregator? _coverArtAggregator;
     private readonly ExternalIdRegistry _idRegistry;
+    private readonly Octo.Services.Common.TrackAcquisitionQueue _acquisitions;
     private readonly RadioQueueStore _radioQueueStore;
     private readonly NavidromeIdentityService _navIdentity;
     private readonly ILogger<SubsonicController> _logger;
@@ -51,6 +52,7 @@ public class SubsonicController : ControllerBase
         SubsonicModelMapper modelMapper,
         SubsonicProxyService proxyService,
         ExternalIdRegistry idRegistry,
+        Octo.Services.Common.TrackAcquisitionQueue acquisitions,
         RadioQueueStore radioQueueStore,
         NavidromeIdentityService navIdentity,
         ILogger<SubsonicController> logger,
@@ -69,6 +71,7 @@ public class SubsonicController : ControllerBase
         _modelMapper = modelMapper;
         _proxyService = proxyService;
         _idRegistry = idRegistry;
+        _acquisitions = acquisitions;
         _radioQueueStore = radioQueueStore;
         _navIdentity = navIdentity;
         _playlistSyncService = playlistSyncService;
@@ -507,6 +510,9 @@ public class SubsonicController : ControllerBase
     {
         var parameters = await ExtractAllParameters();
         var id = parameters.GetValueOrDefault("id", "");
+        // Needed so a failure here can answer with a real Subsonic error envelope instead
+        // of the bare JSON this method used to emit.
+        var format = parameters.GetValueOrDefault("f", "xml");
 
         if (string.IsNullOrWhiteSpace(id))
         {
@@ -531,77 +537,151 @@ public class SubsonicController : ControllerBase
             return await _proxyService.RelayStreamAsync(parameters, HttpContext.RequestAborted);
         }
 
-        // Check for existing local file first (even in Stream mode, use local if available)
-        var localPath = await _localLibraryService.GetLocalPathForExternalSongAsync(provider!, externalId!);
-
-        if (localPath != null && System.IO.File.Exists(localPath))
+        // A local file may only be served under an external id when this session DECLARES
+        // that id as lossless. search3 already told the client a suffix, bitrate and size,
+        // and a player picks its decoder from those, so handing back different bytes is
+        // what makes tracks silently refuse to start. With the default settings the
+        // lossless copy is reached as its own library track after the rescan instead.
+        if (_subsonicSettings.WaitForLosslessOnPlay)
         {
-            var stream = System.IO.File.OpenRead(localPath);
-            return File(stream, GetContentType(localPath), enableRangeProcessing: true);
+            var localPath = await _localLibraryService.GetLocalPathForExternalSongAsync(provider!, externalId!);
+            if (localPath != null && System.IO.File.Exists(localPath))
+            {
+                var stream = System.IO.File.OpenRead(localPath);
+                return File(stream, GetContentType(localPath), enableRangeProcessing: true);
+            }
         }
 
         try
         {
-            // True streaming mode: proxy directly from CDN without saving to disk.
-            if (_subsonicSettings.StorageMode == StorageMode.Stream)
+            // Permanent mode keeps a copy of anything played. Queue it and carry on: the
+            // fetch runs on the acquisition worker, on a token that has nothing to do with
+            // this request, so the client hanging up can no longer destroy it.
+            Task<string>? acquisition = null;
+            if (_subsonicSettings.StorageMode == StorageMode.Permanent)
             {
-                // Forward the client's Range header up the chain so the shim can
-                // ask googlevideo for the requested byte range and we can return
-                // a proper 206. iOS Subsonic clients refuse to play non-FLAC
-                // audio without working byte-range support — our prior 200/none
-                // response was what was making Arpeggi/Narjo silently drop
-                // every external song from the queue.
-                var rangeHeader = Request.Headers.TryGetValue("Range", out var rh) ? rh.ToString() : null;
-
-                var directStream = await _downloadService.GetDirectStreamAsync(
-                    provider!, externalId!, rangeHeader, HttpContext.RequestAborted);
-                if (directStream != null)
-                {
-                    _logger.LogInformation("Direct streaming track {Id} ({Quality}, status={Status})",
-                        id, directStream.Quality, directStream.StatusCode);
-
-                    // Manual stream copy: ASP.NET's File(...) requires a seekable
-                    // stream for Range support, but our network stream isn't
-                    // seekable. Instead we forward the upstream's status code +
-                    // Content-Range verbatim and copy bytes to the response body.
-                    Response.StatusCode = directStream.StatusCode;
-                    Response.Headers["Content-Type"] = directStream.ContentType;
-                    Response.Headers["Accept-Ranges"] = "bytes";
-                    if (directStream.ContentLength.HasValue)
-                    {
-                        Response.Headers["Content-Length"] = directStream.ContentLength.Value.ToString();
-                    }
-                    if (!string.IsNullOrEmpty(directStream.ContentRange))
-                    {
-                        Response.Headers["Content-Range"] = directStream.ContentRange;
-                    }
-
-                    try
-                    {
-                        await using (directStream.AudioStream)
-                        {
-                            await directStream.AudioStream.CopyToAsync(Response.Body, HttpContext.RequestAborted);
-                        }
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        // Client disconnected mid-stream. Normal — don't log as error.
-                    }
-                    return new EmptyResult();
-                }
-                // Fallback to download mode if direct stream not available
-                _logger.LogWarning("Direct stream not available, falling back to download mode");
+                acquisition = _acquisitions.Enqueue(provider!, externalId!, isStar: false,
+                    triggerAlbumDownload: false, forcePermanent: true);
             }
 
-            // Cache/Permanent mode: download first, then stream
-            var downloadStream = await _downloadService.DownloadAndStreamAsync(provider!, externalId!, HttpContext.RequestAborted);
-            return File(downloadStream, "audio/mpeg", enableRangeProcessing: true);
+            if (acquisition is not null && _subsonicSettings.WaitForLosslessOnPlay)
+            {
+                return await ServeAcquiredAsync(acquisition, id, format);
+            }
+
+            // Cache mode is deliberately left on its original path. It skips library
+            // registration, so routing it through the queue would make every play
+            // re-download the same track forever.
+            if (_subsonicSettings.StorageMode == StorageMode.Cache)
+            {
+                var downloadStream = await _downloadService.DownloadAndStreamAsync(provider!, externalId!, HttpContext.RequestAborted);
+                return File(downloadStream, "audio/mpeg", enableRangeProcessing: true);
+            }
+
+            var direct = await TryDirectStreamAsync(provider!, externalId!, id);
+            if (direct is not null) return direct;
+
+            _logger.LogWarning("Direct stream not available for {Id}", id);
+
+            // No YouTube match. Wait on the SAME queued acquisition rather than starting a
+            // second one; without a lossless copy on the way there is nothing to serve.
+            if (acquisition is not null) return await ServeAcquiredAsync(acquisition, id, format);
+
+            return _responseBuilder.CreateError(format, 70, "No playable source found for this track");
+        }
+        catch (OperationCanceledException)
+        {
+            // The client hung up. Normal, and answering a dead socket would only produce a
+            // spurious error log.
+            return new EmptyResult();
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to stream track {Id}", id);
             return StatusCode(500, new { error = $"Failed to stream: {ex.Message}" });
         }
+    }
+
+    /// <summary>
+    /// Wait for a queued acquisition and serve the file.
+    ///
+    /// WaitAsync is what makes this safe: abandoning the WAIT leaves the transfer running,
+    /// so a client that gives up costs it nothing.
+    /// </summary>
+    private async Task<IActionResult> ServeAcquiredAsync(Task<string> acquisition, string id, string format)
+    {
+        string path;
+        try
+        {
+            path = await acquisition.WaitAsync(HttpContext.RequestAborted);
+        }
+        catch (OperationCanceledException)
+        {
+            return new EmptyResult();
+        }
+        catch (Exception ex)
+        {
+            // Never fall back to the lossy stream here. This session declared the id
+            // lossless, so lossy bytes would be the same contract violation in reverse.
+            _logger.LogWarning(ex, "Lossless acquisition failed for {Id}", id);
+            return _responseBuilder.CreateError(format, 70, $"Could not fetch a lossless copy: {ex.Message}");
+        }
+
+        if (!System.IO.File.Exists(path))
+        {
+            return _responseBuilder.CreateError(format, 70, "Lossless copy is no longer on disk");
+        }
+        return File(System.IO.File.OpenRead(path), GetContentType(path), enableRangeProcessing: true);
+    }
+
+    /// <summary>
+    /// Proxy the lossy preview straight from the CDN. Returns null when no source resolved.
+    /// </summary>
+    private async Task<IActionResult?> TryDirectStreamAsync(string provider, string externalId, string id)
+    {
+        // Forward the client's Range header up the chain so the shim can
+        // ask googlevideo for the requested byte range and we can return
+        // a proper 206. iOS Subsonic clients refuse to play non-FLAC
+        // audio without working byte-range support — our prior 200/none
+        // response was what was making Arpeggi/Narjo silently drop
+        // every external song from the queue.
+        var rangeHeader = Request.Headers.TryGetValue("Range", out var rh) ? rh.ToString() : null;
+
+        var directStream = await _downloadService.GetDirectStreamAsync(
+            provider, externalId, rangeHeader, HttpContext.RequestAborted);
+        if (directStream is null) return null;
+
+        _logger.LogInformation("Direct streaming track {Id} ({Quality}, status={Status})",
+            id, directStream.Quality, directStream.StatusCode);
+
+        // Manual stream copy: ASP.NET's File(...) requires a seekable
+        // stream for Range support, but our network stream isn't
+        // seekable. Instead we forward the upstream's status code +
+        // Content-Range verbatim and copy bytes to the response body.
+        Response.StatusCode = directStream.StatusCode;
+        Response.Headers["Content-Type"] = directStream.ContentType;
+        Response.Headers["Accept-Ranges"] = "bytes";
+        if (directStream.ContentLength.HasValue)
+        {
+            Response.Headers["Content-Length"] = directStream.ContentLength.Value.ToString();
+        }
+        if (!string.IsNullOrEmpty(directStream.ContentRange))
+        {
+            Response.Headers["Content-Range"] = directStream.ContentRange;
+        }
+
+        try
+        {
+            await using (directStream.AudioStream)
+            {
+                await directStream.AudioStream.CopyToAsync(Response.Body, HttpContext.RequestAborted);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Client disconnected mid-stream. Normal — don't log as error.
+        }
+        return new EmptyResult();
     }
 
     /// <summary>
@@ -1280,29 +1360,21 @@ public class SubsonicController : ControllerBase
         // Check if this is an external song (enables download-on-star)
         var (isExternal, provider, externalId) = _localLibraryService.ParseSongId(itemId);
         
-        if (isExternal && _subsonicSettings.DownloadOnStar && 
-            (_subsonicSettings.StorageMode == StorageMode.Stream || _subsonicSettings.StorageMode == StorageMode.Cache))
+        if (isExternal && _subsonicSettings.DownloadOnStar)
         {
-            _logger.LogInformation("Starring external song {SongId}, triggering permanent download", itemId);
-            
-            // Trigger background download (permanent, ignoring current storage mode)
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    // Force permanent download by calling DownloadSongAsync directly
-                    var localPath = await _downloadService.DownloadSongAsync(provider!, externalId!, CancellationToken.None);
-                    _logger.LogInformation("Download-on-star completed: {Path}", localPath);
-                    
-                    // Trigger library scan to register the new file
-                    await _localLibraryService.TriggerLibraryScanAsync();
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Failed to download starred song {SongId}", itemId);
-                }
-            });
-            
+            // No storage-mode gate any more. It used to exclude Permanent on the grounds
+            // that playing a track there already downloads it, but that was only ever true
+            // through the blocking play path — so in Permanent mode a star fell through to
+            // the relay and errored on an id Navidrome has never seen.
+            //
+            // Stars ride the queue's own channel: explicit user intent is never shed under
+            // load the way a play is, and the request carries the album-walk flag rather
+            // than inheriting whatever a concurrent play happened to ask for.
+            _logger.LogInformation("Starring external song {SongId}, queueing permanent download", itemId);
+
+            _ = _acquisitions.Enqueue(provider!, externalId!, isStar: true,
+                triggerAlbumDownload: true, forcePermanent: true);
+
             // Return success response immediately
             return _responseBuilder.CreateResponse(format, "starred", new { });
         }
@@ -2043,13 +2115,19 @@ public class SubsonicController : ControllerBase
     /// fields a Navidrome-mode client reads to render and play a row are populated.
     /// The id is Octo's external id, which /rest/stream and /rest/getCoverArt resolve.
     /// </summary>
-    private static JsonObject BuildNativeSongObject(Song s)
+    private JsonObject BuildNativeSongObject(Song s)
     {
         var artistId = string.IsNullOrEmpty(s.ArtistId) ? s.Id + "-ar" : s.ArtistId!;
         var albumId = string.IsNullOrEmpty(s.AlbumId) ? s.Id + "-al" : s.AlbumId!;
         var duration = s.Duration ?? 0;
-        const string suffix = "m4a";
-        const int bitRate = 128; // format 140 AAC ~128 kbps
+        // Navidrome-mode clients take their contract from HERE and never from
+        // SubsonicResponseBuilder, so this has to follow the same setting or the native
+        // path keeps promising m4a while /rest/stream hands back a FLAC. Note the two
+        // serializers are not symmetric: this one emits no contentType at all, and
+        // defaults an unknown duration to 0 where the Subsonic one uses 180.
+        var lossless = _subsonicSettings.WaitForLosslessOnPlay;
+        var suffix = lossless ? "flac" : "m4a";
+        var bitRate = lossless ? 950 : 128; // format 140 AAC ~128 kbps; FLAC lands ~850-1000
         long size = duration > 0 ? (long)duration * bitRate * 1000L / 8 : 0;
 
         var o = new JsonObject

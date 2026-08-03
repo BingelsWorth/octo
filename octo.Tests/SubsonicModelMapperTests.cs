@@ -18,7 +18,7 @@ public class SubsonicModelMapperTests
 
     public SubsonicModelMapperTests()
     {
-        _responseBuilder = new SubsonicResponseBuilder(new Octo.Services.Soulseek.ExternalIdRegistry());
+        _responseBuilder = new SubsonicResponseBuilder(new Octo.Services.Soulseek.ExternalIdRegistry(), Microsoft.Extensions.Options.Options.Create(new Octo.Models.Settings.SubsonicSettings()));
         _mockLogger = new Mock<ILogger<SubsonicModelMapper>>();
         _mapper = new SubsonicModelMapper(_responseBuilder, _mockLogger.Object);
     }

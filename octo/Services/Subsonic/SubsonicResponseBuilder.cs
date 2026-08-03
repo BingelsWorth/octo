@@ -17,9 +17,18 @@ public class SubsonicResponseBuilder
 
     private readonly ExternalIdRegistry _idRegistry;
 
-    public SubsonicResponseBuilder(ExternalIdRegistry idRegistry)
+    /// <summary>
+    /// Whether an external id resolves to a lossless file. Read once at construction on
+    /// purpose: it decides what every search result DECLARES, so it must not change under
+    /// a client that has already cached those rows. The setting is restart-required.
+    /// </summary>
+    private readonly bool _externalsAreLossless;
+
+    public SubsonicResponseBuilder(ExternalIdRegistry idRegistry,
+        Microsoft.Extensions.Options.IOptions<Models.Settings.SubsonicSettings> subsonicSettings)
     {
         _idRegistry = idRegistry;
+        _externalsAreLossless = subsonicSettings.Value.WaitForLosslessOnPlay;
     }
 
     /// <summary>
@@ -325,9 +334,17 @@ public class SubsonicResponseBuilder
         // real bytes, otherwise Subsonic clients prep the wrong decoder and the
         // play silently fails (Feishin holds at "loading", Arpeggi drops the entry
         // from the queue). Earlier versions claimed mp3/192k here; that was a lie.
-        var bitRate  = song.IsLocal ? 1411 : 128;
-        var suffix   = song.IsLocal ? "flac" : "m4a";
-        var contentType = song.IsLocal ? "audio/flac" : "audio/mp4";
+        // With WaitForLosslessOnPlay on, /rest/stream serves the fetched FLAC under this
+        // same id, so it has to be declared as one. 950 rather than 1411 because that
+        // figure is uncompressed PCM and real FLAC compresses well below it: a measured
+        // Mezzanine track came out at ~840kbps, where 1411 would have overstated its size
+        // by about 70%. suffix and contentType are the contract a client picks its decoder
+        // from and are exact; size and bitRate are estimates either way, since a FLAC's
+        // true size cannot be known before it is fetched.
+        var losslessExternal = !song.IsLocal && _externalsAreLossless;
+        var bitRate  = song.IsLocal ? 1411 : losslessExternal ? 950 : 128;
+        var suffix   = song.IsLocal || losslessExternal ? "flac" : "m4a";
+        var contentType = song.IsLocal || losslessExternal ? "audio/flac" : "audio/mp4";
         var duration = song.Duration ?? 180;
         var estSize  = (long)duration * bitRate * 125;
 

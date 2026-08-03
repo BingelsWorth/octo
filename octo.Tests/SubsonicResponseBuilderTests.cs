@@ -12,7 +12,7 @@ public class SubsonicResponseBuilderTests
 
     public SubsonicResponseBuilderTests()
     {
-        _builder = new SubsonicResponseBuilder(new Octo.Services.Soulseek.ExternalIdRegistry());
+        _builder = new SubsonicResponseBuilder(new Octo.Services.Soulseek.ExternalIdRegistry(), Microsoft.Extensions.Options.Options.Create(new Octo.Models.Settings.SubsonicSettings()));
     }
 
     [Fact]
@@ -349,5 +349,62 @@ public class SubsonicResponseBuilderTests
         
         Assert.Equal(0, albumData.GetProperty("songCount").GetInt32());
         Assert.Equal(0, albumData.GetProperty("duration").GetInt32());
+    }
+
+    // ---- Declared format must match the bytes that will arrive -----------------
+    // A Subsonic client picks its decoder from suffix/contentType, so declaring one
+    // thing and serving another makes playback fail silently rather than error. The
+    // comment above ConvertSongToJson records that this was already shipped wrong once.
+
+    private static SubsonicResponseBuilder BuilderWith(bool waitForLossless) =>
+        new(new Octo.Services.Soulseek.ExternalIdRegistry(),
+            Microsoft.Extensions.Options.Options.Create(
+                new Octo.Models.Settings.SubsonicSettings { WaitForLosslessOnPlay = waitForLossless }));
+
+    private static Song ExternalSong() => new()
+    {
+        Id = "abc123", Title = "Teardrop", Artist = "Massive Attack",
+        Duration = 330, IsLocal = false, ExternalProvider = "soulseek", ExternalId = "abc123",
+    };
+
+    [Fact]
+    public void ExternalSong_DeclaresLossy_WhenNotWaitingForLossless()
+    {
+        var row = BuilderWith(false).ConvertSongToJson(ExternalSong());
+
+        Assert.Equal("m4a", row["suffix"]);
+        Assert.Equal("audio/mp4", row["contentType"]);
+        Assert.Equal(128, row["bitRate"]);
+    }
+
+    /// <summary>
+    /// With the wait enabled, /rest/stream serves the fetched FLAC under this same id,
+    /// so the row has to say so. Declaring m4a here is the exact mismatch that leaves
+    /// players stuck on "loading".
+    /// </summary>
+    [Fact]
+    public void ExternalSong_DeclaresLossless_WhenWaitingForLossless()
+    {
+        var row = BuilderWith(true).ConvertSongToJson(ExternalSong());
+
+        Assert.Equal("flac", row["suffix"]);
+        Assert.Equal("audio/flac", row["contentType"]);
+        // Estimated. Well below the 1411 of uncompressed PCM, which would overstate a
+        // real FLAC's size by roughly 70%.
+        Assert.Equal(950, row["bitRate"]);
+    }
+
+    [Fact]
+    public void LocalSong_AlwaysDeclaresFlac_RegardlessOfSetting()
+    {
+        var local = ExternalSong();
+        local.IsLocal = true;
+
+        foreach (var waiting in new[] { false, true })
+        {
+            var row = BuilderWith(waiting).ConvertSongToJson(local);
+            Assert.Equal("flac", row["suffix"]);
+            Assert.Equal(1411, row["bitRate"]);
+        }
     }
 }

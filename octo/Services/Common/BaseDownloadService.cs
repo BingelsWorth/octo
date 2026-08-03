@@ -112,6 +112,10 @@ public abstract class BaseDownloadService : IDownloadService
         return IOFile.OpenRead(localPath);
     }
     
+    public Task<string> ExecuteAcquisitionAsync(string externalProvider, string externalId,
+        bool triggerAlbumDownload, bool forcePermanent, CancellationToken cancellationToken) =>
+        DownloadSongInternalAsync(externalProvider, externalId, triggerAlbumDownload, cancellationToken, forcePermanent);
+
     public DownloadInfo? GetDownloadStatus(string songId)
     {
         ActiveDownloads.TryGetValue(songId, out var info);
@@ -279,7 +283,12 @@ public abstract class BaseDownloadService : IDownloadService
         
         // Acquire lock BEFORE checking existence to prevent race conditions with concurrent requests
         await DownloadLock.WaitAsync(cancellationToken);
-        
+        // The in-progress branch below releases early so it can wait without holding the
+        // lock, and the finally would then release a second time. On a SemaphoreSlim(1,1)
+        // that either throws from inside a finally, discarding a successful return, or
+        // worse succeeds and lets two callers hold a mutex that permits one.
+        var lockHeld = true;
+
         try
         {
             // Check if already downloaded (skip for cache mode as we want to check cache folder)
@@ -311,7 +320,8 @@ public abstract class BaseDownloadService : IDownloadService
                 Logger.LogInformation("Download already in progress for {SongId}, waiting...", songId);
                 // Release lock while waiting
                 DownloadLock.Release();
-                
+                lockHeld = false;
+
                 while (ActiveDownloads.TryGetValue(songId, out activeDownload) && activeDownload.Status == DownloadStatus.InProgress)
                 {
                     await Task.Delay(500, cancellationToken);
@@ -370,19 +380,25 @@ public abstract class BaseDownloadService : IDownloadService
             };
             ActiveDownloads[songId] = downloadInfo;
 
+            // The TRANSFER is cancellable. Everything below it is the FINALIZE
+            // phase and deliberately is not: once bytes exist on disk, tagging,
+            // registration and the rescan must all run or the file becomes an
+            // orphan that Octo has no record of. A client giving up on a slow
+            // download used to abort exactly here, which is why a completed
+            // download could never be played.
             var localPath = await DownloadTrackAsync(externalId, song, cancellationToken);
-            
+
             downloadInfo.Status = DownloadStatus.Completed;
             downloadInfo.LocalPath = localPath;
             downloadInfo.CompletedAt = DateTime.UtcNow;
-            
+
             song.LocalPath = localPath;
 
             // Enrich from Deezer and write rich tags + real album art onto the file.
             // Downloads otherwise arrive bare (YouTube: artist/title + a video
             // thumbnail; Soulseek: whatever the peer tagged), so this is what makes
             // every fetched song a properly-tagged library citizen.
-            await EnrichAndTagAsync(song, localPath, cancellationToken);
+            await EnrichAndTagAsync(song, localPath, CancellationToken.None);
 
             // Check if this track belongs to a playlist and update M3U
             if (PlaylistSyncService != null)
@@ -452,10 +468,10 @@ public abstract class BaseDownloadService : IDownloadService
         }
         finally
         {
-            DownloadLock.Release();
+            if (lockHeld) DownloadLock.Release();
         }
     }
-    
+
     protected async Task DownloadRemainingAlbumTracksAsync(string albumExternalId, string excludeTrackExternalId)
     {
         Logger.LogInformation("Starting background download for album {AlbumId} (excluding track {TrackId})", 

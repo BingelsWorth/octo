@@ -38,6 +38,14 @@ public interface IDownloadService
     void DownloadRemainingAlbumTracksInBackground(string externalProvider, string albumExternalId, string excludeTrackExternalId);
     
     /// <summary>
+    /// Run one queued acquisition to completion. Called only by the acquisition worker,
+    /// which supplies a token unrelated to any HTTP request — that separation is the whole
+    /// point, since a client giving up must never cancel a transfer slskd will finish.
+    /// </summary>
+    Task<string> ExecuteAcquisitionAsync(string externalProvider, string externalId,
+        bool triggerAlbumDownload, bool forcePermanent, CancellationToken cancellationToken);
+
+    /// <summary>
     /// Checks if a song is currently being downloaded
     /// </summary>
     DownloadInfo? GetDownloadStatus(string songId);

@@ -212,6 +212,10 @@ The admin UI's "Config sources" tab shows the merged effective value for every k
 - `Permanent` — every song you play gets downloaded.
 - `Cache` — downloads expire after `CacheDurationHours`.
 
+In `Permanent` mode the download runs in the background and playback starts immediately from the preview source. The lossless copy lands in your library and shows up as its own track once your server scans it, so a track you have played appears twice for a while: the preview entry and the real file. **The star stays on the preview entry**, so re-star the library copy if you want it favourited there.
+
+Set `WAIT_FOR_LOSSLESS_ON_PLAY=true` if you would rather the first play wait for the lossless file. It is off by default because a Soulseek fetch routinely takes minutes and most clients time out long before that, which looks like the play failing. The setting also changes what searches advertise for external tracks, so it needs a restart, and clients that cached earlier results should re-search after you change it.
+
 ### Folder layouts
 
 - `Flat` *(default)* — `Artist - Title.flac`.

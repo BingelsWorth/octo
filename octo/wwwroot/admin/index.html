@@ -323,7 +323,7 @@
             <div class="set-row">
               <div class="set-info">
                 <div class="set-info-t">Download a song when starred</div>
-                <div class="set-info-d">Stream/Cache modes only. Permanent already downloads every play.</div>
+                <div class="set-info-d">Works in every storage mode.</div>
               </div>
               <label class="switch"><input type="checkbox" id="f-download-on-star" name="Subsonic.DownloadOnStar" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
             </div>
@@ -333,6 +333,13 @@
                 <div class="set-info-d">Star a whole album to fetch every track. Downloads run one at a time, so a full album takes a while.</div>
               </div>
               <label class="switch"><input type="checkbox" id="f-download-album-on-star" name="Subsonic.DownloadAlbumOnStar" data-restart="true" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Wait for lossless on first play</div>
+                <div class="set-info-d">Permanent mode only. Off, a track plays straight away and the lossless copy turns up as its own library track once the scan finds it. On, the first play waits for the lossless file, which can take minutes and which most players give up on.</div>
+              </div>
+              <label class="switch"><input type="checkbox" id="f-wait-for-lossless-on-play" name="Subsonic.WaitForLosslessOnPlay" data-restart="true" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
             </div>
           </form>
         </div>
