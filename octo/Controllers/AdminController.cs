@@ -34,6 +34,8 @@ public class AdminController : ControllerBase
     private readonly SubsonicProxyService _proxy;
     private readonly SubsonicDiscoveryService _discovery;
     private readonly Octo.Services.Local.DownloadHistoryService _history;
+    private readonly Octo.Services.Metadata.DeezerMetadataService _deezer;
+    private readonly Octo.Services.CoverArt.CoverArtAggregator _coverArt;
     private readonly IHttpClientFactory _httpFactory;
     private readonly IHostApplicationLifetime _lifetime;
     private readonly ILogger<AdminController> _logger;
@@ -48,10 +50,14 @@ public class AdminController : ControllerBase
         SubsonicProxyService proxy,
         SubsonicDiscoveryService discovery,
         Octo.Services.Local.DownloadHistoryService history,
+        Octo.Services.Metadata.DeezerMetadataService deezer,
+        Octo.Services.CoverArt.CoverArtAggregator coverArt,
         IHttpClientFactory httpFactory,
         IHostApplicationLifetime lifetime,
         ILogger<AdminController> logger)
     {
+        _deezer = deezer;
+        _coverArt = coverArt;
         _settings = settings;
         _subsonicOpts = subsonicOpts;
         _soulseekOpts = soulseekOpts;
@@ -510,4 +516,22 @@ public class AdminController : ControllerBase
             ?.Split('+')[0]
         ?? typeof(AdminController).Assembly.GetName().Version?.ToString()
         ?? "unknown";
+
+    /// <summary>
+    /// Drop every cached metadata answer and cover image.
+    ///
+    /// Cached entries now expire on their own, so this is a recovery lever rather than
+    /// routine maintenance: it turns "wait for the TTL" into "fixed now" when a run of
+    /// throttled upstream calls has left albums or covers looking wrong. Clearing every
+    /// instance matters, because a poisoned entry surviving in one of them would outlive
+    /// the very button meant to remove it.
+    /// </summary>
+    [HttpPost("clear-metadata-cache")]
+    public IActionResult ClearMetadataCache()
+    {
+        _deezer.ClearCaches();
+        _coverArt.ClearCache();
+        _logger.LogInformation("Metadata and cover-art caches cleared by admin request");
+        return Ok(new { cleared = true });
+    }
 }

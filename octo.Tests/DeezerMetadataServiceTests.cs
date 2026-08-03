@@ -360,6 +360,30 @@ public class DeezerMetadataServiceTests
         Assert.Equal("711108", second[0].DeezerId);
     }
 
+    /// <summary>
+    /// Entries now expire on their own, but a definitive negative still sticks for its TTL.
+    /// ClearCaches is the lever that turns "wait for the TTL" into "fixed now", so it has
+    /// to actually drop cached answers.
+    /// </summary>
+    [Fact]
+    public async Task ClearCaches_ForcesARefetch()
+    {
+        var svc = BuildSequencedService(new()
+        {
+            ("/album/999/tracks", new[] { TracksJson(3) }),
+            ("/album/999", new[] { NoDataEnvelope, AlbumDetailJson }),
+        }, out var calls);
+
+        Assert.Null(await svc.GetAlbumDetailAsync("999"));
+        Assert.Null(await svc.GetAlbumDetailAsync("999"));
+        Assert.Equal(1, calls("/album/999"));
+
+        svc.ClearCaches();
+
+        Assert.NotNull(await svc.GetAlbumDetailAsync("999"));
+        Assert.Equal(2, calls("/album/999"));
+    }
+
     /// <summary>A throttled track search must not be cached as "this track has no metadata".</summary>
     [Fact]
     public async Task EnrichTrackAsync_Throttled_NotCachedAndRecoversOnRetry()

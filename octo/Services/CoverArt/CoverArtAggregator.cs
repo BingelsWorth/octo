@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+using Microsoft.Extensions.Caching.Memory;
 using Octo.Services.Soulseek;
 
 namespace Octo.Services.CoverArt;
@@ -14,13 +14,25 @@ namespace Octo.Services.CoverArt;
 /// Last.fm last because its track image often points to the same iTunes
 /// asset we'd have gotten one source earlier.
 /// </summary>
-public class CoverArtAggregator
+public class CoverArtAggregator : IDisposable
 {
     private readonly IReadOnlyList<ICoverArtSource> _sources;
     private readonly ILogger<CoverArtAggregator> _logger;
 
-    private readonly ConcurrentDictionary<string, byte[]?> _cache = new();
-    private const int MaxCacheEntries = 4000;
+    // Bounded in BYTES, and on its own instance rather than shared with the metadata
+    // caches: these entries are 1000x1000 JPEGs at 150-400KB each, so an entry count
+    // that suits small metadata records would be a meaningless bound here.
+    private const long MaxCacheBytes = 256L * 1024 * 1024;
+    private readonly MemoryCache _cache = new(new MemoryCacheOptions { SizeLimit = MaxCacheBytes });
+
+    private static readonly TimeSpan HitTtl = TimeSpan.FromHours(12);
+
+    /// <summary>A miss can be caused by a source being throttled, so it must not be
+    /// remembered for long enough to blank a cover for the life of the process.</summary>
+    private static readonly TimeSpan MissTtl = TimeSpan.FromMinutes(5);
+
+    /// <summary>Wrapper so a cached miss is distinguishable from a cache miss.</summary>
+    private sealed record Entry(byte[]? Bytes);
 
     public CoverArtAggregator(IEnumerable<ICoverArtSource> sources, ILogger<CoverArtAggregator> logger)
     {
@@ -33,16 +45,7 @@ public class CoverArtAggregator
     public async Task<byte[]?> GetCoverAsync(SoulseekRouting routing, CancellationToken ct = default)
     {
         var cacheKey = MakeCacheKey(routing);
-        if (_cache.TryGetValue(cacheKey, out var cached)) return cached;
-
-        // Bounded LRU-ish trim: when we cross the cap, drop the first half by
-        // dictionary order. ConcurrentDictionary doesn't preserve insertion
-        // order strictly but it's close enough — cache misses just re-fetch.
-        if (_cache.Count > MaxCacheEntries)
-        {
-            foreach (var key in _cache.Keys.Take(_cache.Count / 2))
-                _cache.TryRemove(key, out _);
-        }
+        if (_cache.TryGetValue(cacheKey, out Entry? cached)) return cached!.Bytes;
 
         foreach (var source in _sources)
         {
@@ -59,15 +62,32 @@ public class CoverArtAggregator
             if (bytes is { Length: > 0 })
             {
                 _logger.LogDebug("cover {Source} hit for {Key} ({Bytes} bytes)", source.Name, cacheKey, bytes.Length);
-                _cache[cacheKey] = bytes;
+                Put(cacheKey, bytes, bytes.Length, HitTtl);
                 return bytes;
             }
         }
 
         _logger.LogDebug("cover all-miss for {Key}", cacheKey);
-        _cache[cacheKey] = null;
+        Put(cacheKey, null, 1, MissTtl);
         return null;
     }
+
+    private void Put(string key, byte[]? bytes, long size, TimeSpan ttl) =>
+        _cache.Set(key, new Entry(bytes), new MemoryCacheEntryOptions
+        {
+            Size = size,
+            AbsoluteExpirationRelativeToNow = ttl,
+        });
+
+    /// <summary>Drop every cached cover. Exposed so a run of throttled lookups can be
+    /// cleared without restarting the container.</summary>
+    public void ClearCache()
+    {
+        _cache.Clear();
+        _logger.LogInformation("cover art cache cleared");
+    }
+
+    public void Dispose() => _cache.Dispose();
 
     private static string MakeCacheKey(SoulseekRouting r)
     {
