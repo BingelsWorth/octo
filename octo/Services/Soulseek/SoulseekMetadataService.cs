@@ -336,18 +336,35 @@ public class SoulseekMetadataService : IMusicMetadataService
             ExternalId = externalId,
         };
 
-        if (string.IsNullOrEmpty(deezerAlbumId)) return album;
+        if (string.IsNullOrEmpty(deezerAlbumId))
+        {
+            // Logged rather than silent: this is what a user sees as an album that opens
+            // with no tracks, and without a line here there is nothing to diagnose from.
+            _logger.LogWarning(
+                "getAlbum '{Artist} - {Album}' ({Id}): no Deezer album id resolved; returning album without a tracklist",
+                routing.Artist, placeholder, externalId);
+            return album;
+        }
 
         var detail = await _deezer.GetAlbumDetailAsync(deezerAlbumId);
         // An album with no resolvable tracklist must still render, so fall through with
         // whatever we already have rather than failing the request.
-        if (detail is null) return album;
+        if (detail is null)
+        {
+            _logger.LogWarning(
+                "getAlbum '{Artist} - {Album}' ({Id}): Deezer album {DeezerId} returned no usable detail "
+                + "(see the deezer warning above for why); returning album without a tracklist",
+                routing.Artist, placeholder, externalId, deezerAlbumId);
+            return album;
+        }
 
         album.Title = detail.Title;
         album.Year = detail.Year ?? album.Year;
         album.Genre = detail.Genre;
         album.CoverArtUrl = detail.CoverUrl ?? album.CoverArtUrl;
-        album.SongCount = detail.Tracks.Count;
+        // Defence in depth: the Deezer layer no longer returns a tracklist-less album,
+        // but if one ever gets through, reporting zero is worse than saying nothing.
+        if (detail.Tracks.Count > 0) album.SongCount = detail.Tracks.Count;
         if (!string.IsNullOrWhiteSpace(detail.Artist)) album.Artist = detail.Artist;
 
         foreach (var track in detail.Tracks)

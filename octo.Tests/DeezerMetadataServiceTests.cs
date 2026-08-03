@@ -38,6 +38,68 @@ public class DeezerMetadataServiceTests
         return new DeezerMetadataService(factory.Object, new Mock<ILogger<DeezerMetadataService>>().Object);
     }
 
+    /// <summary>Deezer reports throttling as HTTP 200 with this body, which is the whole
+    /// reason a parsed document cannot be treated as a successful call.</summary>
+    private const string QuotaEnvelope =
+        @"{""error"":{""type"":""Exception"",""message"":""Quota limit exceeded"",""code"":4}}";
+
+    /// <summary>Deezer's only "this really does not exist" answer, also HTTP 200.</summary>
+    private const string NoDataEnvelope =
+        @"{""error"":{""type"":""DataException"",""message"":""no data"",""code"":800}}";
+
+    /// <summary>Like <see cref="BuildService"/>, but each route serves its bodies in order
+    /// and repeats the last one once exhausted, so a test can make a call fail and then
+    /// succeed. Routes are matched by url SUBSTRING, so "/album/1/tracks" must be
+    /// registered before "/album/1" or the shorter needle swallows both.</summary>
+    private static DeezerMetadataService BuildSequencedService(
+        List<(string Needle, string[] Bodies)> routes, out Func<string, int> callCount)
+    {
+        var counts = new Dictionary<string, int>();
+        var gate = new object();
+
+        var handler = new Mock<HttpMessageHandler>();
+        handler.Protected()
+            .Setup<Task<HttpResponseMessage>>("SendAsync",
+                ItExpr.IsAny<HttpRequestMessage>(),
+                ItExpr.IsAny<CancellationToken>())
+            .ReturnsAsync((HttpRequestMessage req, CancellationToken _) =>
+            {
+                var url = req.RequestUri!.ToString();
+                lock (gate)
+                {
+                    foreach (var (needle, bodies) in routes)
+                    {
+                        if (!url.Contains(needle, StringComparison.OrdinalIgnoreCase)) continue;
+                        counts.TryGetValue(needle, out var n);
+                        counts[needle] = n + 1;
+                        return new HttpResponseMessage(HttpStatusCode.OK)
+                        {
+                            Content = new StringContent(bodies[Math.Min(n, bodies.Length - 1)]),
+                        };
+                    }
+                }
+                return new HttpResponseMessage(HttpStatusCode.NotFound);
+            });
+
+        var factory = new Mock<IHttpClientFactory>();
+        factory.Setup(f => f.CreateClient(It.IsAny<string>()))
+            .Returns(() => new HttpClient(handler.Object));
+
+        callCount = needle => { lock (gate) { return counts.TryGetValue(needle, out var n) ? n : 0; } };
+        return new DeezerMetadataService(factory.Object, new Mock<ILogger<DeezerMetadataService>>().Object);
+    }
+
+    private const string AlbumDetailJson =
+        @"{""id"":711108,""title"":""Canciones Prohibidas"",""nb_tracks"":10,""label"":""WM Spain"",
+           ""release_date"":""1998-04-30"",""cover_xl"":""https://cdn/xl.jpg"",
+           ""artist"":{""name"":""Extremoduro""},""genres"":{""data"":[{""name"":""Pop""}]}}";
+
+    private static string TracksJson(int count) =>
+        @"{""total"":" + count + @",""data"":[" + string.Join(",",
+            Enumerable.Range(1, count).Select(i =>
+                $@"{{""title"":""Track {i}"",""duration"":200,""track_position"":{i},
+                     ""disk_number"":1,""artist"":{{""name"":""Extremoduro""}}}}")) + "]}";
+
     [Fact]
     public async Task SearchAlbumsAsync_MapsFieldsAndDropsSingles()
     {
@@ -157,5 +219,166 @@ public class DeezerMetadataServiceTests
 
         Assert.Empty(await svc.SearchAlbumsAsync("", 10));
         Assert.Empty(await svc.SearchAlbumsAsync("q", 0));
+    }
+
+    // ---- Quota-poisoning regression tests (issue #8) ------------------------
+    // Deezer answers HTTP 200 even when refusing a call, so a parsed document is not
+    // a successful call. Caching one of those refusals is what made an album report
+    // songCount 0 permanently.
+
+    /// <summary>
+    /// The exact reported failure: the album call succeeds and the TRACKLIST call is
+    /// throttled, which used to build a valid AlbumDetail carrying real title/year/genre
+    /// with an empty tracklist and cache it forever.
+    /// </summary>
+    [Fact]
+    public async Task GetAlbumDetailAsync_TracklistThrottled_NotCachedAndRecoversOnRetry()
+    {
+        var svc = BuildSequencedService(new()
+        {
+            // Longest needle first: "/album/711108" is a prefix of the tracks url.
+            ("/album/711108/tracks", new[] { QuotaEnvelope, TracksJson(10) }),
+            ("/album/711108", new[] { AlbumDetailJson }),
+        }, out var calls);
+
+        var first = await svc.GetAlbumDetailAsync("711108");
+        Assert.Null(first);
+
+        var second = await svc.GetAlbumDetailAsync("711108");
+        Assert.NotNull(second);
+        Assert.Equal(10, second!.Tracks.Count);
+        Assert.Equal("Canciones Prohibidas", second.Title);
+        Assert.Equal(1998, second.Year);
+
+        // Proves it retried rather than serving a cached failure.
+        Assert.Equal(2, calls("/album/711108/tracks"));
+    }
+
+    /// <summary>The other poisoning branch: the album call itself is throttled.</summary>
+    [Fact]
+    public async Task GetAlbumDetailAsync_AlbumCallThrottled_NotCachedAndRecoversOnRetry()
+    {
+        var svc = BuildSequencedService(new()
+        {
+            ("/album/711108/tracks", new[] { TracksJson(10) }),
+            ("/album/711108", new[] { QuotaEnvelope, AlbumDetailJson }),
+        }, out _);
+
+        Assert.Null(await svc.GetAlbumDetailAsync("711108"));
+
+        var second = await svc.GetAlbumDetailAsync("711108");
+        Assert.NotNull(second);
+        Assert.Equal(10, second!.Tracks.Count);
+    }
+
+    /// <summary>
+    /// Int() returns int?, and a lifted "nbTracks > 0" is FALSE when nb_tracks is absent.
+    /// Testing that alone would let an empty tracklist through and cache it, leaving the
+    /// reported bug fixed only for albums that happen to report a track count.
+    /// </summary>
+    [Fact]
+    public async Task GetAlbumDetailAsync_EmptyTracklistAndNoTrackCount_NotCached()
+    {
+        const string noNbTracks =
+            @"{""id"":711108,""title"":""Canciones Prohibidas"",""artist"":{""name"":""Extremoduro""}}";
+
+        var svc = BuildSequencedService(new()
+        {
+            ("/album/711108/tracks", new[] { @"{""data"":[]}", TracksJson(10) }),
+            ("/album/711108", new[] { noNbTracks, AlbumDetailJson }),
+        }, out _);
+
+        Assert.Null(await svc.GetAlbumDetailAsync("711108"));
+
+        var second = await svc.GetAlbumDetailAsync("711108");
+        Assert.NotNull(second);
+        Assert.Equal(10, second!.Tracks.Count);
+    }
+
+    /// <summary>
+    /// The case the guard must NOT break: Deezer says the album has zero tracks and
+    /// returns zero tracks. That is an answer, so it is cached rather than refetched
+    /// on every getAlbum forever.
+    /// </summary>
+    [Fact]
+    public async Task GetAlbumDetailAsync_GenuinelyEmptyAlbum_IsAnsweredAndCached()
+    {
+        const string zeroTracks =
+            @"{""id"":42,""title"":""Empty"",""nb_tracks"":0,""artist"":{""name"":""Nobody""}}";
+
+        var svc = BuildSequencedService(new()
+        {
+            ("/album/42/tracks", new[] { @"{""total"":0,""data"":[]}" }),
+            ("/album/42", new[] { zeroTracks }),
+        }, out var calls);
+
+        var first = await svc.GetAlbumDetailAsync("42");
+        Assert.NotNull(first);
+        Assert.Empty(first!.Tracks);
+
+        await svc.GetAlbumDetailAsync("42");
+        Assert.Equal(1, calls("/album/42/tracks"));
+    }
+
+    /// <summary>A definitive "no data" is cacheable, unlike a throttle.</summary>
+    [Fact]
+    public async Task GetAlbumDetailAsync_DefinitiveNoData_IsCached()
+    {
+        var svc = BuildSequencedService(new()
+        {
+            ("/album/999/tracks", new[] { TracksJson(3) }),
+            ("/album/999", new[] { NoDataEnvelope, AlbumDetailJson }),
+        }, out var calls);
+
+        Assert.Null(await svc.GetAlbumDetailAsync("999"));
+        Assert.Null(await svc.GetAlbumDetailAsync("999"));
+
+        // One call only: a definitive answer is allowed to stick.
+        Assert.Equal(1, calls("/album/999"));
+    }
+
+    /// <summary>
+    /// A throttled album search used to cache an empty list, so external albums silently
+    /// stopped appearing in search3 for the life of the process.
+    /// </summary>
+    [Fact]
+    public async Task SearchAlbumsAsync_Throttled_NotCachedAndRecoversOnRetry()
+    {
+        const string results =
+            @"{""data"":[{""id"":711108,""title"":""Canciones Prohibidas"",""record_type"":""album"",
+               ""nb_tracks"":10,""cover_xl"":""https://cdn/xl.jpg"",""artist"":{""name"":""Extremoduro""}}]}";
+
+        var svc = BuildSequencedService(new()
+        {
+            ("/search/album", new[] { QuotaEnvelope, results }),
+        }, out _);
+
+        Assert.Empty(await svc.SearchAlbumsAsync("extremoduro golfa", 10));
+
+        var second = await svc.SearchAlbumsAsync("extremoduro golfa", 10);
+        Assert.Single(second);
+        Assert.Equal("711108", second[0].DeezerId);
+    }
+
+    /// <summary>A throttled track search must not be cached as "this track has no metadata".</summary>
+    [Fact]
+    public async Task EnrichTrackAsync_Throttled_NotCachedAndRecoversOnRetry()
+    {
+        const string track =
+            @"{""data"":[{""title"":""Golfa"",""duration"":359,
+               ""album"":{""id"":711108,""title"":""Canciones Prohibidas"",""cover_xl"":""https://cdn/xl.jpg""},
+               ""artist"":{""name"":""Extremoduro""}}]}";
+
+        var svc = BuildSequencedService(new()
+        {
+            ("/search?q=", new[] { QuotaEnvelope, track }),
+            ("/album/711108", new[] { AlbumDetailJson }),
+        }, out _);
+
+        Assert.Null(await svc.EnrichTrackAsync("Extremoduro", "Golfa"));
+
+        var second = await svc.EnrichTrackAsync("Extremoduro", "Golfa");
+        Assert.NotNull(second);
+        Assert.Equal("Canciones Prohibidas", second!.AlbumTitle);
     }
 }
