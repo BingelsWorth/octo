@@ -25,7 +25,9 @@ public class DeezerCoverArtLookup : ICoverArtSource
 
     public DeezerCoverArtLookup(IHttpClientFactory httpClientFactory, ILogger<DeezerCoverArtLookup> logger)
     {
-        _http = httpClientFactory.CreateClient();
+        // Named so API calls go through the shared Deezer rate limiter. This same client
+        // also fetches the image bytes from the CDN, which the handler leaves unmetered.
+        _http = httpClientFactory.CreateClient(Octo.Services.Metadata.DeezerRateLimiter.ClientName);
         _http.Timeout = TimeSpan.FromSeconds(8);
         _logger = logger;
     }

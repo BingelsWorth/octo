@@ -124,7 +124,9 @@ public class DeezerMetadataService : IDisposable
 
     private HttpClient Client()
     {
-        var c = _httpFactory.CreateClient();
+        // Named so the rate-limiting handler is in the chain. Resolving the default
+        // client here would silently bypass Deezer's budget.
+        var c = _httpFactory.CreateClient(DeezerRateLimiter.ClientName);
         c.Timeout = TimeSpan.FromSeconds(8);
         return c;
     }
@@ -132,7 +134,8 @@ public class DeezerMetadataService : IDisposable
     /// <summary>Resolve "artist + title" to the real album + artist (name, art, year).
     /// Pass includeYear=false to skip the extra album-detail call (bulk enrichment
     /// wants duration + album fast; the year is fetched lazily by the album view).</summary>
-    public async Task<TrackMeta?> EnrichTrackAsync(string? artist, string? title, bool includeYear = true, CancellationToken ct = default)
+    public async Task<TrackMeta?> EnrichTrackAsync(string? artist, string? title, bool includeYear = true,
+        bool background = false, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(artist) && string.IsNullOrWhiteSpace(title)) return null;
         var key = $"t|{artist}|{title}".ToLowerInvariant();
@@ -142,7 +145,7 @@ public class DeezerMetadataService : IDisposable
         try
         {
             var q = Uri.EscapeDataString($"artist:\"{artist}\" track:\"{title}\"");
-            using var r = await GetJsonAsync($"{Base}/search?q={q}&limit=1", ct);
+            using var r = await GetJsonAsync($"{Base}/search?q={q}&limit=1", ct, background);
             if (r.Transient) return null;
             if (FirstData(r.Doc) is JsonElement t)
             {
@@ -492,12 +495,17 @@ public class DeezerMetadataService : IDisposable
         return (year, false);
     }
 
-    private async Task<DeezerResponse> GetJsonAsync(string url, CancellationToken ct)
+    private async Task<DeezerResponse> GetJsonAsync(string url, CancellationToken ct, bool background = false)
     {
         JsonDocument? doc = null;
         try
         {
-            using var resp = await Client().GetAsync(url, ct);
+            using var req = new HttpRequestMessage(HttpMethod.Get, url);
+            if (background) req.Options.Set(DeezerRateLimitHandler.BackgroundLane, true);
+
+            using var resp = await Client().SendAsync(req, ct);
+            // A 429 here is usually our OWN limiter shedding load rather than Deezer's,
+            // and either way it is transient, so nothing derived from it is cached.
             if (!resp.IsSuccessStatusCode) return new DeezerResponse { Transient = true };
 
             var s = await resp.Content.ReadAsStringAsync(ct);

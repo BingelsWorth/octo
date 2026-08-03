@@ -78,6 +78,17 @@ builder.Services.AddSingleton<RadioQueueStore>();
 builder.Services.AddSingleton<Octo.Services.Subsonic.NavidromeIdentityService>();
 builder.Services.AddSingleton<Octo.Services.Subsonic.SubsonicDiscoveryService>();
 builder.Services.AddSingleton<Octo.Services.Metadata.DeezerMetadataService>();
+
+// Deezer's public API allows roughly 50 requests per 5 seconds and signals refusal with
+// HTTP 200 plus an error body, so going over budget corrupts metadata rather than merely
+// failing. The limiter is the singleton that holds the budget; the handler is transient
+// because IHttpClientFactory recycles handler chains. Every Deezer caller must resolve
+// the named client or it bypasses this entirely.
+builder.Services.AddSingleton<Octo.Services.Metadata.DeezerRateLimiter>();
+builder.Services.AddTransient<Octo.Services.Metadata.DeezerRateLimitHandler>();
+builder.Services.AddHttpClient(Octo.Services.Metadata.DeezerRateLimiter.ClientName)
+    .AddHttpMessageHandler<Octo.Services.Metadata.DeezerRateLimitHandler>();
+
 builder.Services.AddSingleton<IMusicMetadataService, SoulseekMetadataService>();
 builder.Services.AddSingleton<IDownloadService, SoulseekDownloadService>();
 

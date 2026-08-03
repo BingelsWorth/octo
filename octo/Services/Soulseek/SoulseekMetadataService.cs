@@ -155,7 +155,7 @@ public class SoulseekMetadataService : IMusicMetadataService
             {
                 // Sequential on purpose: this has no deadline, and fanning out here is
                 // what would eat the quota the awaited set needs.
-                try { await _deezer.EnrichTrackAsync(song.Artist, song.Title, includeYear: false); }
+                try { await _deezer.EnrichTrackAsync(song.Artist, song.Title, includeYear: false, background: true); }
                 catch { /* best-effort */ }
             }
         });
