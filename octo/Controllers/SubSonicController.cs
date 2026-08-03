@@ -2115,13 +2115,19 @@ public class SubsonicController : ControllerBase
     /// fields a Navidrome-mode client reads to render and play a row are populated.
     /// The id is Octo's external id, which /rest/stream and /rest/getCoverArt resolve.
     /// </summary>
-    private static JsonObject BuildNativeSongObject(Song s)
+    private JsonObject BuildNativeSongObject(Song s)
     {
         var artistId = string.IsNullOrEmpty(s.ArtistId) ? s.Id + "-ar" : s.ArtistId!;
         var albumId = string.IsNullOrEmpty(s.AlbumId) ? s.Id + "-al" : s.AlbumId!;
         var duration = s.Duration ?? 0;
-        const string suffix = "m4a";
-        const int bitRate = 128; // format 140 AAC ~128 kbps
+        // Navidrome-mode clients take their contract from HERE and never from
+        // SubsonicResponseBuilder, so this has to follow the same setting or the native
+        // path keeps promising m4a while /rest/stream hands back a FLAC. Note the two
+        // serializers are not symmetric: this one emits no contentType at all, and
+        // defaults an unknown duration to 0 where the Subsonic one uses 180.
+        var lossless = _subsonicSettings.WaitForLosslessOnPlay;
+        var suffix = lossless ? "flac" : "m4a";
+        var bitRate = lossless ? 950 : 128; // format 140 AAC ~128 kbps; FLAC lands ~850-1000
         long size = duration > 0 ? (long)duration * bitRate * 1000L / 8 : 0;
 
         var o = new JsonObject
