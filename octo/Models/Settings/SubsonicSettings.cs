@@ -206,6 +206,18 @@ public class SubsonicSettings
     public bool WaitForLosslessOnPlay { get; set; } = false;
 
     /// <summary>
+    /// With WaitForLosslessOnPlay on, give up waiting after this many seconds and fall
+    /// back to the lossy preview while the fetch finishes in the background (default: 0,
+    /// wait as long as the fetch needs).
+    /// Environment variable: LOSSLESS_WAIT_TIMEOUT_SECONDS
+    ///
+    /// A fallback serves lossy bytes under an id this session declared lossless, which
+    /// strict clients can refuse to start. That trade is why it is opt-in and 0 keeps
+    /// the declared contract exact.
+    /// </summary>
+    public int LosslessWaitTimeoutSeconds { get; set; } = 0;
+
+    /// <summary>
     /// Folder structure for downloaded tracks (default: Flat)
     /// Environment variable: FOLDER_STRUCTURE
     /// Values: "Organized" (Artist/Album/Track.flac), "Flat" (Artist - Title.flac)

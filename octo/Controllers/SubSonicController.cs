@@ -566,7 +566,8 @@ public class SubsonicController : ControllerBase
 
             if (acquisition is not null && _subsonicSettings.WaitForLosslessOnPlay)
             {
-                return await ServeAcquiredAsync(acquisition, id, format);
+                return await ServeAcquiredAsync(acquisition, provider!, externalId!, id, format,
+                    allowPreviewFallback: true);
             }
 
             // Cache mode is deliberately left on its original path. It skips library
@@ -585,7 +586,10 @@ public class SubsonicController : ControllerBase
 
             // No YouTube match. Wait on the SAME queued acquisition rather than starting a
             // second one; without a lossless copy on the way there is nothing to serve.
-            if (acquisition is not null) return await ServeAcquiredAsync(acquisition, id, format);
+            // The preview already failed above, so a timeout fallback has nothing to serve.
+            if (acquisition is not null)
+                return await ServeAcquiredAsync(acquisition, provider!, externalId!, id, format,
+                    allowPreviewFallback: false);
 
             return _responseBuilder.CreateError(format, 70, "No playable source found for this track");
         }
@@ -608,22 +612,45 @@ public class SubsonicController : ControllerBase
     /// WaitAsync is what makes this safe: abandoning the WAIT leaves the transfer running,
     /// so a client that gives up costs it nothing.
     /// </summary>
-    private async Task<IActionResult> ServeAcquiredAsync(Task<string> acquisition, string id, string format)
+    private async Task<IActionResult> ServeAcquiredAsync(
+        Task<string> acquisition, string provider, string externalId, string id, string format,
+        bool allowPreviewFallback)
     {
+        // Above 0, the wait is bounded and the preview stands in while the fetch keeps
+        // running in the background; the next play of this id serves the landed file.
+        var timeout = Math.Max(0, _subsonicSettings.LosslessWaitTimeoutSeconds);
+        var fallback = allowPreviewFallback && timeout > 0;
+
         string path;
         try
         {
-            path = await acquisition.WaitAsync(HttpContext.RequestAborted);
+            path = fallback
+                ? await acquisition.WaitAsync(TimeSpan.FromSeconds(timeout), HttpContext.RequestAborted)
+                : await acquisition.WaitAsync(HttpContext.RequestAborted);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (HttpContext.RequestAborted.IsCancellationRequested)
         {
             return new EmptyResult();
         }
         catch (Exception ex)
         {
-            // Never fall back to the lossy stream here. This session declared the id
-            // lossless, so lossy bytes would be the same contract violation in reverse.
-            _logger.LogWarning(ex, "Lossless acquisition failed for {Id}", id);
+            if (fallback)
+            {
+                // The user opted into a bounded wait, trading the declared-lossless
+                // contract for playback that starts. Strict clients may refuse the
+                // lossy bytes; timeout 0 keeps the contract exact.
+                _logger.LogInformation(
+                    "Lossless wait ended early for {Id} ({Reason}); serving the preview while the fetch continues",
+                    id, ex is TimeoutException ? $"timeout {timeout}s" : ex.Message);
+                var preview = await TryDirectStreamAsync(provider, externalId, id);
+                if (preview is not null) return preview;
+            }
+            else
+            {
+                // Never fall back to the lossy stream here. This session declared the id
+                // lossless, so lossy bytes would be the same contract violation in reverse.
+                _logger.LogWarning(ex, "Lossless acquisition failed for {Id}", id);
+            }
             return _responseBuilder.CreateError(format, 70, $"Could not fetch a lossless copy: {ex.Message}");
         }
 

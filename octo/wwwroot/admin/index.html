@@ -341,6 +341,13 @@
               </div>
               <label class="switch"><input type="checkbox" id="f-wait-for-lossless-on-play" name="Subsonic.WaitForLosslessOnPlay" data-restart="true" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
             </div>
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Lossless wait timeout <span class="set-opt">seconds</span></div>
+                <div class="set-info-d">Only with the wait on. 0 waits as long as the fetch needs. Above 0, playback falls back to the streaming preview after this many seconds while the download finishes in the background; some players refuse the preview on a track advertised lossless.</div>
+              </div>
+              <input class="set-input" id="f-lossless-wait-timeout" name="Subsonic.LosslessWaitTimeoutSeconds" type="number" min="0" data-restart="true" />
+            </div>
           </form>
         </div>
       </section>
