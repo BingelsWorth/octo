@@ -324,45 +324,25 @@ public class SoulseekClient
 
                 var json = await resp.Content.ReadAsStringAsync(ct);
                 using var doc = JsonDocument.Parse(json);
-                if (doc.RootElement.ValueKind != JsonValueKind.Array)
+                var state = FindTransferState(doc.RootElement, filename);
+                bool foundThisPoll = state is not null;
+                if (foundThisPoll)
                 {
-                    if (seenAtLeastOnce) consecutiveMisses++;
-                    if (consecutiveMisses >= MaxConsecutiveMissesAfterSeen) return SoulseekTransferState.Errored;
-                    continue;
-                }
+                    seenAtLeastOnce = true;
+                    consecutiveMisses = 0;
 
-                // Walk the user/directory/file tree looking for our file.
-                bool foundThisPoll = false;
-                foreach (var userGroup in doc.RootElement.EnumerateArray())
-                {
-                    if (!userGroup.TryGetProperty("directories", out var dirs)) continue;
-                    foreach (var dir in dirs.EnumerateArray())
+                    if (state!.Contains("Completed", StringComparison.OrdinalIgnoreCase) &&
+                        state.Contains("Succeeded", StringComparison.OrdinalIgnoreCase))
                     {
-                        if (!dir.TryGetProperty("files", out var files)) continue;
-                        foreach (var file in files.EnumerateArray())
-                        {
-                            var fn = file.TryGetProperty("filename", out var fnEl) ? fnEl.GetString() : null;
-                            if (fn != filename) continue;
-                            foundThisPoll = true;
-                            seenAtLeastOnce = true;
-                            consecutiveMisses = 0;
-
-                            var state = file.TryGetProperty("state", out var stEl) ? stEl.GetString() ?? "" : "";
-
-                            if (state.Contains("Completed", StringComparison.OrdinalIgnoreCase) &&
-                                state.Contains("Succeeded", StringComparison.OrdinalIgnoreCase))
-                            {
-                                return SoulseekTransferState.Succeeded;
-                            }
-                            if (state.Contains("Errored", StringComparison.OrdinalIgnoreCase) ||
-                                state.Contains("Cancelled", StringComparison.OrdinalIgnoreCase) ||
-                                state.Contains("Rejected", StringComparison.OrdinalIgnoreCase) ||
-                                state.Contains("TimedOut", StringComparison.OrdinalIgnoreCase))
-                            {
-                                _logger.LogDebug("slskd transfer ended in state: {State}", state);
-                                return SoulseekTransferState.Errored;
-                            }
-                        }
+                        return SoulseekTransferState.Succeeded;
+                    }
+                    if (state.Contains("Errored", StringComparison.OrdinalIgnoreCase) ||
+                        state.Contains("Cancelled", StringComparison.OrdinalIgnoreCase) ||
+                        state.Contains("Rejected", StringComparison.OrdinalIgnoreCase) ||
+                        state.Contains("TimedOut", StringComparison.OrdinalIgnoreCase))
+                    {
+                        _logger.LogDebug("slskd transfer ended in state: {State}", state);
+                        return SoulseekTransferState.Errored;
                     }
                 }
 
@@ -384,6 +364,43 @@ public class SoulseekClient
 
         _logger.LogWarning("slskd transfer timed out after {Sec}s: {File}", timeoutSec, filename);
         return SoulseekTransferState.Errored;
+    }
+
+    /// <summary>
+    /// Finds a transfer's state in an slskd downloads response, or null when the
+    /// file is not present. The per-user endpoint returns a single
+    /// {username, directories} object, while the all-users endpoint returns an
+    /// array of them; both shapes are accepted. Reading the wrong shape is what
+    /// made every completed transfer look like a timeout: the poll loop rejected
+    /// the object response wholesale and rode the per-attempt timer to the end.
+    /// </summary>
+    internal static string? FindTransferState(JsonElement root, string filename)
+    {
+        IEnumerable<JsonElement> userGroups = root.ValueKind switch
+        {
+            JsonValueKind.Array => root.EnumerateArray(),
+            JsonValueKind.Object => new[] { root },
+            _ => Array.Empty<JsonElement>(),
+        };
+
+        foreach (var userGroup in userGroups)
+        {
+            if (userGroup.ValueKind != JsonValueKind.Object) continue;
+            if (!userGroup.TryGetProperty("directories", out var dirs)) continue;
+            if (dirs.ValueKind != JsonValueKind.Array) continue;
+            foreach (var dir in dirs.EnumerateArray())
+            {
+                if (!dir.TryGetProperty("files", out var files)) continue;
+                if (files.ValueKind != JsonValueKind.Array) continue;
+                foreach (var file in files.EnumerateArray())
+                {
+                    var fn = file.TryGetProperty("filename", out var fnEl) ? fnEl.GetString() : null;
+                    if (fn != filename) continue;
+                    return file.TryGetProperty("state", out var stEl) ? stEl.GetString() ?? "" : "";
+                }
+            }
+        }
+        return null;
     }
 }
 
