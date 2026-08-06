@@ -139,6 +139,7 @@ public class AdminController : ControllerBase
                 ["DownloadOnStar"] = subsonic.DownloadOnStar,
                 ["DownloadAlbumOnStar"] = subsonic.DownloadAlbumOnStar,
                 ["WaitForLosslessOnPlay"] = subsonic.WaitForLosslessOnPlay,
+                ["LosslessWaitTimeoutSeconds"] = subsonic.LosslessWaitTimeoutSeconds,
                 // These two are rendered by the dashboard but were missing here, so their
                 // fields never pre-filled with the saved value.
                 ["DownloadSource"] = subsonic.DownloadSource.ToString(),
@@ -260,6 +261,7 @@ public class AdminController : ControllerBase
                 ["DownloadOnStar"] = subsonic.DownloadOnStar,
                 ["DownloadAlbumOnStar"] = subsonic.DownloadAlbumOnStar,
                 ["WaitForLosslessOnPlay"] = subsonic.WaitForLosslessOnPlay,
+                ["LosslessWaitTimeoutSeconds"] = subsonic.LosslessWaitTimeoutSeconds,
                 ["DownloadSource"] = subsonic.DownloadSource.ToString(),
                 ["AutoDetectDownloadPath"] = subsonic.AutoDetectDownloadPath,
                 ["FolderStructure"] = subsonic.FolderStructure.ToString(),
@@ -362,7 +364,7 @@ public class AdminController : ControllerBase
         {
             "Subsonic:Url", "Subsonic:StorageMode", "Subsonic:DownloadMode",
             "Subsonic:DownloadOnStar", "Subsonic:DownloadAlbumOnStar",
-            "Subsonic:WaitForLosslessOnPlay",
+            "Subsonic:WaitForLosslessOnPlay", "Subsonic:LosslessWaitTimeoutSeconds",
             "Subsonic:DownloadSource", "Subsonic:AutoDetectDownloadPath",
             "Subsonic:FolderStructure",
             "Subsonic:UseLocalStaging", "Subsonic:ExplicitFilter",
