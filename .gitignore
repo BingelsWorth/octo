@@ -75,3 +75,7 @@ octo/downloads/
 
 # local build artifacts
 *.tgz
+
+# Local runtime state
+octo-config/
+slskd-state/
