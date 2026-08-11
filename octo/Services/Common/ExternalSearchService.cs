@@ -61,7 +61,10 @@ public sealed class ExternalSearchService
     public async Task<IReadOnlyList<Song>> GetAsync(string query, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(query)) return Array.Empty<Song>();
-        if (_lastFm is null || !_lastFm.IsConfigured) return Array.Empty<Song>();
+        // Only the key, not the radio switch. Discovery in the search bar is a different
+        // feature from radio, and gating it on EnableRadio made turning radio off empty
+        // the search results too.
+        if (_lastFm is null || !_lastFm.HasApiKey) return Array.Empty<Song>();
 
         // Key on the query alone. The build size is constant, so two callers wanting
         // different row counts still want the same work done.

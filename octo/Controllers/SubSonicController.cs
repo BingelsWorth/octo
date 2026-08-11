@@ -1403,7 +1403,7 @@ public class SubsonicController : ControllerBase
         }
 
         // Check if Last.fm radio is configured and enabled
-        if (_lastFmService == null || !_lastFmService.IsConfigured)
+        if (_lastFmService == null || !_lastFmService.IsRadioEnabled)
         {
             _logger.LogDebug("Last.fm radio not configured, relaying to upstream server");
             try
