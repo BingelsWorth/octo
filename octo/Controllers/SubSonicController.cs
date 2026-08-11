@@ -325,17 +325,12 @@ public class SubsonicController : ControllerBase
         // source and locals would crowd out external recommendations. Now
         // radio goes through getSimilarSongs2 (where we do local-first
         // resolution), so search3 is "search" again — locals belong here.
-        // Generous local target so a search for "Drake" surfaces all your
-        // owned Drake songs alongside the YouTube discoveries; Navidrome
-        // returns at most what it actually has anyway.
-        var localSongTarget = Math.Max(20, requestedSongs / 4);
-
-        // Cap external generation. For songCount=2000 we used to fan out to
-        // ~1800 Last.fm tracks per call — fast at filling the registry's 10k
-        // LRU and ratelimits Last.fm. ~150 is plenty for any reasonable queue
-        // and the registry survives across many sessions before recycling.
-        const int MaxExternalPerQuery = 150;
-        var externalTarget = Math.Min(MaxExternalPerQuery, Math.Max(0, requestedSongs - localSongTarget));
+        //
+        // The split itself lives in SearchBudget so it can be unit-tested; the
+        // local floor used to be a flat 20, which is also the spec default for
+        // songCount, so the most common search in the wild left nothing for
+        // discovery at all (#14).
+        var (localSongTarget, externalTarget) = SearchBudget.Compute(requestedSongs);
 
         // External: Last.fm fan-out. We try track.search first (fuzzy matches
         // anywhere in the query), then top up with the canonical artist's top

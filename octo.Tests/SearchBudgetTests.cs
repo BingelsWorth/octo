@@ -1,0 +1,104 @@
+using Octo.Services.Subsonic;
+
+namespace Octo.Tests;
+
+/// <summary>
+/// The local/external split for search3. These pin issue #14: the old local floor was a
+/// flat 20, which is also the Subsonic spec default for songCount, so a client that sent
+/// the default (or sent nothing) had its whole budget consumed by local results and never
+/// received a single discovery row. Search looked like it only ever returned albums.
+/// </summary>
+public class SearchBudgetTests
+{
+    /// <summary>
+    /// The split exactly as it behaved before the fix. Kept here so the "nothing changes
+    /// for large requests" guarantee is checked by CI on every run rather than by a
+    /// one-off manual diff against a running server.
+    /// </summary>
+    private static (int Local, int External) Legacy(int requestedSongs)
+    {
+        var local = Math.Max(20, requestedSongs / 4);
+        var external = Math.Min(150, Math.Max(0, requestedSongs - local));
+        return (local, external);
+    }
+
+    [Theory]
+    // Below the floor: local-only, and we stop asking Navidrome for more than the
+    // client wanted. No discovery means no Last.fm fan-out on a type-ahead keystroke.
+    [InlineData(0, 0, 0)]
+    [InlineData(5, 5, 0)]
+    [InlineData(12, 12, 0)]
+    // The reported bug. The spec default used to yield zero external rows.
+    [InlineData(20, 12, 8)]
+    [InlineData(40, 12, 28)]
+    [InlineData(60, 15, 45)]
+    [InlineData(79, 19, 60)]
+    // From here up the quarter rule dominates and nothing changes at all.
+    [InlineData(80, 20, 60)]
+    [InlineData(200, 50, 150)]
+    [InlineData(1000, 250, 150)]
+    public void Compute_SplitsAsSpecified(int requested, int expectedLocal, int expectedExternal)
+    {
+        var (local, external) = SearchBudget.Compute(requested);
+
+        Assert.Equal(expectedLocal, local);
+        Assert.Equal(expectedExternal, external);
+    }
+
+    [Fact]
+    public void Compute_IsUnchangedFromTheLegacySplitForLargeRequests()
+    {
+        // At 80 and above, requested/4 is at least 20, so the old flat floor was never
+        // the binding term and the new capped floor resolves to the same number. This is
+        // the whole reviewability argument for the change: radio-style clients and
+        // anything else sending a large songCount see byte-identical behaviour.
+        for (var n = 80; n <= 5000; n++)
+        {
+            Assert.Equal(Legacy(n), SearchBudget.Compute(n));
+        }
+    }
+
+    [Fact]
+    public void Compute_NeverReturnsFewerExternalsThanTheLegacySplit()
+    {
+        // Min(floor, n) can only be smaller than the old flat 20, so the local target
+        // never grows, so the external target never shrinks. No client anywhere loses
+        // discovery rows as a result of this change.
+        for (var n = 0; n <= 5000; n++)
+        {
+            Assert.True(SearchBudget.Compute(n).External >= Legacy(n).External,
+                $"songCount={n} lost external rows");
+        }
+    }
+
+    [Fact]
+    public void Compute_KeepsBothTargetsInsideTheRequestedCount()
+    {
+        // The merge appends externals after locals with no total cap, so a client that
+        // renders only the count it asked for would never see an external row if the two
+        // targets summed past it.
+        for (var n = 0; n <= 5000; n++)
+        {
+            var (local, external) = SearchBudget.Compute(n);
+            Assert.True(local + external <= n, $"songCount={n} produced {local}+{external}");
+        }
+    }
+
+    [Fact]
+    public void Compute_TreatsNegativeCountsAsZero()
+    {
+        // The old expression sanitised these only by accident, via its flat floor. A
+        // negative target would otherwise be relayed to Navidrome verbatim.
+        Assert.Equal((0, 0), SearchBudget.Compute(-1));
+        Assert.Equal((0, 0), SearchBudget.Compute(int.MinValue));
+    }
+
+    [Fact]
+    public void Compute_DoesNotOverflowOnAbsurdCounts()
+    {
+        var (local, external) = SearchBudget.Compute(int.MaxValue);
+
+        Assert.Equal(int.MaxValue / 4, local);
+        Assert.Equal(SearchBudget.ExternalCeiling, external);
+    }
+}
