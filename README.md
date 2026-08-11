@@ -87,6 +87,7 @@ The installer asks for your Navidrome URL (and, optionally, Last.fm and Soulseek
 | ✅ | [Feishin](https://github.com/jeffvli/feishin) (desktop) |
 | ✅ | [Arpeggi](https://www.reddit.com/r/arpeggiApp/) (iOS) |
 | ✅ | [Narjo](https://www.reddit.com/r/NarjoApp/) (iOS) |
+| ✅ | Tempus (Android) |
 | ✅ | most other Subsonic apps |
 | ❌ | Symfonium — offline-first, doesn't query the server for searches |
 
