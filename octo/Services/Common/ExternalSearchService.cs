@@ -1,0 +1,150 @@
+using Octo.Models.Domain;
+using Octo.Services.LastFm;
+
+namespace Octo.Services.Common;
+
+/// <summary>
+/// Builds the external (discovery) half of a search, once per query.
+///
+/// Every caller for the same query joins one execution and receives the same list. That
+/// is not an optimisation, it is what keeps the search3 fix from re-creating issue #8.
+/// Clients routinely fire several search calls for one typed query, and registry ids are
+/// deterministic, so those calls resolve to the *same* SoulseekRouting objects and would
+/// each run the enrichment pipeline over them concurrently — three writers to a shared
+/// int? duration, and three times the Deezer fan-out against a budget that is already the
+/// tightest thing in the system.
+///
+/// The returned list is FROZEN. Nothing may mutate a Song after the build completes;
+/// callers slice it and serialise it, concurrently, without copying. Both Subsonic
+/// serialisers and the native one only read, and the star/download paths rebuild a Song
+/// from the registry rather than from a search result. Any future "top up the enrichment
+/// because this caller wanted more rows" belongs inside the build, not after it.
+/// </summary>
+public sealed class ExternalSearchService
+{
+    /// <summary>
+    /// Rows built per query, regardless of how many the caller wants.
+    ///
+    /// It has to be a constant rather than the caller's target, or single-flight is
+    /// unsound: a client asking for 8 rows could win the race and hand 8 rows to a caller
+    /// that asked for 150. 60 is the number because that is where enrichment stops
+    /// (BackgroundEnrichLimit), so rows past it would ship as bare placeholders carrying a
+    /// fallback duration, and because the Navidrome-native search path already caps here.
+    /// </summary>
+    public const int BuildSize = 60;
+
+    /// <summary>
+    /// Deadline for one build. Last.fm has no configured HTTP timeout of its own, so
+    /// without this a single hung call would pin the query for every joined caller.
+    /// </summary>
+    private static readonly TimeSpan BuildTimeout = TimeSpan.FromSeconds(10);
+
+    private readonly SingleFlight<string, List<Song>> _flight = new();
+    private readonly IMusicMetadataService _metadata;
+    private readonly LastFmService? _lastFm;
+    private readonly ILogger<ExternalSearchService> _logger;
+
+    public ExternalSearchService(
+        IMusicMetadataService metadata,
+        ILogger<ExternalSearchService> logger,
+        LastFmService? lastFm = null)
+    {
+        _metadata = metadata;
+        _logger = logger;
+        _lastFm = lastFm;
+    }
+
+    /// <summary>
+    /// Up to <see cref="BuildSize"/> enriched external songs for this query. Callers take
+    /// the prefix they need; the list is shared and must not be mutated.
+    /// </summary>
+    public async Task<IReadOnlyList<Song>> GetAsync(string query, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(query)) return Array.Empty<Song>();
+        if (_lastFm is null || !_lastFm.IsConfigured) return Array.Empty<Song>();
+
+        // Key on the query alone. The build size is constant, so two callers wanting
+        // different row counts still want the same work done.
+        var key = query.Trim().ToLowerInvariant();
+
+        try
+        {
+            return await _flight.RunAsync(key, token => BuildAsync(query, token), BuildTimeout);
+        }
+        catch (Exception ex)
+        {
+            // Discovery is an addition to search, never a precondition for it. The steps
+            // inside the build are individually best-effort, but the deadline is not: the
+            // enrichment fan-out waits on its semaphore outside its own try, so a timeout
+            // there would otherwise escape and take the user's local results down with it.
+            _logger.LogDebug("external search '{Q}' failed: {M}", query, ex.Message);
+            return Array.Empty<Song>();
+        }
+    }
+
+    /// <summary>
+    /// Fans out to Last.fm, then fills in the metadata a client needs to render and play
+    /// the rows. Order:
+    ///   1. track.search hits (best fuzzy matches for the query as typed)
+    ///   2. canonical artist's top tracks (in case (1) was thin — common for
+    ///      single-word artist queries)
+    /// Deduped by artist+title so the same track cannot appear twice.
+    /// </summary>
+    private async Task<List<Song>> BuildAsync(string query, CancellationToken ct)
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var collected = new List<(string Artist, string Title)>();
+
+        var tracks = await _lastFm!.SearchTracksAsync(query, Math.Min(50, BuildSize * 2));
+        foreach (var t in tracks)
+        {
+            var key = $"{t.Artist}|{t.Title}".ToLowerInvariant();
+            if (seen.Add(key)) collected.Add((t.Artist, t.Title));
+            if (collected.Count >= BuildSize) break;
+        }
+
+        if (collected.Count < BuildSize)
+        {
+            // Use the first track-search hit's artist as the canonical anchor
+            // for top-tracks padding. Falls back to the raw query string when
+            // track.search came back empty.
+            var anchor = tracks.Count > 0 ? tracks[0].Artist : query;
+            var topTracks = await _lastFm.GetArtistTopTracksAsync(anchor, BuildSize * 2);
+            foreach (var t in topTracks)
+            {
+                var key = $"{t.Artist}|{t.Title}".ToLowerInvariant();
+                if (seen.Add(key)) collected.Add((t.Artist, t.Title));
+                if (collected.Count >= BuildSize) break;
+            }
+        }
+
+        var songs = new List<Song>(collected.Count);
+        foreach (var (artist, title) in collected)
+        {
+            var hits = await _metadata.SearchSongsByArtistTitleAsync(artist, title, 1);
+            if (hits.Count > 0) songs.Add(hits[0]);
+        }
+        _logger.LogInformation("External search '{Q}' -> {N} placeholder songs", query, songs.Count);
+
+        // Album/art/year from Deezer (fast), then the ACCURATE duration for the top of the
+        // list from the real YouTube video (so the scrub bar matches the audio and the
+        // client advances correctly). Bounded + cached.
+        await _metadata.EnrichExternalSongsAsync(songs, ct);
+        await _metadata.ResolveTopDurationsAsync(songs, ct);
+
+        // Fire-and-forget: pre-resolve YouTube videoIds for the top hits so the first
+        // /rest/stream click doesn't pay the cold yt-dlp double-call cost (ytsearch1: + -g,
+        // 6-16s combined). Arpeggi cancels at ~10s and falls back to a local song; without
+        // this, external playback is unreachable from that client. 12 is about what fits on
+        // the first page of search results.
+        //
+        // It runs LAST on purpose. It used to run before enrichment, where it wrote a
+        // videoId chosen with no duration hint while ResolveTopDurationsAsync was choosing
+        // a different one using the Deezer duration — so for the top rows the two raced and
+        // the loser could leave a song advertising the length of a video that would not be
+        // the one played.
+        _ = _metadata.PrewarmYouTubeIdsAsync(songs, topN: 12);
+
+        return songs;
+    }
+}

@@ -33,10 +33,12 @@ public class SearchBudgetTests
     [InlineData(40, 12, 28)]
     [InlineData(60, 15, 45)]
     [InlineData(79, 19, 60)]
-    // From here up the quarter rule dominates and nothing changes at all.
+    // From here up the quarter rule dominates, so the local side stops changing. The
+    // external side is held at the ceiling, which is the number of rows a query actually
+    // builds; past it the rows would be unenriched placeholders.
     [InlineData(80, 20, 60)]
-    [InlineData(200, 50, 150)]
-    [InlineData(1000, 250, 150)]
+    [InlineData(200, 50, 60)]
+    [InlineData(1000, 250, 60)]
     public void Compute_SplitsAsSpecified(int requested, int expectedLocal, int expectedExternal)
     {
         var (local, external) = SearchBudget.Compute(requested);
@@ -46,28 +48,31 @@ public class SearchBudgetTests
     }
 
     [Fact]
-    public void Compute_IsUnchangedFromTheLegacySplitForLargeRequests()
+    public void Compute_LeavesTheLocalTargetUnchangedForLargeRequests()
     {
-        // At 80 and above, requested/4 is at least 20, so the old flat floor was never
-        // the binding term and the new capped floor resolves to the same number. This is
-        // the whole reviewability argument for the change: radio-style clients and
-        // anything else sending a large songCount see byte-identical behaviour.
+        // At 80 and above, requested/4 is at least 20, so the old flat floor was never the
+        // binding term and the new capped floor resolves to the same number. Radio-style
+        // clients and anything else sending a large songCount see the same local target
+        // they saw before.
         for (var n = 80; n <= 5000; n++)
         {
-            Assert.Equal(Legacy(n), SearchBudget.Compute(n));
+            Assert.Equal(Legacy(n).Local, SearchBudget.Compute(n).Local);
         }
     }
 
     [Fact]
-    public void Compute_NeverReturnsFewerExternalsThanTheLegacySplit()
+    public void Compute_OnlyEverLosesExternalsToTheCeiling()
     {
-        // Min(floor, n) can only be smaller than the old flat 20, so the local target
-        // never grows, so the external target never shrinks. No client anywhere loses
-        // discovery rows as a result of this change.
+        // Min(floor, n) can only be smaller than the old flat 20, so the local target never
+        // grows and the external target never shrinks on account of the split itself. The
+        // one place the count can fall is the ceiling, which was lowered to the number of
+        // rows a query actually builds — beyond that the old code was emitting placeholders
+        // that no enrichment pass ever reached.
         for (var n = 0; n <= 5000; n++)
         {
-            Assert.True(SearchBudget.Compute(n).External >= Legacy(n).External,
-                $"songCount={n} lost external rows");
+            var expected = Math.Min(SearchBudget.ExternalCeiling, Legacy(n).External);
+            Assert.True(SearchBudget.Compute(n).External >= expected,
+                $"songCount={n} lost external rows beyond the ceiling");
         }
     }
 

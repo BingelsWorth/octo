@@ -38,6 +38,7 @@ public class SubsonicController : ControllerBase
     private readonly CoverArtAggregator? _coverArtAggregator;
     private readonly ExternalIdRegistry _idRegistry;
     private readonly Octo.Services.Common.TrackAcquisitionQueue _acquisitions;
+    private readonly Octo.Services.Common.ExternalSearchService _externalSearch;
     private readonly RadioQueueStore _radioQueueStore;
     private readonly NavidromeIdentityService _navIdentity;
     private readonly ILogger<SubsonicController> _logger;
@@ -53,6 +54,7 @@ public class SubsonicController : ControllerBase
         SubsonicProxyService proxyService,
         ExternalIdRegistry idRegistry,
         Octo.Services.Common.TrackAcquisitionQueue acquisitions,
+        Octo.Services.Common.ExternalSearchService externalSearch,
         RadioQueueStore radioQueueStore,
         NavidromeIdentityService navIdentity,
         ILogger<SubsonicController> logger,
@@ -72,6 +74,7 @@ public class SubsonicController : ControllerBase
         _proxyService = proxyService;
         _idRegistry = idRegistry;
         _acquisitions = acquisitions;
+        _externalSearch = externalSearch;
         _radioQueueStore = radioQueueStore;
         _navIdentity = navIdentity;
         _playlistSyncService = playlistSyncService;
@@ -332,24 +335,20 @@ public class SubsonicController : ControllerBase
         // discovery at all (#14).
         var (localSongTarget, externalTarget) = SearchBudget.Compute(requestedSongs);
 
-        // External: Last.fm fan-out. We try track.search first (fuzzy matches
-        // anywhere in the query), then top up with the canonical artist's top
-        // tracks if we're short. Each Last.fm hit becomes an instant placeholder
-        // song via SoulseekMetadataService — no yt-dlp call until /rest/stream.
-        // Album discovery runs concurrently with the Last.fm song fan-out so it costs no
+        // Album discovery runs concurrently with the song fan-out below so it costs no
         // serial latency. It needs no Last.fm key (Deezer's catalog is keyless), so albums
         // still appear for a user who has not set one up.
         var albumTask = requestedAlbums > 0
             ? _metadataService.SearchAlbumsAsync(cleanQuery, Math.Min(requestedAlbums, 20))
             : Task.FromResult(new List<Album>());
 
-        var externalSongs = await BuildExternalSearchResultsAsync(cleanQuery, externalTarget);
-
-        // Album/art/year from Deezer (fast), then the ACCURATE duration for the top
-        // of the list from the real YouTube video (so the scrub bar matches the
-        // audio and the client advances correctly). Bounded + cached.
-        await _metadataService.EnrichExternalSongsAsync(externalSongs);
-        await _metadataService.ResolveTopDurationsAsync(externalSongs);
+        // One build per query, shared by every caller. Clients routinely fire several
+        // search calls for a single typed query, and those calls resolve to the same
+        // routing objects, so without this each one would re-run the whole enrichment
+        // pipeline over them concurrently.
+        var externalSongs = externalTarget > 0
+            ? (await _externalSearch.GetAsync(cleanQuery)).Take(externalTarget).ToList()
+            : new List<Song>();
 
         // Local pass-through. Albums/artists always get the full requested counts;
         // song-side gets the local target.
@@ -436,63 +435,6 @@ public class SubsonicController : ControllerBase
         }
         catch { /* malformed upstream response — return whatever we got */ }
         return ids;
-    }
-
-    /// <summary>
-    /// Fans out a free-form query to Last.fm and returns up to <paramref name="target"/>
-    /// instant-placeholder external songs. Order:
-    ///   1. track.search hits (best fuzzy matches for the query as typed)
-    ///   2. canonical artist's top tracks (in case (1) was thin — common for
-    ///      single-word artist queries)
-    /// We dedupe by artist+title to avoid the same track appearing twice.
-    /// </summary>
-    private async Task<List<Song>> BuildExternalSearchResultsAsync(string query, int target)
-    {
-        if (target <= 0 || _lastFmService is null || !_lastFmService.IsConfigured)
-            return new List<Song>();
-
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var collected = new List<(string Artist, string Title)>();
-
-        var tracks = await _lastFmService.SearchTracksAsync(query, Math.Min(50, target * 2));
-        foreach (var t in tracks)
-        {
-            var key = $"{t.Artist}|{t.Title}".ToLowerInvariant();
-            if (seen.Add(key)) collected.Add((t.Artist, t.Title));
-            if (collected.Count >= target) break;
-        }
-
-        if (collected.Count < target)
-        {
-            // Use the first track-search hit's artist as the canonical anchor
-            // for top-tracks padding. Falls back to the raw query string when
-            // track.search came back empty.
-            var anchor = tracks.Count > 0 ? tracks[0].Artist : query;
-            var topTracks = await _lastFmService.GetArtistTopTracksAsync(anchor, target * 2);
-            foreach (var t in topTracks)
-            {
-                var key = $"{t.Artist}|{t.Title}".ToLowerInvariant();
-                if (seen.Add(key)) collected.Add((t.Artist, t.Title));
-                if (collected.Count >= target) break;
-            }
-        }
-
-        var songs = new List<Song>(collected.Count);
-        foreach (var (artist, title) in collected)
-        {
-            var hits = await _metadataService.SearchSongsByArtistTitleAsync(artist, title, 1);
-            if (hits.Count > 0) songs.Add(hits[0]);
-        }
-        _logger.LogInformation("External search '{Q}' -> {N} placeholder songs", query, songs.Count);
-
-        // Fire-and-forget: pre-resolve YouTube videoIds for the top hits so the
-        // first /rest/stream click doesn't pay the cold yt-dlp double-call cost
-        // (ytsearch1: + -g, 6-16s combined). Arpeggi cancels at ~10s and falls
-        // back to a local song; without this, external playback is unreachable
-        // from that client. 12 ≈ what fits on the first page of search results.
-        _ = _metadataService.PrewarmYouTubeIdsAsync(songs, topN: 12);
-
-        return songs;
     }
 
     /// <summary>
@@ -2107,11 +2049,10 @@ public class SubsonicController : ControllerBase
         if (target <= 0) return null;
 
         // Same discovery core as Subsonic search3: Last.fm fan-out, Deezer enrich,
-        // accurate YouTube durations for the top of the list.
-        var externalSongs = await BuildExternalSearchResultsAsync(term, target);
+        // accurate YouTube durations for the top of the list. Shared with search3, so a
+        // client that searches both ways for one query only pays for it once.
+        var externalSongs = (await _externalSearch.GetAsync(term)).Take(target).ToList();
         if (externalSongs.Count == 0) return null;
-        await _metadataService.EnrichExternalSongsAsync(externalSongs);
-        await _metadataService.ResolveTopDurationsAsync(externalSongs);
 
         foreach (var s in externalSongs)
             realArr.Add(BuildNativeSongObject(s));

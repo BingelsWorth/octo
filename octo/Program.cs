@@ -92,6 +92,11 @@ builder.Services.AddHttpClient(Octo.Services.Metadata.DeezerRateLimiter.ClientNa
 builder.Services.AddSingleton<IMusicMetadataService, SoulseekMetadataService>();
 builder.Services.AddSingleton<IDownloadService, SoulseekDownloadService>();
 
+// Discovery results are built once per query and shared. Clients fire several search
+// calls for one typed query, and they all resolve to the same routing objects, so without
+// this each call re-runs the enrichment pipeline over them concurrently.
+builder.Services.AddSingleton<Octo.Services.Common.ExternalSearchService>();
+
 // Permanent-copy fetches run here, never inside the request that asked for one. A client
 // giving up on a slow play must not cancel a transfer slskd is going to finish anyway.
 builder.Services.AddSingleton<Octo.Services.Common.TrackAcquisitionQueue>();

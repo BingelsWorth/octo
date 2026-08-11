@@ -28,11 +28,12 @@ public static class SearchBudget
     public const int LocalSongFloor = 12;
 
     /// <summary>
-    /// Ceiling on generated discovery rows per query. Beyond this the rows are not worth
-    /// producing: enrichment stops at BackgroundEnrichLimit, so anything past it ships as
-    /// a bare placeholder carrying a fallback duration.
+    /// Ceiling on discovery rows handed to one response. Tied to the number actually built
+    /// per query so a caller can never be promised more rows than exist: the build size is
+    /// a constant precisely so concurrent callers wanting different amounts can share one
+    /// execution.
     /// </summary>
-    public const int ExternalCeiling = 150;
+    public const int ExternalCeiling = Common.ExternalSearchService.BuildSize;
 
     /// <summary>
     /// Split <paramref name="requestedSongs"/> into a local target and an external target.
