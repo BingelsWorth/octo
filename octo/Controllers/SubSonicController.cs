@@ -310,7 +310,14 @@ public class SubsonicController : ControllerBase
         var searchEndpoint = isSearch2 ? "rest/search2" : "rest/search3";
         var envelope = isSearch2 ? "searchResult2" : "searchResult3";
 
-        if (string.IsNullOrWhiteSpace(cleanQuery))
+        // Discovery belongs on the first page only. Injected rows are regenerated per
+        // request rather than held in a server-side result set, so appending them to page
+        // two hands the client the same suggestions it already scrolled past. The native
+        // search path refuses later pages for exactly this reason; do the same here and
+        // let the library page normally underneath.
+        var songOffset = int.TryParse(parameters.GetValueOrDefault("songOffset", "0"), out var so) ? so : 0;
+
+        if (string.IsNullOrWhiteSpace(cleanQuery) || songOffset > 0)
         {
             try
             {
@@ -341,10 +348,17 @@ public class SubsonicController : ControllerBase
         // discovery at all (#14).
         var (localSongTarget, externalTarget) = SearchBudget.Compute(requestedSongs);
 
+        // A client that asked for a handful of songs is searching as the user types. The
+        // song side already costs nothing there (the budget leaves no room for discovery),
+        // but external album search was still firing a Deezer query per keystroke. Judged
+        // from the song count only when the client actually asked for songs, so a genuine
+        // album-only search still gets album discovery.
+        var isTypeAheadProbe = requestedSongs > 0 && externalTarget == 0;
+
         // Album discovery runs concurrently with the song fan-out below so it costs no
         // serial latency. It needs no Last.fm key (Deezer's catalog is keyless), so albums
         // still appear for a user who has not set one up.
-        var albumTask = requestedAlbums > 0
+        var albumTask = requestedAlbums > 0 && !isTypeAheadProbe
             ? _metadataService.SearchAlbumsAsync(cleanQuery, Math.Min(requestedAlbums, 20))
             : Task.FromResult(new List<Album>());
 
@@ -367,6 +381,16 @@ public class SubsonicController : ControllerBase
             ["artistCount"] = requestedArtists.ToString(),
         };
         var localResult = await _proxyService.RelaySafeAsync(searchEndpoint, localParams);
+
+        // Subsonic reports its own errors inside an HTTP 200, so a rejected login and an
+        // empty library are the same thing to every check above this line. Left alone,
+        // the discovery top-up would read "no local matches", fill the page with
+        // suggestions, and present a broken connection as a healthy search.
+        if (IsFailedSubsonicBody(localResult.Body, localResult.ContentType))
+        {
+            _logger.LogDebug("upstream rejected the search for '{Q}'; passing its error through", cleanQuery);
+            return File(localResult.Body!, localResult.ContentType ?? $"application/{format}");
+        }
 
         // Parsed here rather than inside the merge so the count that sizes the discovery
         // slice below is taken from the very list the response will render. Deriving it
@@ -415,6 +439,36 @@ public class SubsonicController : ControllerBase
         _radioQueueStore.Register(localSongIds.Concat(externalSongs.Select(s => s.Id)));
 
         return MergeSearchResults(localParsed, localResult.ContentType, externalResult, playlistTask, format, envelope);
+    }
+
+    /// <summary>
+    /// True when a relayed body is a Subsonic error envelope. These arrive as HTTP 200
+    /// with <c>status="failed"</c> inside, so the status code alone cannot tell a rejected
+    /// request from an empty result set.
+    /// </summary>
+    internal static bool IsFailedSubsonicBody(byte[]? body, string? contentType)
+    {
+        if (body == null || body.Length == 0) return false;
+        try
+        {
+            if (contentType?.Contains("json") == true)
+            {
+                using var doc = JsonDocument.Parse(body);
+                return doc.RootElement.TryGetProperty("subsonic-response", out var resp)
+                    && resp.TryGetProperty("status", out var st)
+                    && st.ValueKind == JsonValueKind.String
+                    && string.Equals(st.GetString(), "failed", StringComparison.OrdinalIgnoreCase);
+            }
+
+            var xml = XDocument.Load(new System.IO.MemoryStream(body));
+            return string.Equals(xml.Root?.Attribute("status")?.Value, "failed",
+                StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            // Unparseable is not the same as failed. Let the normal path handle it.
+            return false;
+        }
     }
 
     /// <summary>
