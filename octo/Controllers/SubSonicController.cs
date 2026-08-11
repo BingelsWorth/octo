@@ -302,19 +302,25 @@ public class SubsonicController : ControllerBase
 
         var cleanQuery = query.Trim().Trim('"');
 
+        // search2 and search3 are the same hijack with different envelopes. Decide once:
+        // the relay target, the envelope we answer with, and the empty-query passthrough
+        // all have to agree, and they used to be decided in three separate places with the
+        // response side hardcoded to searchResult3.
+        var isSearch2 = (Request.Path.Value ?? "").Contains("search2", StringComparison.OrdinalIgnoreCase);
+        var searchEndpoint = isSearch2 ? "rest/search2" : "rest/search3";
+        var envelope = isSearch2 ? "searchResult2" : "searchResult3";
+
         if (string.IsNullOrWhiteSpace(cleanQuery))
         {
             try
             {
-                var endpoint = (Request.Path.Value ?? "").Contains("search2", StringComparison.OrdinalIgnoreCase)
-                    ? "rest/search2" : "rest/search3";
-                var result = await _proxyService.RelayAsync(endpoint, parameters);
+                var result = await _proxyService.RelayAsync(searchEndpoint, parameters);
                 var contentType = result.ContentType ?? $"application/{format}";
                 return File(result.Body, contentType);
             }
             catch
             {
-                return _responseBuilder.CreateResponse(format, "searchResult3", new { });
+                return _responseBuilder.CreateResponse(format, envelope, new { });
             }
         }
 
@@ -354,15 +360,13 @@ public class SubsonicController : ControllerBase
 
         // Local pass-through. Albums/artists always get the full requested counts;
         // song-side gets the local target.
-        var localProxyEndpoint = (Request.Path.Value ?? "").Contains("search2", StringComparison.OrdinalIgnoreCase)
-            ? "rest/search2" : "rest/search3";
         var localParams = new Dictionary<string, string>(parameters)
         {
             ["songCount"]   = localSongTarget.ToString(),
             ["albumCount"]  = requestedAlbums.ToString(),
             ["artistCount"] = requestedArtists.ToString(),
         };
-        var localResult = await _proxyService.RelaySafeAsync(localProxyEndpoint, localParams);
+        var localResult = await _proxyService.RelaySafeAsync(searchEndpoint, localParams);
 
         // Parsed here rather than inside the merge so the count that sizes the discovery
         // slice below is taken from the very list the response will render. Deriving it
@@ -410,7 +414,7 @@ public class SubsonicController : ControllerBase
         var localSongIds = ExtractLocalSongIds(localResult.Body, localResult.ContentType);
         _radioQueueStore.Register(localSongIds.Concat(externalSongs.Select(s => s.Id)));
 
-        return MergeSearchResults(localParsed, localResult.ContentType, externalResult, playlistTask, format);
+        return MergeSearchResults(localParsed, localResult.ContentType, externalResult, playlistTask, format, envelope);
     }
 
     /// <summary>
@@ -1177,56 +1181,60 @@ public class SubsonicController : ControllerBase
         string? localContentType,
         SearchResult externalResult,
         List<ExternalPlaylist> playlistResult,
-        string format)
+        string format,
+        string envelope)
     {
         var (localSongs, localAlbums, localArtists) = local;
 
         var isJson = format == "json" || localContentType?.Contains("json") == true;
         var (mergedSongs, mergedAlbums, mergedArtists) = _modelMapper.MergeSearchResults(
-            localSongs, 
-            localAlbums, 
-            localArtists, 
+            localSongs,
+            localAlbums,
+            localArtists,
             externalResult,
             playlistResult,
             isJson);
 
         if (isJson)
         {
-            return _responseBuilder.CreateJsonResponse(new
+            // Dictionary rather than an anonymous type because the envelope name is
+            // decided by the request: search2 answered under searchResult3 is a shape the
+            // client never asked for, and a strict one drops the whole payload.
+            return _responseBuilder.CreateJsonResponse(new Dictionary<string, object>
             {
-                status = "ok",
-                version = "1.16.1",
-                searchResult3 = new
+                ["status"] = "ok",
+                ["version"] = "1.16.1",
+                [envelope] = new Dictionary<string, object>
                 {
-                    song = mergedSongs,
-                    album = mergedAlbums,
-                    artist = mergedArtists
-                }
+                    ["song"] = mergedSongs,
+                    ["album"] = mergedAlbums,
+                    ["artist"] = mergedArtists,
+                },
             });
         }
         else
         {
             var ns = XNamespace.Get("http://subsonic.org/restapi");
-            var searchResult3 = new XElement(ns + "searchResult3");
-            
+            var searchResult = new XElement(ns + envelope);
+
             foreach (var artist in mergedArtists.Cast<XElement>())
             {
-                searchResult3.Add(artist);
+                searchResult.Add(artist);
             }
             foreach (var album in mergedAlbums.Cast<XElement>())
             {
-                searchResult3.Add(album);
+                searchResult.Add(album);
             }
             foreach (var song in mergedSongs.Cast<XElement>())
             {
-                searchResult3.Add(song);
+                searchResult.Add(song);
             }
 
             var doc = new XDocument(
                 new XElement(ns + "subsonic-response",
                     new XAttribute("status", "ok"),
                     new XAttribute("version", "1.16.1"),
-                    searchResult3
+                    searchResult
                 )
             );
 
