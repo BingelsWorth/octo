@@ -345,10 +345,12 @@ public class SubsonicController : ControllerBase
         // One build per query, shared by every caller. Clients routinely fire several
         // search calls for a single typed query, and those calls resolve to the same
         // routing objects, so without this each one would re-run the whole enrichment
-        // pipeline over them concurrently.
-        var externalSongs = externalTarget > 0
-            ? (await _externalSearch.GetAsync(cleanQuery)).Take(externalTarget).ToList()
-            : new List<Song>();
+        // pipeline over them concurrently. Started here rather than awaited, so it
+        // overlaps the local relay below; how many of its rows we actually use depends
+        // on what that relay comes back with.
+        var externalTask = externalTarget > 0
+            ? _externalSearch.GetAsync(cleanQuery)
+            : Task.FromResult<IReadOnlyList<Song>>(Array.Empty<Song>());
 
         // Local pass-through. Albums/artists always get the full requested counts;
         // song-side gets the local target.
@@ -361,6 +363,25 @@ public class SubsonicController : ControllerBase
             ["artistCount"] = requestedArtists.ToString(),
         };
         var localResult = await _proxyService.RelaySafeAsync(localProxyEndpoint, localParams);
+
+        // Parsed here rather than inside the merge so the count that sizes the discovery
+        // slice below is taken from the very list the response will render. Deriving it
+        // from a second, differently-written parse of the same bytes is how you end up
+        // topping up against a local count the client never sees.
+        var localParsed = localResult.Success && localResult.Body != null
+            ? _modelMapper.ParseSearchResponse(localResult.Body, localResult.ContentType)
+            : (Songs: new List<object>(), Albums: new List<object>(), Artists: new List<object>());
+
+        // Hand the slots the library did not fill to discovery. A query the user owns
+        // nothing for is the one most worth answering with suggestions, and the local
+        // target is a reservation rather than a promise: Navidrome returns what it has.
+        // If the relay failed outright the count is zero, and filling the page with
+        // discovery is the right answer there too, since the merge will show no locals.
+        var built = await externalTask;
+        var externalSlice = Math.Min(
+            built.Count,
+            externalTarget + Math.Max(0, localSongTarget - localParsed.Songs.Count));
+        var externalSongs = built.Take(externalSlice).ToList();
 
         var playlistTask = _subsonicSettings.EnableExternalPlaylists
             ? await _metadataService.SearchPlaylistsAsync(cleanQuery, requestedAlbums)
@@ -389,7 +410,7 @@ public class SubsonicController : ControllerBase
         var localSongIds = ExtractLocalSongIds(localResult.Body, localResult.ContentType);
         _radioQueueStore.Register(localSongIds.Concat(externalSongs.Select(s => s.Id)));
 
-        return MergeSearchResults(localResult, externalResult, playlistTask, format);
+        return MergeSearchResults(localParsed, localResult.ContentType, externalResult, playlistTask, format);
     }
 
     /// <summary>
@@ -1152,16 +1173,15 @@ public class SubsonicController : ControllerBase
     #region Helper Methods
 
     private IActionResult MergeSearchResults(
-        (byte[]? Body, string? ContentType, bool Success) subsonicResult,
+        (List<object> Songs, List<object> Albums, List<object> Artists) local,
+        string? localContentType,
         SearchResult externalResult,
         List<ExternalPlaylist> playlistResult,
         string format)
     {
-        var (localSongs, localAlbums, localArtists) = subsonicResult.Success && subsonicResult.Body != null
-            ? _modelMapper.ParseSearchResponse(subsonicResult.Body, subsonicResult.ContentType)
-            : (new List<object>(), new List<object>(), new List<object>());
+        var (localSongs, localAlbums, localArtists) = local;
 
-        var isJson = format == "json" || subsonicResult.ContentType?.Contains("json") == true;
+        var isJson = format == "json" || localContentType?.Contains("json") == true;
         var (mergedSongs, mergedAlbums, mergedArtists) = _modelMapper.MergeSearchResults(
             localSongs, 
             localAlbums, 
