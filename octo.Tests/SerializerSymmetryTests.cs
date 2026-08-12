@@ -107,6 +107,37 @@ public class SerializerSymmetryTests
     }
 
     [Fact]
+    public void AnUnknownYearIsOmittedRatherThanInvented()
+    {
+        // It used to fall back to the current year, which is not a plausible default but a
+        // wrong one: a 1995 track was published to the client as this year's release, and
+        // that is something the user sees and sorts by.
+        var b = Builder();
+        var song = ExternalSong();
+        song.Year = null;
+
+        Assert.DoesNotContain("year", b.ConvertSongToJson(song).Keys);
+        Assert.Null(b.ConvertSongToXml(song, Ns).Attribute("year"));
+
+        // Deezer's album search payload carries no release date at all, so this is the
+        // normal case for an injected album row rather than an edge case.
+        var album = new Album { Id = "al1", Title = "In Rainbows", Artist = "Radiohead", Year = null };
+        Assert.DoesNotContain("year", ((IDictionary<string, object>)b.ConvertAlbumToJson(album)).Keys);
+        Assert.Null(b.ConvertAlbumToXml(album, Ns).Attribute("year"));
+    }
+
+    [Fact]
+    public void AKnownYearIsStillReported()
+    {
+        var b = Builder();
+
+        Assert.Equal(1997, b.ConvertSongToJson(ExternalSong())["year"]);
+        Assert.Equal("2007", b.ConvertAlbumToXml(
+            new Album { Id = "al1", Title = "In Rainbows", Artist = "Radiohead", Year = 2007 }, Ns)
+            .Attribute("year")?.Value);
+    }
+
+    [Fact]
     public void ValuesRenderInvariantlyRegardlessOfLocale()
     {
         // A comma decimal separator under a European locale would produce numbers no

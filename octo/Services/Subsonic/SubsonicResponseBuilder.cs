@@ -141,43 +141,41 @@ public class SubsonicResponseBuilder
     /// </summary>
     public IActionResult CreateAlbumResponse(string format, Album album)
     {
-        var totalDuration = album.Songs.Sum(s => s.Duration ?? 0);
-        
+        var fields = new Dictionary<string, object>
+        {
+            ["id"] = album.Id,
+            ["name"] = album.Title,
+            ["artist"] = album.Artist ?? "",
+            ["coverArt"] = album.Id,
+            ["songCount"] = album.Songs.Count > 0 ? album.Songs.Count : (album.SongCount ?? 0),
+            ["duration"] = album.Songs.Sum(s => s.Duration ?? 0),
+            ["genre"] = album.Genre ?? "",
+            ["isCompilation"] = false,
+        };
+        if (album.ArtistId is not null) fields["artistId"] = album.ArtistId;
+        if (album.Year is int albumYear) fields["year"] = albumYear;
+
         if (format == "json")
         {
-            return CreateJsonResponse(new 
-            { 
-                status = "ok", 
-                version = SubsonicVersion,
-                album = new
-                {
-                    id = album.Id,
-                    name = album.Title,
-                    artist = album.Artist,
-                    artistId = album.ArtistId,
-                    coverArt = album.Id,
-                    songCount = album.Songs.Count > 0 ? album.Songs.Count : (album.SongCount ?? 0),
-                    duration = totalDuration,
-                    year = album.Year ?? 0,
-                    genre = album.Genre ?? "",
-                    isCompilation = false,
-                    song = album.Songs.Select(s => ConvertSongToJson(s)).ToList()
-                }
+            var body = new Dictionary<string, object>(fields)
+            {
+                ["song"] = album.Songs.Select(ConvertSongToJson).ToList(),
+            };
+            return CreateJsonResponse(new Dictionary<string, object>
+            {
+                ["status"] = "ok",
+                ["version"] = SubsonicVersion,
+                ["album"] = body,
             });
         }
-        
+
         var ns = XNamespace.Get(SubsonicNamespace);
         var doc = new XDocument(
             new XElement(ns + "subsonic-response",
                 new XAttribute("status", "ok"),
                 new XAttribute("version", SubsonicVersion),
                 new XElement(ns + "album",
-                    new XAttribute("id", album.Id),
-                    new XAttribute("name", album.Title),
-                    new XAttribute("artist", album.Artist ?? ""),
-                    new XAttribute("songCount", album.Songs.Count > 0 ? album.Songs.Count : (album.SongCount ?? 0)),
-                    new XAttribute("year", album.Year ?? 0),
-                    new XAttribute("coverArt", album.Id),
+                    Attributes(fields),
                     album.Songs.Select(s => ConvertSongToXml(s, ns))
                 )
             )
@@ -385,13 +383,20 @@ public class SubsonicResponseBuilder
         var albumArtistList = artistList;
 
         // Plausible defaults so external entries don't read as "obviously fake"
-        // to client metadata heuristics. bitDepth/samplingRate/track/year of 0
-        // were the giveaways the old version emitted.
-        var year = song.Year ?? DateTime.UtcNow.Year;
+        // to client metadata heuristics. bitDepth/samplingRate/track of 0 were the
+        // giveaways the old version emitted.
+        //
+        // Year is the exception and is omitted entirely when unknown, rather than
+        // defaulted. It used to fall back to the current year, which is not a plausible
+        // default but a wrong one: a 1995 track was published to the client as this year's
+        // release, and unlike a missing field that is something the user can see and
+        // sort by. Every real library is full of untagged files, so a client that rejected
+        // entries without a year would already be broken against the server it is pointed
+        // at.
         var track = song.Track ?? 1;
         var bitDepth = song.IsLocal ? 16 : 16;
 
-        return new Dictionary<string, object>
+        var fields = new Dictionary<string, object>
         {
             ["id"] = song.Id,
             ["parent"] = albumId,
@@ -400,7 +405,6 @@ public class SubsonicResponseBuilder
             ["album"] = albumName,
             ["artist"] = song.Artist ?? "",
             ["track"] = track,
-            ["year"] = year,
             ["genre"] = song.Genre ?? "",
             ["coverArt"] = song.Id,
             ["size"] = estSize,
@@ -431,6 +435,10 @@ public class SubsonicResponseBuilder
             ["sortName"] = (song.Title ?? "").ToLowerInvariant(),
             ["isExternal"] = false
         };
+
+        if (song.Year is int knownYear) fields["year"] = knownYear;
+
+        return fields;
     }
 
     /// <summary>
@@ -451,7 +459,7 @@ public class SubsonicResponseBuilder
             Artist = album.Artist,
         });
 
-        return new Dictionary<string, object>
+        var fields = new Dictionary<string, object>
         {
             ["id"] = album.Id,
             ["parent"] = artistId,
@@ -462,7 +470,6 @@ public class SubsonicResponseBuilder
             ["artist"] = album.Artist ?? "",
             ["artistId"] = artistId,
             ["songCount"] = album.SongCount ?? 0,
-            ["year"] = album.Year ?? 0,
             ["genre"] = album.Genre ?? "",
             ["coverArt"] = album.Id,
             ["created"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
@@ -471,6 +478,14 @@ public class SubsonicResponseBuilder
             ["sortName"] = (album.Title ?? "").ToLowerInvariant(),
             ["isExternal"] = !album.IsLocal,
         };
+
+        // Deezer's album search payload carries no release date; only the per-album detail
+        // call does, and fetching that for every search row would be twenty extra requests
+        // against a budget this project has already been burned by. So the year is genuinely
+        // unknown here and is left out rather than reported as zero.
+        if (album.Year is int knownYear) fields["year"] = knownYear;
+
+        return fields;
     }
 
     /// <summary>
