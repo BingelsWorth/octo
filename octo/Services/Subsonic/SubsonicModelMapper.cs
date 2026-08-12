@@ -40,8 +40,12 @@ public class SubsonicModelMapper
             if (contentType?.Contains("json") == true)
             {
                 var jsonDoc = JsonDocument.Parse(content);
+                // Both envelopes: search2 and search3 are the same hijack, and a search2
+                // relay answers under searchResult2. Reading only searchResult3 silently
+                // dropped every local row for search2 clients.
                 if (jsonDoc.RootElement.TryGetProperty("subsonic-response", out var response) &&
-                    response.TryGetProperty("searchResult3", out var searchResult))
+                    (response.TryGetProperty("searchResult3", out var searchResult) ||
+                     response.TryGetProperty("searchResult2", out searchResult)))
                 {
                     if (searchResult.TryGetProperty("song", out var songElements))
                     {
@@ -70,7 +74,8 @@ public class SubsonicModelMapper
             {
                 var xmlDoc = XDocument.Parse(content);
                 var ns = xmlDoc.Root?.GetDefaultNamespace() ?? XNamespace.None;
-                var searchResult = xmlDoc.Descendants(ns + "searchResult3").FirstOrDefault();
+                var searchResult = xmlDoc.Descendants(ns + "searchResult3").FirstOrDefault()
+                                   ?? xmlDoc.Descendants(ns + "searchResult2").FirstOrDefault();
                 
                 if (searchResult != null)
                 {

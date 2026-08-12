@@ -82,13 +82,31 @@ The installer asks for your Navidrome URL (and, optionally, Last.fm and Soulseek
 
 ## Compatible apps
 
-| Works | App |
-|---|---|
-| ✅ | [Feishin](https://github.com/jeffvli/feishin) (desktop) |
-| ✅ | [Arpeggi](https://www.reddit.com/r/arpeggiApp/) (iOS) |
-| ✅ | [Narjo](https://www.reddit.com/r/NarjoApp/) (iOS) |
-| ✅ | most other Subsonic apps |
-| ❌ | Symfonium — offline-first, doesn't query the server for searches |
+| Works | App | Platform |
+|---|---|---|
+| ✅ | [Feishin](https://github.com/jeffvli/feishin) | desktop |
+| ✅ | [Supersonic](https://github.com/dweymouth/supersonic) | desktop |
+| ✅ | [Sublime Music](https://github.com/sublime-music/sublime-music) | Linux |
+| ✅ | [Arpeggi](https://www.reddit.com/r/arpeggiApp/) | iOS |
+| ✅ | [Narjo](https://www.reddit.com/r/NarjoApp/) | iOS |
+| ✅ | [Amperfy](https://github.com/BLeeEZ/amperfy) | iOS |
+| ✅ | [DSub](https://github.com/daneren2005/Subsonic) | Android |
+| ✅ | [Ultrasonic](https://gitlab.com/ultrasonic/ultrasonic) | Android |
+| ✅ | [Tempo](https://github.com/CappielloAntonio/tempo) | Android |
+| ✅ | [Audinaut](https://github.com/nvllsvm/Audinaut) | Android |
+| ✅ | [SubTracks](https://github.com/austinried/subtracks) | Android / iOS |
+| ✅ | Tempus | Android |
+| ✅ | most other Subsonic apps | |
+| ❌ | Symfonium | searches its own offline copy, so it never asks the server |
+
+Symfonium is the one that genuinely cannot work. It syncs your library to the device and
+searches locally, so a search never reaches Octo and there is nothing to add results to.
+
+**Both search generations are supported.** Subsonic has two search endpoints, `search2` and
+`search3`, and Octo answers either. This matters more than it sounds: DSub and Ultrasonic
+choose between them based on whether *you* browse by tags or by folders, not on the server
+version, so a folder-browsing user talks `search2`. Both formats are supported too — some
+clients speak JSON, some (DSub) only XML.
 
 ## Updating
 

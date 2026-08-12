@@ -141,43 +141,41 @@ public class SubsonicResponseBuilder
     /// </summary>
     public IActionResult CreateAlbumResponse(string format, Album album)
     {
-        var totalDuration = album.Songs.Sum(s => s.Duration ?? 0);
-        
+        var fields = new Dictionary<string, object>
+        {
+            ["id"] = album.Id,
+            ["name"] = album.Title,
+            ["artist"] = album.Artist ?? "",
+            ["coverArt"] = album.Id,
+            ["songCount"] = album.Songs.Count > 0 ? album.Songs.Count : (album.SongCount ?? 0),
+            ["duration"] = album.Songs.Sum(s => s.Duration ?? 0),
+            ["genre"] = album.Genre ?? "",
+            ["isCompilation"] = false,
+        };
+        if (album.ArtistId is not null) fields["artistId"] = album.ArtistId;
+        if (album.Year is int albumYear) fields["year"] = albumYear;
+
         if (format == "json")
         {
-            return CreateJsonResponse(new 
-            { 
-                status = "ok", 
-                version = SubsonicVersion,
-                album = new
-                {
-                    id = album.Id,
-                    name = album.Title,
-                    artist = album.Artist,
-                    artistId = album.ArtistId,
-                    coverArt = album.Id,
-                    songCount = album.Songs.Count > 0 ? album.Songs.Count : (album.SongCount ?? 0),
-                    duration = totalDuration,
-                    year = album.Year ?? 0,
-                    genre = album.Genre ?? "",
-                    isCompilation = false,
-                    song = album.Songs.Select(s => ConvertSongToJson(s)).ToList()
-                }
+            var body = new Dictionary<string, object>(fields)
+            {
+                ["song"] = album.Songs.Select(ConvertSongToJson).ToList(),
+            };
+            return CreateJsonResponse(new Dictionary<string, object>
+            {
+                ["status"] = "ok",
+                ["version"] = SubsonicVersion,
+                ["album"] = body,
             });
         }
-        
+
         var ns = XNamespace.Get(SubsonicNamespace);
         var doc = new XDocument(
             new XElement(ns + "subsonic-response",
                 new XAttribute("status", "ok"),
                 new XAttribute("version", SubsonicVersion),
                 new XElement(ns + "album",
-                    new XAttribute("id", album.Id),
-                    new XAttribute("name", album.Title),
-                    new XAttribute("artist", album.Artist ?? ""),
-                    new XAttribute("songCount", album.Songs.Count > 0 ? album.Songs.Count : (album.SongCount ?? 0)),
-                    new XAttribute("year", album.Year ?? 0),
-                    new XAttribute("coverArt", album.Id),
+                    Attributes(fields),
                     album.Songs.Select(s => ConvertSongToXml(s, ns))
                 )
             )
@@ -315,7 +313,13 @@ public class SubsonicResponseBuilder
     /// <summary>
     /// Converts a Song domain model to Subsonic JSON format.
     /// </summary>
-    public Dictionary<string, object> ConvertSongToJson(Song song)
+    public Dictionary<string, object> ConvertSongToJson(Song song) => ConvertSongFields(song);
+
+    /// <summary>
+    /// The song shape both serializers render. See <see cref="Attributes"/> for why there
+    /// is only one of these.
+    /// </summary>
+    private Dictionary<string, object> ConvertSongFields(Song song)
     {
         // External (Soulseek/YouTube) songs are presented as ordinary streamable
         // tracks. Setting isExternal=true causes some Subsonic clients (Arpeggio,
@@ -379,13 +383,20 @@ public class SubsonicResponseBuilder
         var albumArtistList = artistList;
 
         // Plausible defaults so external entries don't read as "obviously fake"
-        // to client metadata heuristics. bitDepth/samplingRate/track/year of 0
-        // were the giveaways the old version emitted.
-        var year = song.Year ?? DateTime.UtcNow.Year;
+        // to client metadata heuristics. bitDepth/samplingRate/track of 0 were the
+        // giveaways the old version emitted.
+        //
+        // Year is the exception and is omitted entirely when unknown, rather than
+        // defaulted. It used to fall back to the current year, which is not a plausible
+        // default but a wrong one: a 1995 track was published to the client as this year's
+        // release, and unlike a missing field that is something the user can see and
+        // sort by. Every real library is full of untagged files, so a client that rejected
+        // entries without a year would already be broken against the server it is pointed
+        // at.
         var track = song.Track ?? 1;
         var bitDepth = song.IsLocal ? 16 : 16;
 
-        return new Dictionary<string, object>
+        var fields = new Dictionary<string, object>
         {
             ["id"] = song.Id,
             ["parent"] = albumId,
@@ -394,7 +405,6 @@ public class SubsonicResponseBuilder
             ["album"] = albumName,
             ["artist"] = song.Artist ?? "",
             ["track"] = track,
-            ["year"] = year,
             ["genre"] = song.Genre ?? "",
             ["coverArt"] = song.Id,
             ["size"] = estSize,
@@ -425,88 +435,127 @@ public class SubsonicResponseBuilder
             ["sortName"] = (song.Title ?? "").ToLowerInvariant(),
             ["isExternal"] = false
         };
+
+        if (song.Year is int knownYear) fields["year"] = knownYear;
+
+        return fields;
     }
 
     /// <summary>
     /// Converts an Album domain model to Subsonic JSON format.
     /// </summary>
-    public object ConvertAlbumToJson(Album album)
+    public object ConvertAlbumToJson(Album album) => BuildAlbumFields(album);
+
+    /// <summary>
+    /// The album shape both serializers render. A client browsing by folder rather than by
+    /// tags reads <c>title</c>, <c>isDir</c> and <c>parent</c>; emitting only <c>name</c>
+    /// left injected albums looking unlike anything the upstream server returns.
+    /// </summary>
+    private Dictionary<string, object> BuildAlbumFields(Album album)
     {
-        return new
+        var artistId = album.ArtistId ?? _idRegistry.Register(new SoulseekRouting
         {
-            id = album.Id,
-            name = album.Title,
-            artist = album.Artist,
-            artistId = album.ArtistId,
-            songCount = album.SongCount ?? 0,
-            year = album.Year ?? 0,
-            coverArt = album.Id,
-            isExternal = !album.IsLocal
+            Kind = RoutingKind.Artist,
+            Artist = album.Artist,
+        });
+
+        var fields = new Dictionary<string, object>
+        {
+            ["id"] = album.Id,
+            ["parent"] = artistId,
+            ["isDir"] = true,
+            ["title"] = album.Title,
+            ["name"] = album.Title,
+            ["album"] = album.Title,
+            ["artist"] = album.Artist ?? "",
+            ["artistId"] = artistId,
+            ["songCount"] = album.SongCount ?? 0,
+            ["genre"] = album.Genre ?? "",
+            ["coverArt"] = album.Id,
+            ["created"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
+            ["mediaType"] = "album",
+            ["displayArtist"] = album.Artist ?? "",
+            ["sortName"] = (album.Title ?? "").ToLowerInvariant(),
+            ["isExternal"] = !album.IsLocal,
         };
+
+        // Deezer's album search payload carries no release date; only the per-album detail
+        // call does, and fetching that for every search row would be twenty extra requests
+        // against a budget this project has already been burned by. So the year is genuinely
+        // unknown here and is left out rather than reported as zero.
+        if (album.Year is int knownYear) fields["year"] = knownYear;
+
+        return fields;
     }
 
     /// <summary>
     /// Converts an Artist domain model to Subsonic JSON format.
     /// </summary>
-    public object ConvertArtistToJson(Artist artist)
-    {
-        return new
+    public object ConvertArtistToJson(Artist artist) => BuildArtistFields(artist);
+
+    private static Dictionary<string, object> BuildArtistFields(Artist artist) =>
+        new()
         {
-            id = artist.Id,
-            name = artist.Name,
-            albumCount = artist.AlbumCount ?? 0,
-            coverArt = artist.Id,
-            isExternal = !artist.IsLocal
+            ["id"] = artist.Id,
+            ["name"] = artist.Name,
+            ["albumCount"] = artist.AlbumCount ?? 0,
+            ["coverArt"] = artist.Id,
+            ["isExternal"] = !artist.IsLocal,
         };
-    }
 
     /// <summary>
     /// Converts a Song domain model to Subsonic XML format.
     /// </summary>
     public XElement ConvertSongToXml(Song song, XNamespace ns)
-    {
-        return new XElement(ns + "song",
-            new XAttribute("id", song.Id),
-            new XAttribute("title", song.Title),
-            new XAttribute("album", song.Album ?? ""),
-            new XAttribute("artist", song.Artist ?? ""),
-            new XAttribute("duration", song.Duration ?? 0),
-            new XAttribute("track", song.Track ?? 0),
-            new XAttribute("year", song.Year ?? 0),
-            new XAttribute("coverArt", song.Id),
-            new XAttribute("isExternal", (!song.IsLocal).ToString().ToLower())
-        );
-    }
+        => new(ns + "song", Attributes(ConvertSongFields(song)));
 
     /// <summary>
     /// Converts an Album domain model to Subsonic XML format.
     /// </summary>
     public XElement ConvertAlbumToXml(Album album, XNamespace ns)
-    {
-        return new XElement(ns + "album",
-            new XAttribute("id", album.Id),
-            new XAttribute("name", album.Title),
-            new XAttribute("artist", album.Artist ?? ""),
-            new XAttribute("songCount", album.SongCount ?? 0),
-            new XAttribute("year", album.Year ?? 0),
-            new XAttribute("coverArt", album.Id),
-            new XAttribute("isExternal", (!album.IsLocal).ToString().ToLower())
-        );
-    }
+        => new(ns + "album", Attributes(BuildAlbumFields(album)));
 
     /// <summary>
     /// Converts an Artist domain model to Subsonic XML format.
     /// </summary>
     public XElement ConvertArtistToXml(Artist artist, XNamespace ns)
+        => new(ns + "artist", Attributes(BuildArtistFields(artist)));
+
+    /// <summary>
+    /// Renders the shared field set as XML attributes.
+    ///
+    /// The two serializers used to be written out by hand, separately, and drifted badly:
+    /// XML emitted nine attributes for a song where JSON emitted twenty-seven, so an
+    /// XML-only client received external tracks with no <c>suffix</c>, <c>contentType</c>
+    /// or <c>bitRate</c> at all — the fields a client picks its decoder from, and the ones
+    /// this file already warns must describe the bytes that will actually arrive. Deriving
+    /// one from the other is what stops that happening again.
+    /// </summary>
+    private static IEnumerable<XAttribute> Attributes(IEnumerable<KeyValuePair<string, object>> fields)
     {
-        return new XElement(ns + "artist",
-            new XAttribute("id", artist.Id),
-            new XAttribute("name", artist.Name),
-            new XAttribute("albumCount", artist.AlbumCount ?? 0),
-            new XAttribute("coverArt", artist.Id),
-            new XAttribute("isExternal", (!artist.IsLocal).ToString().ToLower())
-        );
+        foreach (var (name, value) in fields)
+        {
+            if (value is null) continue;
+
+            // Subsonic carries collections as child elements, not attributes. Every
+            // collection in the shared shape is emitted empty, so skipping them keeps the
+            // two formats equivalent rather than merely similar.
+            if (value is not string && value is System.Collections.IEnumerable) continue;
+
+            yield return new XAttribute(name, Scalar(value));
+        }
     }
+
+    /// <summary>
+    /// Invariant rendering. A comma decimal separator under a European locale would produce
+    /// numbers no Subsonic client can parse.
+    /// </summary>
+    private static string Scalar(object value) => value switch
+    {
+        bool b => b ? "true" : "false",
+        IFormattable f => f.ToString(null, System.Globalization.CultureInfo.InvariantCulture),
+        _ => value.ToString() ?? "",
+    };
 
     /// <summary>
     /// Converts a Subsonic JSON element to a dictionary.

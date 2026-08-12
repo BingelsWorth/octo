@@ -24,6 +24,50 @@ public class SubsonicModelMapperTests
     }
 
     [Fact]
+    public void ParseSearchResponse_JsonSearchResult2_ParsesLocalRows()
+    {
+        // Search3() also serves rest/search2 and relays there, so the upstream answers
+        // under searchResult2. Reading only searchResult3 dropped every local row and the
+        // response then carried nothing but discovery results.
+        var jsonResponse = @"{
+            ""subsonic-response"": {
+                ""status"": ""ok"",
+                ""version"": ""1.16.1"",
+                ""searchResult2"": {
+                    ""song"": [ { ""id"": ""song1"", ""title"": ""Test Song"" } ],
+                    ""album"": [ { ""id"": ""alb1"", ""name"": ""Test Album"" } ],
+                    ""artist"": [ { ""id"": ""art1"", ""name"": ""Test Artist"" } ]
+                }
+            }
+        }";
+
+        var (songs, albums, artists) = _mapper.ParseSearchResponse(
+            Encoding.UTF8.GetBytes(jsonResponse), "application/json");
+
+        Assert.Single(songs);
+        Assert.Single(albums);
+        Assert.Single(artists);
+    }
+
+    [Fact]
+    public void ParseSearchResponse_XmlSearchResult2_ParsesLocalRows()
+    {
+        var xmlResponse = @"<?xml version=""1.0"" encoding=""UTF-8""?>
+            <subsonic-response xmlns=""http://subsonic.org/restapi"" status=""ok"" version=""1.16.1"">
+                <searchResult2>
+                    <song id=""song1"" title=""Test Song"" />
+                    <album id=""alb1"" name=""Test Album"" />
+                </searchResult2>
+            </subsonic-response>";
+
+        var (songs, albums, _) = _mapper.ParseSearchResponse(
+            Encoding.UTF8.GetBytes(xmlResponse), "application/xml");
+
+        Assert.Single(songs);
+        Assert.Single(albums);
+    }
+
+    [Fact]
     public void ParseSearchResponse_JsonWithSongs_ParsesCorrectly()
     {
         // Arrange

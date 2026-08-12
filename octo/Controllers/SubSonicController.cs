@@ -38,6 +38,7 @@ public class SubsonicController : ControllerBase
     private readonly CoverArtAggregator? _coverArtAggregator;
     private readonly ExternalIdRegistry _idRegistry;
     private readonly Octo.Services.Common.TrackAcquisitionQueue _acquisitions;
+    private readonly Octo.Services.Common.ExternalSearchService _externalSearch;
     private readonly RadioQueueStore _radioQueueStore;
     private readonly NavidromeIdentityService _navIdentity;
     private readonly ILogger<SubsonicController> _logger;
@@ -53,6 +54,7 @@ public class SubsonicController : ControllerBase
         SubsonicProxyService proxyService,
         ExternalIdRegistry idRegistry,
         Octo.Services.Common.TrackAcquisitionQueue acquisitions,
+        Octo.Services.Common.ExternalSearchService externalSearch,
         RadioQueueStore radioQueueStore,
         NavidromeIdentityService navIdentity,
         ILogger<SubsonicController> logger,
@@ -72,6 +74,7 @@ public class SubsonicController : ControllerBase
         _proxyService = proxyService;
         _idRegistry = idRegistry;
         _acquisitions = acquisitions;
+        _externalSearch = externalSearch;
         _radioQueueStore = radioQueueStore;
         _navIdentity = navIdentity;
         _playlistSyncService = playlistSyncService;
@@ -299,19 +302,32 @@ public class SubsonicController : ControllerBase
 
         var cleanQuery = query.Trim().Trim('"');
 
-        if (string.IsNullOrWhiteSpace(cleanQuery))
+        // search2 and search3 are the same hijack with different envelopes. Decide once:
+        // the relay target, the envelope we answer with, and the empty-query passthrough
+        // all have to agree, and they used to be decided in three separate places with the
+        // response side hardcoded to searchResult3.
+        var isSearch2 = (Request.Path.Value ?? "").Contains("search2", StringComparison.OrdinalIgnoreCase);
+        var searchEndpoint = isSearch2 ? "rest/search2" : "rest/search3";
+        var envelope = isSearch2 ? "searchResult2" : "searchResult3";
+
+        // Discovery belongs on the first page only. Injected rows are regenerated per
+        // request rather than held in a server-side result set, so appending them to page
+        // two hands the client the same suggestions it already scrolled past. The native
+        // search path refuses later pages for exactly this reason; do the same here and
+        // let the library page normally underneath.
+        var songOffset = int.TryParse(parameters.GetValueOrDefault("songOffset", "0"), out var so) ? so : 0;
+
+        if (string.IsNullOrWhiteSpace(cleanQuery) || songOffset > 0)
         {
             try
             {
-                var endpoint = (Request.Path.Value ?? "").Contains("search2", StringComparison.OrdinalIgnoreCase)
-                    ? "rest/search2" : "rest/search3";
-                var result = await _proxyService.RelayAsync(endpoint, parameters);
+                var result = await _proxyService.RelayAsync(searchEndpoint, parameters);
                 var contentType = result.ContentType ?? $"application/{format}";
                 return File(result.Body, contentType);
             }
             catch
             {
-                return _responseBuilder.CreateResponse(format, "searchResult3", new { });
+                return _responseBuilder.CreateResponse(format, envelope, new { });
             }
         }
 
@@ -325,48 +341,75 @@ public class SubsonicController : ControllerBase
         // source and locals would crowd out external recommendations. Now
         // radio goes through getSimilarSongs2 (where we do local-first
         // resolution), so search3 is "search" again — locals belong here.
-        // Generous local target so a search for "Drake" surfaces all your
-        // owned Drake songs alongside the YouTube discoveries; Navidrome
-        // returns at most what it actually has anyway.
-        var localSongTarget = Math.Max(20, requestedSongs / 4);
+        //
+        // The split itself lives in SearchBudget so it can be unit-tested; the
+        // local floor used to be a flat 20, which is also the spec default for
+        // songCount, so the most common search in the wild left nothing for
+        // discovery at all (#14).
+        var (localSongTarget, externalTarget) = SearchBudget.Compute(requestedSongs);
 
-        // Cap external generation. For songCount=2000 we used to fan out to
-        // ~1800 Last.fm tracks per call — fast at filling the registry's 10k
-        // LRU and ratelimits Last.fm. ~150 is plenty for any reasonable queue
-        // and the registry survives across many sessions before recycling.
-        const int MaxExternalPerQuery = 150;
-        var externalTarget = Math.Min(MaxExternalPerQuery, Math.Max(0, requestedSongs - localSongTarget));
+        // A client that asked for a handful of songs is searching as the user types. The
+        // song side already costs nothing there (the budget leaves no room for discovery),
+        // but external album search was still firing a Deezer query per keystroke. Judged
+        // from the song count only when the client actually asked for songs, so a genuine
+        // album-only search still gets album discovery.
+        var isTypeAheadProbe = requestedSongs > 0 && externalTarget == 0;
 
-        // External: Last.fm fan-out. We try track.search first (fuzzy matches
-        // anywhere in the query), then top up with the canonical artist's top
-        // tracks if we're short. Each Last.fm hit becomes an instant placeholder
-        // song via SoulseekMetadataService — no yt-dlp call until /rest/stream.
-        // Album discovery runs concurrently with the Last.fm song fan-out so it costs no
+        // Album discovery runs concurrently with the song fan-out below so it costs no
         // serial latency. It needs no Last.fm key (Deezer's catalog is keyless), so albums
         // still appear for a user who has not set one up.
-        var albumTask = requestedAlbums > 0
+        var albumTask = requestedAlbums > 0 && !isTypeAheadProbe
             ? _metadataService.SearchAlbumsAsync(cleanQuery, Math.Min(requestedAlbums, 20))
             : Task.FromResult(new List<Album>());
 
-        var externalSongs = await BuildExternalSearchResultsAsync(cleanQuery, externalTarget);
-
-        // Album/art/year from Deezer (fast), then the ACCURATE duration for the top
-        // of the list from the real YouTube video (so the scrub bar matches the
-        // audio and the client advances correctly). Bounded + cached.
-        await _metadataService.EnrichExternalSongsAsync(externalSongs);
-        await _metadataService.ResolveTopDurationsAsync(externalSongs);
+        // One build per query, shared by every caller. Clients routinely fire several
+        // search calls for a single typed query, and those calls resolve to the same
+        // routing objects, so without this each one would re-run the whole enrichment
+        // pipeline over them concurrently. Started here rather than awaited, so it
+        // overlaps the local relay below; how many of its rows we actually use depends
+        // on what that relay comes back with.
+        var externalTask = externalTarget > 0
+            ? _externalSearch.GetAsync(cleanQuery)
+            : Task.FromResult<IReadOnlyList<Song>>(Array.Empty<Song>());
 
         // Local pass-through. Albums/artists always get the full requested counts;
         // song-side gets the local target.
-        var localProxyEndpoint = (Request.Path.Value ?? "").Contains("search2", StringComparison.OrdinalIgnoreCase)
-            ? "rest/search2" : "rest/search3";
         var localParams = new Dictionary<string, string>(parameters)
         {
             ["songCount"]   = localSongTarget.ToString(),
             ["albumCount"]  = requestedAlbums.ToString(),
             ["artistCount"] = requestedArtists.ToString(),
         };
-        var localResult = await _proxyService.RelaySafeAsync(localProxyEndpoint, localParams);
+        var localResult = await _proxyService.RelaySafeAsync(searchEndpoint, localParams);
+
+        // Subsonic reports its own errors inside an HTTP 200, so a rejected login and an
+        // empty library are the same thing to every check above this line. Left alone,
+        // the discovery top-up would read "no local matches", fill the page with
+        // suggestions, and present a broken connection as a healthy search.
+        if (IsFailedSubsonicBody(localResult.Body, localResult.ContentType))
+        {
+            _logger.LogDebug("upstream rejected the search for '{Q}'; passing its error through", cleanQuery);
+            return File(localResult.Body!, localResult.ContentType ?? $"application/{format}");
+        }
+
+        // Parsed here rather than inside the merge so the count that sizes the discovery
+        // slice below is taken from the very list the response will render. Deriving it
+        // from a second, differently-written parse of the same bytes is how you end up
+        // topping up against a local count the client never sees.
+        var localParsed = localResult.Success && localResult.Body != null
+            ? _modelMapper.ParseSearchResponse(localResult.Body, localResult.ContentType)
+            : (Songs: new List<object>(), Albums: new List<object>(), Artists: new List<object>());
+
+        // Hand the slots the library did not fill to discovery. A query the user owns
+        // nothing for is the one most worth answering with suggestions, and the local
+        // target is a reservation rather than a promise: Navidrome returns what it has.
+        // If the relay failed outright the count is zero, and filling the page with
+        // discovery is the right answer there too, since the merge will show no locals.
+        var built = await externalTask;
+        var externalSlice = Math.Min(
+            built.Count,
+            externalTarget + Math.Max(0, localSongTarget - localParsed.Songs.Count));
+        var externalSongs = built.Take(externalSlice).ToList();
 
         var playlistTask = _subsonicSettings.EnableExternalPlaylists
             ? await _metadataService.SearchPlaylistsAsync(cleanQuery, requestedAlbums)
@@ -395,7 +438,37 @@ public class SubsonicController : ControllerBase
         var localSongIds = ExtractLocalSongIds(localResult.Body, localResult.ContentType);
         _radioQueueStore.Register(localSongIds.Concat(externalSongs.Select(s => s.Id)));
 
-        return MergeSearchResults(localResult, externalResult, playlistTask, format);
+        return MergeSearchResults(localParsed, localResult.ContentType, externalResult, playlistTask, format, envelope);
+    }
+
+    /// <summary>
+    /// True when a relayed body is a Subsonic error envelope. These arrive as HTTP 200
+    /// with <c>status="failed"</c> inside, so the status code alone cannot tell a rejected
+    /// request from an empty result set.
+    /// </summary>
+    internal static bool IsFailedSubsonicBody(byte[]? body, string? contentType)
+    {
+        if (body == null || body.Length == 0) return false;
+        try
+        {
+            if (contentType?.Contains("json") == true)
+            {
+                using var doc = JsonDocument.Parse(body);
+                return doc.RootElement.TryGetProperty("subsonic-response", out var resp)
+                    && resp.TryGetProperty("status", out var st)
+                    && st.ValueKind == JsonValueKind.String
+                    && string.Equals(st.GetString(), "failed", StringComparison.OrdinalIgnoreCase);
+            }
+
+            var xml = XDocument.Load(new System.IO.MemoryStream(body));
+            return string.Equals(xml.Root?.Attribute("status")?.Value, "failed",
+                StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            // Unparseable is not the same as failed. Let the normal path handle it.
+            return false;
+        }
     }
 
     /// <summary>
@@ -441,63 +514,6 @@ public class SubsonicController : ControllerBase
         }
         catch { /* malformed upstream response — return whatever we got */ }
         return ids;
-    }
-
-    /// <summary>
-    /// Fans out a free-form query to Last.fm and returns up to <paramref name="target"/>
-    /// instant-placeholder external songs. Order:
-    ///   1. track.search hits (best fuzzy matches for the query as typed)
-    ///   2. canonical artist's top tracks (in case (1) was thin — common for
-    ///      single-word artist queries)
-    /// We dedupe by artist+title to avoid the same track appearing twice.
-    /// </summary>
-    private async Task<List<Song>> BuildExternalSearchResultsAsync(string query, int target)
-    {
-        if (target <= 0 || _lastFmService is null || !_lastFmService.IsConfigured)
-            return new List<Song>();
-
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var collected = new List<(string Artist, string Title)>();
-
-        var tracks = await _lastFmService.SearchTracksAsync(query, Math.Min(50, target * 2));
-        foreach (var t in tracks)
-        {
-            var key = $"{t.Artist}|{t.Title}".ToLowerInvariant();
-            if (seen.Add(key)) collected.Add((t.Artist, t.Title));
-            if (collected.Count >= target) break;
-        }
-
-        if (collected.Count < target)
-        {
-            // Use the first track-search hit's artist as the canonical anchor
-            // for top-tracks padding. Falls back to the raw query string when
-            // track.search came back empty.
-            var anchor = tracks.Count > 0 ? tracks[0].Artist : query;
-            var topTracks = await _lastFmService.GetArtistTopTracksAsync(anchor, target * 2);
-            foreach (var t in topTracks)
-            {
-                var key = $"{t.Artist}|{t.Title}".ToLowerInvariant();
-                if (seen.Add(key)) collected.Add((t.Artist, t.Title));
-                if (collected.Count >= target) break;
-            }
-        }
-
-        var songs = new List<Song>(collected.Count);
-        foreach (var (artist, title) in collected)
-        {
-            var hits = await _metadataService.SearchSongsByArtistTitleAsync(artist, title, 1);
-            if (hits.Count > 0) songs.Add(hits[0]);
-        }
-        _logger.LogInformation("External search '{Q}' -> {N} placeholder songs", query, songs.Count);
-
-        // Fire-and-forget: pre-resolve YouTube videoIds for the top hits so the
-        // first /rest/stream click doesn't pay the cold yt-dlp double-call cost
-        // (ytsearch1: + -g, 6-16s combined). Arpeggi cancels at ~10s and falls
-        // back to a local song; without this, external playback is unreachable
-        // from that client. 12 ≈ what fits on the first page of search results.
-        _ = _metadataService.PrewarmYouTubeIdsAsync(songs, topN: 12);
-
-        return songs;
     }
 
     /// <summary>
@@ -1215,61 +1231,64 @@ public class SubsonicController : ControllerBase
     #region Helper Methods
 
     private IActionResult MergeSearchResults(
-        (byte[]? Body, string? ContentType, bool Success) subsonicResult,
+        (List<object> Songs, List<object> Albums, List<object> Artists) local,
+        string? localContentType,
         SearchResult externalResult,
         List<ExternalPlaylist> playlistResult,
-        string format)
+        string format,
+        string envelope)
     {
-        var (localSongs, localAlbums, localArtists) = subsonicResult.Success && subsonicResult.Body != null
-            ? _modelMapper.ParseSearchResponse(subsonicResult.Body, subsonicResult.ContentType)
-            : (new List<object>(), new List<object>(), new List<object>());
+        var (localSongs, localAlbums, localArtists) = local;
 
-        var isJson = format == "json" || subsonicResult.ContentType?.Contains("json") == true;
+        var isJson = format == "json" || localContentType?.Contains("json") == true;
         var (mergedSongs, mergedAlbums, mergedArtists) = _modelMapper.MergeSearchResults(
-            localSongs, 
-            localAlbums, 
-            localArtists, 
+            localSongs,
+            localAlbums,
+            localArtists,
             externalResult,
             playlistResult,
             isJson);
 
         if (isJson)
         {
-            return _responseBuilder.CreateJsonResponse(new
+            // Dictionary rather than an anonymous type because the envelope name is
+            // decided by the request: search2 answered under searchResult3 is a shape the
+            // client never asked for, and a strict one drops the whole payload.
+            return _responseBuilder.CreateJsonResponse(new Dictionary<string, object>
             {
-                status = "ok",
-                version = "1.16.1",
-                searchResult3 = new
+                ["status"] = "ok",
+                ["version"] = "1.16.1",
+                [envelope] = new Dictionary<string, object>
                 {
-                    song = mergedSongs,
-                    album = mergedAlbums,
-                    artist = mergedArtists
-                }
+                    ["song"] = mergedSongs,
+                    ["album"] = mergedAlbums,
+                    ["artist"] = mergedArtists,
+                },
             });
         }
         else
         {
             var ns = XNamespace.Get("http://subsonic.org/restapi");
-            var searchResult3 = new XElement(ns + "searchResult3");
-            
+            var searchResult = new XElement(ns + envelope);
+
             foreach (var artist in mergedArtists.Cast<XElement>())
             {
-                searchResult3.Add(artist);
+                searchResult.Add(artist);
             }
             foreach (var album in mergedAlbums.Cast<XElement>())
             {
-                searchResult3.Add(album);
+                searchResult.Add(album);
             }
             foreach (var song in mergedSongs.Cast<XElement>())
             {
-                searchResult3.Add(song);
+                searchResult.Add(song);
             }
 
             var doc = new XDocument(
                 new XElement(ns + "subsonic-response",
                     new XAttribute("status", "ok"),
                     new XAttribute("version", "1.16.1"),
-                    searchResult3
+                    searchResult
                 )
             );
 
@@ -1446,7 +1465,7 @@ public class SubsonicController : ControllerBase
         }
 
         // Check if Last.fm radio is configured and enabled
-        if (_lastFmService == null || !_lastFmService.IsConfigured)
+        if (_lastFmService == null || !_lastFmService.IsRadioEnabled)
         {
             _logger.LogDebug("Last.fm radio not configured, relaying to upstream server");
             try
@@ -2112,11 +2131,10 @@ public class SubsonicController : ControllerBase
         if (target <= 0) return null;
 
         // Same discovery core as Subsonic search3: Last.fm fan-out, Deezer enrich,
-        // accurate YouTube durations for the top of the list.
-        var externalSongs = await BuildExternalSearchResultsAsync(term, target);
+        // accurate YouTube durations for the top of the list. Shared with search3, so a
+        // client that searches both ways for one query only pays for it once.
+        var externalSongs = (await _externalSearch.GetAsync(term)).Take(target).ToList();
         if (externalSongs.Count == 0) return null;
-        await _metadataService.EnrichExternalSongsAsync(externalSongs);
-        await _metadataService.ResolveTopDurationsAsync(externalSongs);
 
         foreach (var s in externalSongs)
             realArr.Add(BuildNativeSongObject(s));

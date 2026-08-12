@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
 using Octo.Models.Settings;
@@ -11,8 +12,11 @@ public class LastFmService
     private readonly ILogger<LastFmService> _logger;
     private const string BaseUrl = "https://ws.audioscrobbler.com/2.0/";
     
-    // Simple in-memory cache
-    private readonly Dictionary<string, (DateTime Expiry, List<SimilarTrack> Tracks)> _cache = new();
+    // Concurrent because radio requests arrive on request threads and this is written on
+    // every miss. A plain Dictionary written from two threads at once does not merely lose
+    // an entry: a resize racing with an insert can corrupt the bucket chain and leave a
+    // later read spinning forever inside the lookup.
+    private readonly ConcurrentDictionary<string, (DateTime Expiry, List<SimilarTrack> Tracks)> _cache = new();
 
     public LastFmService(
         HttpClient httpClient,
@@ -193,7 +197,18 @@ public class LastFmService
         }
     }
 
-    public bool IsConfigured => !string.IsNullOrEmpty(_settings.ApiKey) && _settings.EnableRadio;
+    /// <summary>
+    /// Last.fm can answer at all. Search discovery needs only this: an API key.
+    /// </summary>
+    public bool HasApiKey => !string.IsNullOrEmpty(_settings.ApiKey);
+
+    /// <summary>
+    /// Radio specifically is available. EnableRadio is a switch for the radio feature, so
+    /// it belongs here and not on <see cref="HasApiKey"/> — the two used to be one property,
+    /// which meant turning radio off also silently emptied the search bar of discovery
+    /// results, a setting doing something its name does not say.
+    /// </summary>
+    public bool IsRadioEnabled => HasApiKey && _settings.EnableRadio;
 
     /// <summary>
     /// Free-form track search. Used by Search3 hijack so the search bar
