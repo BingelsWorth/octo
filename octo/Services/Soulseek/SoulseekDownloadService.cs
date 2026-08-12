@@ -298,7 +298,17 @@ public class SoulseekDownloadService : BaseDownloadService
             // The usual 64KB size tolerance absorbs slskd's own size drift, but
             // an interrupted transfer is far more likely to be genuinely
             // truncated, so demand an exact match before promoting one.
-            var localPath = ResolveLocalPath(hit.Filename, hit.Size, requireExactSize: callerGaveUp);
+            //
+            // The check re-polls the disk for a bounded window: slskd reports
+            // Succeeded BEFORE moving the file out of its incomplete directory,
+            // and on bind mounts that move is a copy that can take seconds.
+            var localPath = await ResolveLocalPathWithRetryAsync(
+                hit.Filename, hit.Size,
+                requireExactSize: callerGaveUp,
+                maxWait: state == SoulseekTransferState.Succeeded
+                    ? TimeSpan.FromSeconds(15)
+                    : TimeSpan.FromSeconds(5),
+                cancellationToken);
             if (!string.IsNullOrEmpty(localPath))
             {
                 // Last line of defence, and the only one that inspects the actual audio.
@@ -344,7 +354,9 @@ public class SoulseekDownloadService : BaseDownloadService
         }
 
         throw new Exception(
-            $"All {ranked.Count} Soulseek peer attempts failed for '{routing.Artist} - {routing.Title}'. Last error: {lastError?.Message}");
+            $"All {ranked.Count} Soulseek peer attempts failed for '{routing.Artist} - {routing.Title}'. Last error: {lastError?.Message}. "
+            + $"If slskd shows these transfers as Completed, slskd's downloads directory is not the directory Octo watches ({DownloadPath}); "
+            + "set SLSKD_DOWNLOADS_DIR=/music on the slskd container (see issue #17).");
     }
 
     /// <summary>
@@ -666,6 +678,42 @@ public class SoulseekDownloadService : BaseDownloadService
         catch (Exception ex)
         {
             Logger.LogWarning("Could not delete mismatched download {Path}: {M}", path, ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// slskd flips a transfer to Succeeded BEFORE moving the file out of its
+    /// incomplete directory, and on bind mounts that move is a cross-filesystem
+    /// copy that can take seconds for a FLAC. Without this window the attempt
+    /// fails on "no file on disk" and the next peer re-downloads the same track.
+    /// FileMatches rejects a partial copy by size, so the loop naturally waits
+    /// out an in-flight move. A cancelled caller gets one final check instead of
+    /// a wait, mirroring the wait-cancel handling above.
+    /// </summary>
+    private Task<string?> ResolveLocalPathWithRetryAsync(
+        string remoteFilename, long expectedSize, bool requireExactSize, TimeSpan maxWait, CancellationToken ct)
+        => RetryResolveAsync(
+            () => ResolveLocalPath(remoteFilename, expectedSize, requireExactSize),
+            maxWait, TimeSpan.FromSeconds(1), ct);
+
+    internal static async Task<string?> RetryResolveAsync(
+        Func<string?> resolve, TimeSpan maxWait, TimeSpan pollInterval, CancellationToken ct)
+    {
+        var deadline = DateTime.UtcNow + maxWait;
+        while (true)
+        {
+            var path = resolve();
+            if (path is not null || DateTime.UtcNow >= deadline) return path;
+            try
+            {
+                await Task.Delay(pollInterval, ct);
+            }
+            catch (TaskCanceledException)
+            {
+                // Caller left: no point waiting out the window, but the file may
+                // have just landed, so look once more before giving up.
+                return resolve();
+            }
         }
     }
 

@@ -88,6 +88,18 @@ public abstract class BaseDownloadService : IDownloadService
         _configuredDownloadPath = configuration["Library:DownloadPath"] ?? "./downloads";
         CachePath = PathHelper.GetCachePath();
 
+        // A drive-letter path inside a Linux container is a config mistake the
+        // filesystem hides: CreateDirectory below happily makes a literal
+        // directory named "E:\Media\Music" and downloads vanish into it.
+        if (!OperatingSystem.IsWindows() && PathHelper.LooksLikeWindowsDrivePath(_configuredDownloadPath))
+        {
+            Logger.LogWarning(
+                "Library:DownloadPath is the Windows path '{Path}' but this host is not Windows. "
+                + "It will be treated as a literal directory name. Use the container path instead "
+                + "(normally /music) and move the library via the DOWNLOAD_PATH bind mount.",
+                _configuredDownloadPath);
+        }
+
         if (!Directory.Exists(DownloadPath))
         {
             Directory.CreateDirectory(DownloadPath);

@@ -108,6 +108,20 @@ public static class PathHelper
     }
 
     /// <summary>
+    /// True when the path starts with a Windows drive letter ("E:\" or "E:/").
+    /// On a non-Windows host such a path is not a location: the filesystem
+    /// treats it as a literal directory name.
+    /// </summary>
+    public static bool LooksLikeWindowsDrivePath(string? path)
+    {
+        return !string.IsNullOrEmpty(path)
+            && path.Length >= 3
+            && char.IsAsciiLetter(path[0])
+            && path[1] == ':'
+            && (path[2] == '\\' || path[2] == '/');
+    }
+
+    /// <summary>
     /// Resolves a unique file path by appending a counter if the file already exists.
     /// </summary>
     /// <param name="basePath">Desired file path.</param>

@@ -122,6 +122,48 @@ public class SoulseekClient
     }
 
     /// <summary>
+    /// Reads slskd's resolved downloads directory from /api/v0/options. Purely a
+    /// diagnostic: a null (endpoint missing, redacted, or unexpected shape) must
+    /// never gate anything.
+    /// </summary>
+    public async Task<string?> GetDownloadsDirectoryAsync(CancellationToken ct = default)
+    {
+        try
+        {
+            using var resp = await SendAsync(HttpMethod.Get, $"{Base}/api/v0/options", null, ct);
+            if (!resp.IsSuccessStatusCode) return null;
+
+            var json = await resp.Content.ReadAsStringAsync(ct);
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return null;
+            if (!TryGetPropertyIgnoreCase(doc.RootElement, "directories", out var dirs)) return null;
+            if (!TryGetPropertyIgnoreCase(dirs, "downloads", out var downloads)) return null;
+            return downloads.ValueKind == JsonValueKind.String ? downloads.GetString() : null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug("Could not read slskd options: {Msg}", ex.Message);
+            return null;
+        }
+    }
+
+    private static bool TryGetPropertyIgnoreCase(JsonElement element, string name, out JsonElement value)
+    {
+        value = default;
+        if (element.ValueKind != JsonValueKind.Object) return false;
+        if (element.TryGetProperty(name, out value)) return true;
+        foreach (var prop in element.EnumerateObject())
+        {
+            if (string.Equals(prop.Name, name, StringComparison.OrdinalIgnoreCase))
+            {
+                value = prop.Value;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>
     /// Initiates a search and waits up to SearchWaitSeconds for peer responses,
     /// then returns the responses regardless of search-completed state.
     /// </summary>
