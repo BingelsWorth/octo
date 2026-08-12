@@ -97,7 +97,8 @@ services:
 
   # Soulseek client (slskd). Web UI on 5030, peer port 50300.
   # State (config, db, downloads-in-progress) persisted to ./slskd-state so the
-  # account survives recreate. Final FLACs land in the same /music as Octo.
+  # account survives recreate. SLSKD_DOWNLOADS_DIR below sends finished files
+  # to the same /music mount Octo watches.
   slskd:
     image: slskd/slskd:latest
     container_name: slskd
@@ -107,6 +108,15 @@ services:
       - "50300:50300"
     environment:
       SLSKD_REMOTE_CONFIGURATION: "true"
+      # Completed downloads go to the shared /music mount so Octo can see and
+      # relocate them. Without this slskd defaults to <app>/downloads, which the
+      # slskd-state mount turns into ./slskd-state/downloads, a directory Octo
+      # does not mount (issue #17). Incomplete transfers stay at the default
+      # /app/incomplete (inside slskd-state) so partial files never enter the
+      # library Navidrome scans.
+      # NOTE: an explicit directories.downloads in ./slskd-state/slskd.yml
+      # outranks this env var (slskd precedence: env < yaml).
+      SLSKD_DOWNLOADS_DIR: /music
       SLSKD_SLSK_USERNAME: ${SLSKD_SOULSEEK_USERNAME:-}
       SLSKD_SLSK_PASSWORD: ${SLSKD_SOULSEEK_PASSWORD:-}
       SLSKD_USERNAME: ${SLSKD_USERNAME:-slskd}

@@ -239,7 +239,7 @@
             <div class="set-row stack">
               <div class="set-info">
                 <div class="set-info-t">Download path <span class="set-opt">override / fallback</span></div>
-                <div class="set-info-d">Container path where downloaded files land. With auto-detect on, this is only used until Navidrome's folder is detected. Turn auto-detect off to force this exact path.</div>
+                <div class="set-info-d">Path INSIDE the Octo container where downloaded files land (default /music, backed by the DOWNLOAD_PATH bind mount). To move the library on the host, change DOWNLOAD_PATH in .env instead; a host path like E:\Media\Music does not work here. With auto-detect on, this is only used until Navidrome's folder is detected.</div>
               </div>
               <input class="set-input" id="f-download-path" name="Library.DownloadPath" data-restart="true" placeholder="/music" />
             </div>
