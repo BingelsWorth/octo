@@ -144,6 +144,9 @@ public class SoulseekDownloadService : BaseDownloadService
     // Search Soulseek, walk the top-N peers in quality order, first successful
     // transfer wins. ~30-50% of Soulseek peer requests are rejected (queue
     // full / overwhelmed / banned), so trying just the top hit fails too often.
+    //
+    // Each attempt is bounded by Soulseek:DownloadTimeoutSeconds, so that setting is
+    // per peer and a full walk can spend it MaxPeerAttempts times over.
     // =========================================================================
     private const int MaxPeerAttempts = 5;
 
@@ -541,27 +544,65 @@ public class SoulseekDownloadService : BaseDownloadService
         "version", "demo", "session", "karaoke", "cover", "reprise",
     };
 
-    private List<SoulseekFileHit> RankCandidates(
-        List<SoulseekFileHit> hits,
-        string title,
-        int? expectedDuration)
-    => hits
-    .Where(h => string.Equals(
-        h.Extension,
-        _settings.PreferredExtension,
-        StringComparison.OrdinalIgnoreCase))
-    .Where(h => h.Size >= _settings.MinFileSizeBytes)
-    .Where(h => FilenamePlausiblyMatchesTitle(h.Filename, title))
-    .Where(h => DurationPlausible(h.Length, expectedDuration))
-    .OrderBy(h => VariantPenalty(h.Filename, title))
-    .ThenBy(h => QualityPenalty(h))
-    .ThenBy(h => h.QueueLength ?? int.MaxValue)
-    .ThenByDescending(h => h.UploadSpeed ?? 0)
-    .ThenBy(h => h.Size)
-    .Take(MaxPeerAttempts)
-    .ToList();
+    private List<SoulseekFileHit> RankCandidates(List<SoulseekFileHit> hits, string title, int? expectedDuration)
+    {
+        var wanted = SoulseekClient.NormalizeExtension(_settings.PreferredExtension, "");
+        return hits
+            .Where(h => string.Equals(h.Extension, wanted, StringComparison.OrdinalIgnoreCase))
+            .Where(h => h.Size >= _settings.MinFileSizeBytes)
+            .Where(h => FilenamePlausiblyMatchesTitle(h.Filename, title))
+            .Where(h => DurationPlausible(h.Length, expectedDuration))
+            // Variant mixes sort last rather than being dropped: sometimes a remix really
+            // is what was asked for, and sometimes it is all a peer has.
+            .OrderBy(h => VariantPenalty(h.Filename, title))
+            .ThenBy(h => QualityPenalty(h))
+            .ThenBy(h => h.QueueLength ?? int.MaxValue)
+            .ThenByDescending(h => h.UploadSpeed ?? 0)
+            .ThenBy(h => SizeSortKey(h.Size, wanted))
+            .Take(MaxPeerAttempts)
+            .ToList();
+    }
 
-    private static int QualityPenalty(SoulseekFileHit h)
+    /// <summary>
+    /// Extensions where a bigger file means a longer or higher-resolution recording
+    /// rather than a better one. Used to decide which way the size tiebreak points.
+    /// </summary>
+    private static readonly string[] LosslessExtensions =
+    {
+        "flac", "wav", "alac", "ape", "aiff", "aif", "wv",
+    };
+
+    /// <summary>
+    /// The last signal left when everything above it ties, and it ties often: slskd
+    /// reports queue length and upload speed per RESPONSE, not per file, so every file
+    /// one peer offers carries identical values and size is what actually separates them.
+    ///
+    /// Which direction helps depends on what is being chased. Chasing lossless, the
+    /// smaller of two otherwise-equal candidates is the CD rip rather than the hi-res
+    /// transfer, which is the same preference QualityPenalty encodes and the only way to
+    /// express it when a peer reports no bit depth at all. Chasing a lossy format, the
+    /// bigger file is simply the higher bitrate, and preferring the smaller one would
+    /// walk an mp3 library down to its worst copy of every track.
+    /// </summary>
+    internal static long SizeSortKey(long size, string? preferredExtension)
+        => LosslessExtensions.Contains(SoulseekClient.NormalizeExtension(preferredExtension, ""))
+            ? size
+            : -size;
+
+    /// <summary>
+    /// How far a candidate sits from ordinary CD quality, 16-bit/44.1kHz.
+    ///
+    /// CD is the target because it is what the master almost always was: a 24/96 transfer
+    /// of a 1998 pop record carries no more music than the 16/44.1 one, at several times
+    /// the bytes on a disk the user is paying for and a transfer that takes proportionally
+    /// longer over Soulseek. Hi-res is ranked down rather than rejected, because sometimes
+    /// it is the only copy a peer has.
+    ///
+    /// Unknown sits deliberately between the two. Most peers report neither field, so
+    /// treating unknown as hi-res would bury the majority of a normal search, and treating
+    /// it as CD would let an unlabelled 24/96 outrank a labelled 16/44.1.
+    /// </summary>
+    internal static int QualityPenalty(SoulseekFileHit h)
     {
         var bitDepthPenalty = h.BitDepth switch
         {
@@ -590,18 +631,29 @@ public class SoulseekDownloadService : BaseDownloadService
     }
 
     private static string LeafOf(string path) =>
-    path.Replace('\\', '/')
-    .Split('/', StringSplitOptions.RemoveEmptyEntries) is { Length: > 0 } s
-    ? s[^1]
-    : path;
+        path.Replace('\\', '/').Split('/', StringSplitOptions.RemoveEmptyEntries) is { Length: > 0 } s
+            ? s[^1] : path;
 
     private static List<string> TitleTokens(string title) =>
-    title.ToLowerInvariant()
-    .Split(
-        new[] { ' ', '-', '(', ')', '[', ']', '_', '.', ',', '\'', '"' },
-           StringSplitOptions.RemoveEmptyEntries)
-    .Where(t => t.Length >= 3)
-    .ToList();
+        title.ToLowerInvariant()
+            .Split(new[] { ' ', '-', '(', ')', '[', ']', '_', '.', ',', '\'', '"' },
+                   StringSplitOptions.RemoveEmptyEntries)
+            .Where(t => t.Length >= 3)
+            .ToList();
+
+    /// <summary>
+    /// A roman numeral on the end of a title, which TitleTokens cannot see.
+    ///
+    /// Tokens shorter than 3 characters are dropped so that "DNA." and "M.I.A." are not
+    /// over-filtered, and that quietly deletes the entire difference between "Trilogy I"
+    /// and "Trilogy II": both reduce to the single token "trilogy", so either file
+    /// satisfies a request for the other. Anchored to the end so an "I" inside a sentence
+    /// is left alone, and matched on word boundaries in the filename so "I" does not find
+    /// itself inside "II" and "V" does not find itself inside "IV".
+    /// </summary>
+    private static readonly Regex TrailingRomanNumeral = new(
+        @"\b(I|II|III|IV|V|VI|VII|VIII|IX|X)\b\s*$",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     /// <summary>
     /// Does the FILENAME look like the track we asked for?
@@ -611,29 +663,21 @@ public class SoulseekDownloadService : BaseDownloadService
     /// the track "Mezzanine" while the file inside was a different song entirely. And it
     /// accepted any single token, so "Group Four" would have been satisfied by "Four
     /// Seasons". Now every significant token must appear in the leaf name. Tokens are
-    /// >=3 chars so short titles like "DNA." or "M.I.A." are not over-filtered.
+    /// >=3 chars so short titles like "DNA." or "M.I.A." are not over-filtered, with a
+    /// trailing roman numeral handled separately since that rule would erase it.
     /// </summary>
     internal static bool FilenamePlausiblyMatchesTitle(string filename, string title)
     {
         if (string.IsNullOrEmpty(filename) || string.IsNullOrEmpty(title)) return true;
         var leaf = LeafOf(filename).ToLowerInvariant();
-        var wantedRoman = Regex.Match(
-            title.Trim(),
-                                      @"\b(I|II|III|IV|V|VI|VII|VIII|IX|X)\b\s*$",
-                                      RegexOptions.IgnoreCase);
 
-        if (wantedRoman.Success)
+        var wantedRoman = TrailingRomanNumeral.Match(title.Trim());
+        if (wantedRoman.Success
+            && !Regex.IsMatch(leaf, $@"\b{Regex.Escape(wantedRoman.Groups[1].Value)}\b", RegexOptions.IgnoreCase))
         {
-            var roman = wantedRoman.Groups[1].Value;
-
-            if (!Regex.IsMatch(
-                leaf,
-                $@"\b{Regex.Escape(roman)}\b",
-                               RegexOptions.IgnoreCase))
-            {
-                return false;
-            }
+            return false;
         }
+
         var tokens = TitleTokens(title);
         if (tokens.Count == 0) return true;
         return tokens.All(t => leaf.Contains(t));

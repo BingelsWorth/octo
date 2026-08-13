@@ -177,4 +177,140 @@ public class SoulseekCandidateMatchingTests
         Assert.Equal(0, SoulseekDownloadService.VariantPenalty(
             "Oliver Nelson - Stolen Moments.flac", "Stolen Moments"));
     }
+
+    // ---- roman numerals -------------------------------------------------------
+
+    /// <summary>
+    /// The >=3 char token rule deleted the only thing separating these two titles, so
+    /// either file satisfied a request for the other and a two-part suite arrived as two
+    /// copies of the same part.
+    /// </summary>
+    [Fact]
+    public void RomanNumeralPartsAreNotInterchangeable()
+    {
+        Assert.False(SoulseekDownloadService.FilenamePlausiblyMatchesTitle(
+            "02 - Trilogy II.flac", "Trilogy I"));
+        Assert.False(SoulseekDownloadService.FilenamePlausiblyMatchesTitle(
+            "01 - Trilogy I.flac", "Trilogy II"));
+        Assert.True(SoulseekDownloadService.FilenamePlausiblyMatchesTitle(
+            "01 - Trilogy I.flac", "Trilogy I"));
+    }
+
+    /// <summary>
+    /// Word boundaries in both directions: "I" must not find itself inside "II", and "V"
+    /// must not find itself inside "IV".
+    /// </summary>
+    [Fact]
+    public void RomanNumeralsMatchWholeWordsOnly()
+    {
+        Assert.False(SoulseekDownloadService.FilenamePlausiblyMatchesTitle(
+            "Trilogy IV.flac", "Trilogy V"));
+        Assert.True(SoulseekDownloadService.FilenamePlausiblyMatchesTitle(
+            "Trilogy IV.flac", "Trilogy IV"));
+    }
+
+    /// <summary>
+    /// The guard is anchored to the end of the title, so ordinary titles carrying a
+    /// stray "I" or a trailing letter are untouched by it.
+    /// </summary>
+    [Fact]
+    public void OrdinaryTitlesAreUnaffectedByTheRomanGuard()
+    {
+        Assert.True(SoulseekDownloadService.FilenamePlausiblyMatchesTitle(
+            "Kendrick Lamar - DNA..flac", "DNA."));
+        Assert.True(SoulseekDownloadService.FilenamePlausiblyMatchesTitle(
+            "anything at all.flac", "M.I.A."));
+        Assert.True(SoulseekDownloadService.FilenamePlausiblyMatchesTitle(
+            @"music\Massive Attack\Mezzanine (1998)\09 - Mezzanine.flac", "Mezzanine"));
+        Assert.True(SoulseekDownloadService.FilenamePlausiblyMatchesTitle(
+            "10 - Group Four.flac", "Group Four"));
+    }
+
+    // ---- quality ranking ------------------------------------------------------
+
+    private static SoulseekFileHit Hit(int? bitDepth, int? sampleRate) =>
+        new() { BitDepth = bitDepth, SampleRate = sampleRate };
+
+    /// <summary>
+    /// A 24/96 transfer of a CD-era master carries no more music than the 16/44.1 one,
+    /// at several times the bytes and the transfer time. Ranked down, never rejected.
+    /// </summary>
+    [Fact]
+    public void CdQualityOutranksHiRes()
+    {
+        var cd = SoulseekDownloadService.QualityPenalty(Hit(16, 44100));
+        var cd48 = SoulseekDownloadService.QualityPenalty(Hit(16, 48000));
+        var hiRes = SoulseekDownloadService.QualityPenalty(Hit(24, 96000));
+
+        Assert.True(cd < cd48, "16/44.1 is the target, 16/48 is the runner-up");
+        Assert.True(cd48 < hiRes, "hi-res sorts last");
+    }
+
+    /// <summary>
+    /// Most peers report neither field. Treating unknown as hi-res would bury the
+    /// majority of a normal search; treating it as CD would let an unlabelled 24/96
+    /// outrank a labelled 16/44.1. It sits between the two on purpose.
+    /// </summary>
+    [Fact]
+    public void UnknownQualitySitsBetweenCdAndHiRes()
+    {
+        var unknown = SoulseekDownloadService.QualityPenalty(Hit(null, null));
+
+        Assert.True(SoulseekDownloadService.QualityPenalty(Hit(16, 48000)) < unknown);
+        Assert.True(unknown < SoulseekDownloadService.QualityPenalty(Hit(24, 96000)));
+    }
+
+    /// <summary>
+    /// Size is the last signal left and it ties often, because slskd reports queue length
+    /// and upload speed per response rather than per file. Pointing it the wrong way for
+    /// a lossy library walks every track down to the worst copy on the shelf.
+    /// </summary>
+    [Fact]
+    public void SizeTiebreakPointsTowardsCdRipsButAwayFromLowBitrates()
+    {
+        Assert.True(
+            SoulseekDownloadService.SizeSortKey(30_000_000, "flac")
+            > SoulseekDownloadService.SizeSortKey(25_000_000, "flac"),
+            "chasing lossless, the smaller of two equals is the CD rip");
+
+        Assert.True(
+            SoulseekDownloadService.SizeSortKey(10_000_000, "mp3")
+            < SoulseekDownloadService.SizeSortKey(4_000_000, "mp3"),
+            "chasing lossy, the bigger file is simply the higher bitrate");
+    }
+
+    /// <summary>A configured extension is normalized the same way a hit's is.</summary>
+    [Fact]
+    public void SizeTiebreakReadsAConfiguredExtensionInAnyShape()
+    {
+        var smallerFirst = SoulseekDownloadService.SizeSortKey(9, "flac");
+        Assert.Equal(smallerFirst, SoulseekDownloadService.SizeSortKey(9, ".flac"));
+        Assert.Equal(smallerFirst, SoulseekDownloadService.SizeSortKey(9, "FLAC"));
+    }
+
+    // ---- extension normalization ----------------------------------------------
+
+    /// <summary>
+    /// Ranking accepts a hit by comparing its extension against the configured one, and
+    /// slskd does not report a consistent shape. An unnormalized ".flac" matched no
+    /// configured "flac", which surfaced as "this track is not on Soulseek" rather than
+    /// as a parsing mismatch, and took every FLAC on the network with it.
+    /// </summary>
+    [Fact]
+    public void EveryShapeSlskdReportsReducesToTheSameExtension()
+    {
+        Assert.Equal("flac", SoulseekClient.NormalizeExtension(".flac", "x.flac"));
+        Assert.Equal("flac", SoulseekClient.NormalizeExtension("flac", "x.flac"));
+        Assert.Equal("flac", SoulseekClient.NormalizeExtension("FLAC", "x.flac"));
+        Assert.Equal("flac", SoulseekClient.NormalizeExtension("  .FLAC ", "x.flac"));
+    }
+
+    /// <summary>Field absent or blank: fall back to the filename it came with.</summary>
+    [Fact]
+    public void AMissingExtensionFallsBackToTheFilename()
+    {
+        Assert.Equal("flac", SoulseekClient.NormalizeExtension(null, @"share\Artist\01 - Track.flac"));
+        Assert.Equal("flac", SoulseekClient.NormalizeExtension("", @"share\Artist\01 - Track.flac"));
+        Assert.Equal("", SoulseekClient.NormalizeExtension(null, "no extension at all"));
+    }
 }

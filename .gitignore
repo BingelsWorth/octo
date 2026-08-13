@@ -79,3 +79,5 @@ octo/downloads/
 # Local runtime state
 octo-config/
 slskd-state/
+# The compose default for DOWNLOAD_PATH, so a default install creates it here.
+/downloads/
