@@ -146,7 +146,6 @@ public class SoulseekDownloadService : BaseDownloadService
     // full / overwhelmed / banned), so trying just the top hit fails too often.
     // =========================================================================
     private const int MaxPeerAttempts = 5;
-    private const int PerAttemptTimeoutSeconds = 60;
 
     protected override async Task<string> DownloadTrackAsync(string trackId, Song song, CancellationToken cancellationToken)
     {
@@ -276,7 +275,11 @@ public class SoulseekDownloadService : BaseDownloadService
             Exception? waitError = null;
             try
             {
-                state = await _slskd.WaitForCompletionAsync(hit.Username, hit.Filename, PerAttemptTimeoutSeconds, cancellationToken);
+                state = await _slskd.WaitForCompletionAsync(
+                    hit.Username,
+                    hit.Filename,
+                    _settings.DownloadTimeoutSeconds,
+                    cancellationToken);
             }
             catch (Exception ex)
             {
@@ -538,31 +541,67 @@ public class SoulseekDownloadService : BaseDownloadService
         "version", "demo", "session", "karaoke", "cover", "reprise",
     };
 
-    private List<SoulseekFileHit> RankCandidates(List<SoulseekFileHit> hits, string title, int? expectedDuration)
-        => hits
-            .Where(h => string.Equals(h.Extension, _settings.PreferredExtension, StringComparison.OrdinalIgnoreCase))
-            .Where(h => h.Size >= _settings.MinFileSizeBytes)
-            .Where(h => FilenamePlausiblyMatchesTitle(h.Filename, title))
-            .Where(h => DurationPlausible(h.Length, expectedDuration))
-            // Variant mixes sort last rather than being dropped: sometimes a remix really
-            // is what was asked for, and sometimes it is all a peer has.
-            .OrderBy(h => VariantPenalty(h.Filename, title))
-            .ThenBy(h => h.QueueLength ?? int.MaxValue)
-            .ThenByDescending(h => h.UploadSpeed ?? 0)
-            .ThenByDescending(h => h.Size)
-            .Take(MaxPeerAttempts)
-            .ToList();
+    private List<SoulseekFileHit> RankCandidates(
+        List<SoulseekFileHit> hits,
+        string title,
+        int? expectedDuration)
+    => hits
+    .Where(h => string.Equals(
+        h.Extension,
+        _settings.PreferredExtension,
+        StringComparison.OrdinalIgnoreCase))
+    .Where(h => h.Size >= _settings.MinFileSizeBytes)
+    .Where(h => FilenamePlausiblyMatchesTitle(h.Filename, title))
+    .Where(h => DurationPlausible(h.Length, expectedDuration))
+    .OrderBy(h => VariantPenalty(h.Filename, title))
+    .ThenBy(h => QualityPenalty(h))
+    .ThenBy(h => h.QueueLength ?? int.MaxValue)
+    .ThenByDescending(h => h.UploadSpeed ?? 0)
+    .ThenBy(h => h.Size)
+    .Take(MaxPeerAttempts)
+    .ToList();
+
+    private static int QualityPenalty(SoulseekFileHit h)
+    {
+        var bitDepthPenalty = h.BitDepth switch
+        {
+            16 => 0,
+            null => 3,
+            24 => 10,
+            > 24 => 20,
+            _ => 5,
+        };
+
+        var sampleRatePenalty = h.SampleRate switch
+        {
+            44100 => 0,
+            48000 => 1,
+            null => 3,
+            88200 => 10,
+            96000 => 11,
+            176400 => 20,
+            192000 => 21,
+            > 96000 => 20,
+            > 48000 => 10,
+            _ => 4,
+        };
+
+        return bitDepthPenalty + sampleRatePenalty;
+    }
 
     private static string LeafOf(string path) =>
-        path.Replace('\\', '/').Split('/', StringSplitOptions.RemoveEmptyEntries) is { Length: > 0 } s
-            ? s[^1] : path;
+    path.Replace('\\', '/')
+    .Split('/', StringSplitOptions.RemoveEmptyEntries) is { Length: > 0 } s
+    ? s[^1]
+    : path;
 
     private static List<string> TitleTokens(string title) =>
-        title.ToLowerInvariant()
-            .Split(new[] { ' ', '-', '(', ')', '[', ']', '_', '.', ',', '\'', '"' },
-                   StringSplitOptions.RemoveEmptyEntries)
-            .Where(t => t.Length >= 3)
-            .ToList();
+    title.ToLowerInvariant()
+    .Split(
+        new[] { ' ', '-', '(', ')', '[', ']', '_', '.', ',', '\'', '"' },
+           StringSplitOptions.RemoveEmptyEntries)
+    .Where(t => t.Length >= 3)
+    .ToList();
 
     /// <summary>
     /// Does the FILENAME look like the track we asked for?
@@ -578,6 +617,23 @@ public class SoulseekDownloadService : BaseDownloadService
     {
         if (string.IsNullOrEmpty(filename) || string.IsNullOrEmpty(title)) return true;
         var leaf = LeafOf(filename).ToLowerInvariant();
+        var wantedRoman = Regex.Match(
+            title.Trim(),
+                                      @"\b(I|II|III|IV|V|VI|VII|VIII|IX|X)\b\s*$",
+                                      RegexOptions.IgnoreCase);
+
+        if (wantedRoman.Success)
+        {
+            var roman = wantedRoman.Groups[1].Value;
+
+            if (!Regex.IsMatch(
+                leaf,
+                $@"\b{Regex.Escape(roman)}\b",
+                               RegexOptions.IgnoreCase))
+            {
+                return false;
+            }
+        }
         var tokens = TitleTokens(title);
         if (tokens.Count == 0) return true;
         return tokens.All(t => leaf.Contains(t));

@@ -274,7 +274,18 @@ public class SoulseekClient
                     int? length = file.TryGetProperty("length", out var lenEl) && lenEl.ValueKind == JsonValueKind.Number
                         ? lenEl.GetInt32()
                         : null;
-                    var ext = file.TryGetProperty("extension", out var exEl) ? exEl.GetString() : null;
+                    var ext = file.TryGetProperty("extension", out var exEl)
+                        ? exEl.GetString()
+                        : null;
+
+                    var normalizedExt = string.IsNullOrWhiteSpace(ext)
+                        ? Path.GetExtension(filename)
+                        : ext;
+
+                        normalizedExt = normalizedExt
+                        .Trim()
+                        .TrimStart('.')
+                        .ToLowerInvariant();
 
                     hits.Add(new SoulseekFileHit
                     {
@@ -285,7 +296,7 @@ public class SoulseekClient
                         SampleRate = sampleRate,
                         BitDepth = bitDepth,
                         Length = length,
-                        Extension = (ext ?? Path.GetExtension(filename).TrimStart('.')).ToLowerInvariant(),
+                        Extension = normalizedExt,
                         UploadSpeed = uploadSpeed,
                         QueueLength = queueLength
                     });
