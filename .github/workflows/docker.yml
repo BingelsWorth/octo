@@ -10,12 +10,21 @@ on:
   # No pull_request trigger. A merge already arrives here as a push to main, so
   # building on `closed` too meant every merge built the same commit twice.
 
-# Serialise image builds. Concurrent runs export to the same GitHub Actions cache
-# and collide with "failed to reserve cache". Queue rather than cancel: a half
-# published image is worse than a slow one, and tagging a release legitimately
-# overlaps with the merge that preceded it.
+# Serialise image builds across the whole repo. Concurrent runs export to the same
+# GitHub Actions cache and collide with "failed to reserve cache".
+#
+# The group is a fixed name because keying it on github.ref never serialised anything
+# that mattered: a push to main and a release tag are different refs, so they landed in
+# different groups and ran side by side, and that is precisely the pair that overlaps
+# when cutting a release. Three releases got away with it before this was noticed.
+#
+# Queue rather than cancel, because a half published image is worse than a slow one.
+# queue:max is what keeps that promise once a third run shows up: the default is to
+# cancel whatever is already pending when a newer run arrives, so tagging a release
+# would have silently dropped the queued build for the very commit being tagged.
 concurrency:
-  group: docker-${{ github.ref }}
+  group: docker
+  queue: max
   cancel-in-progress: false
 
 env:
