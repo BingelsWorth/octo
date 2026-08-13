@@ -40,7 +40,10 @@ public class SoulseekSettings
     public string PreferredExtension { get; set; } = "flac";
 
     /// <summary>
-    /// Max time to wait (seconds) for a download to complete before giving up.
+    /// Max time to wait (seconds) for a download to complete before giving up on that
+    /// peer and trying the next one. Per attempt, not per track: a track that has to
+    /// walk all five candidates can spend this five times over. A peer that rejects
+    /// outright is detected in seconds and does not wait this out.
     /// </summary>
     public int DownloadTimeoutSeconds { get; set; } = 180;
 }

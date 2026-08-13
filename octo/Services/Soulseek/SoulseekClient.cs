@@ -274,18 +274,7 @@ public class SoulseekClient
                     int? length = file.TryGetProperty("length", out var lenEl) && lenEl.ValueKind == JsonValueKind.Number
                         ? lenEl.GetInt32()
                         : null;
-                    var ext = file.TryGetProperty("extension", out var exEl)
-                        ? exEl.GetString()
-                        : null;
-
-                    var normalizedExt = string.IsNullOrWhiteSpace(ext)
-                        ? Path.GetExtension(filename)
-                        : ext;
-
-                        normalizedExt = normalizedExt
-                        .Trim()
-                        .TrimStart('.')
-                        .ToLowerInvariant();
+                    var ext = file.TryGetProperty("extension", out var exEl) ? exEl.GetString() : null;
 
                     hits.Add(new SoulseekFileHit
                     {
@@ -296,7 +285,7 @@ public class SoulseekClient
                         SampleRate = sampleRate,
                         BitDepth = bitDepth,
                         Length = length,
-                        Extension = normalizedExt,
+                        Extension = NormalizeExtension(ext, filename),
                         UploadSpeed = uploadSpeed,
                         QueueLength = queueLength
                     });
@@ -308,6 +297,23 @@ public class SoulseekClient
             _logger.LogWarning("Failed to parse Soulseek responses: {Msg}", ex.Message);
         }
         return hits;
+    }
+
+    /// <summary>
+    /// Reduce a file extension to the bare lowercase form ("flac").
+    ///
+    /// Candidate ranking accepts a hit by comparing this against the configured
+    /// PreferredExtension, so the two have to agree on shape. slskd does not
+    /// guarantee one: some builds report "flac", some report ".flac", and some
+    /// omit the field entirely and leave only the filename to go on. An
+    /// unnormalized leading dot compared against a bare "flac" matches nothing,
+    /// which reads downstream as "this track is not on Soulseek" rather than as
+    /// a parsing mismatch. Both sides of the comparison run through here.
+    /// </summary>
+    internal static string NormalizeExtension(string? extension, string filename)
+    {
+        var raw = string.IsNullOrWhiteSpace(extension) ? Path.GetExtension(filename) : extension;
+        return (raw ?? "").Trim().TrimStart('.').ToLowerInvariant();
     }
 
     /// <summary>
