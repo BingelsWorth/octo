@@ -64,9 +64,9 @@ builder.Services.AddSingleton<YouTubeResolver>();
 builder.Services.AddHttpClient(YouTubeResolver.SearchClientName, c =>
 {
     // 60s rather than 30s because back-to-back search3 prewarm bursts can fill
-    // the shim's MAX_CONCURRENT_YTDLP=8 gate and queue requests behind 5-8s
-    // yt-dlp ytsearch1: invocations. 30s was canceling the tail of every
-    // prewarm batch.
+    // the shim's yt-dlp gate (MAX_CONCURRENT_YTDLP, which ships as 5) and queue
+    // requests behind 5-8s yt-dlp ytsearch1: invocations. 30s was canceling the
+    // tail of every prewarm batch.
     c.Timeout = TimeSpan.FromSeconds(60);
 });
 builder.Services.AddHttpClient(YouTubeResolver.StreamClientName, c =>

@@ -1590,10 +1590,11 @@ public class SubsonicController : ControllerBase
         _radioQueueStore.Register(resolvedSongs.Select(s => s.Id));
 
         // Fire-and-forget prewarm for the top of the queue so the first few
-        // taps don't pay the full cold yt-dlp resolve. Cap below the shim's
-        // MAX_CONCURRENT_YTDLP=8 (the prewarm method handles its own
-        // concurrency limit internally). Local songs are skipped automatically
-        // by the prewarmer (they have no registry entry).
+        // taps don't pay the full cold yt-dlp resolve. The prewarm method
+        // handles its own concurrency limit, shared across every trigger, and
+        // marks its shim calls as background so they cannot occupy the slots
+        // the shim reserves for interactive plays. Local songs are skipped
+        // automatically by the prewarmer (they have no registry entry).
         _ = _metadataService.PrewarmYouTubeIdsAsync(resolvedSongs, topN: 8);
 
         return BuildSimilarSongsResponse(format, resolvedSongs, responseKey);
