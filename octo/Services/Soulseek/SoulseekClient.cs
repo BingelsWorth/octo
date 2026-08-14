@@ -164,10 +164,31 @@ public class SoulseekClient
     }
 
     /// <summary>
-    /// Initiates a search and waits up to SearchWaitSeconds for peer responses,
-    /// then returns the responses regardless of search-completed state.
+    /// Initiates a search and returns as soon as there is an answer, rather than
+    /// always sitting out a fixed wait.
+    ///
+    /// Three things can end the wait, whichever comes first:
+    ///   1. <paramref name="enough"/> says the hits so far are already worth acting on,
+    ///   2. slskd reports the search finished, so nothing more is coming,
+    ///   3. SearchWaitSeconds elapses, which is a ceiling rather than a duration.
+    ///
+    /// This matters in both directions. Peer responses arrive in a burst around the
+    /// 20s mark, so a fixed wait either cuts the search off before its results exist
+    /// or idles long after they have arrived; and a search that comes back empty
+    /// should fall through to the fallback source immediately instead of making the
+    /// user wait out a timer for an answer that is already known.
     /// </summary>
-    public async Task<List<SoulseekFileHit>> SearchAsync(string query, int limit, CancellationToken ct = default)
+    /// <param name="enough">
+    /// Decides whether the hits gathered so far are worth committing to. The client
+    /// cannot judge this itself: "usable" means the right format, size and title
+    /// match, which only the caller's ranking knows. Null means wait for completion
+    /// or the ceiling.
+    /// </param>
+    public async Task<List<SoulseekFileHit>> SearchAsync(
+        string query,
+        int limit,
+        CancellationToken ct = default,
+        Func<IReadOnlyList<SoulseekFileHit>, bool>? enough = null)
     {
         var searchId = Guid.NewGuid().ToString();
         var payload = JsonSerializer.Serialize(new
@@ -193,12 +214,13 @@ public class SoulseekClient
             return new List<SoulseekFileHit>();
         }
 
-        // Poll responses for up to SearchWaitSeconds
         var hits = new List<SoulseekFileHit>();
-        var deadline = DateTime.UtcNow.AddSeconds(_settings.SearchWaitSeconds);
+        var ceiling = DateTime.UtcNow.AddSeconds(_settings.SearchWaitSeconds);
+        var started = DateTime.UtcNow;
         var pollIntervalMs = 1000;
+        string stopReason = "ceiling";
 
-        while (DateTime.UtcNow < deadline && !ct.IsCancellationRequested)
+        while (DateTime.UtcNow < ceiling && !ct.IsCancellationRequested)
         {
             await Task.Delay(pollIntervalMs, ct);
             try
@@ -212,13 +234,30 @@ public class SoulseekClient
 
                 var json = await resp.Content.ReadAsStringAsync(ct);
                 hits = ParseResponses(json);
-                if (hits.Count >= limit) break;
+
+                if (hits.Count >= limit) { stopReason = "hit limit"; break; }
+
+                // Good enough to act on: stop waiting and go download it.
+                if (enough != null && enough(hits)) { stopReason = "found what we needed"; break; }
+
+                // Nothing more is coming. Returning now means an empty search falls
+                // through to the fallback source immediately instead of idling out
+                // the ceiling for an answer that is already settled.
+                if (await IsSearchFinishedAsync(searchId, ct))
+                {
+                    stopReason = "search finished";
+                    break;
+                }
             }
             catch (Exception ex)
             {
                 _logger.LogDebug("Poll failed (transient): {Msg}", ex.Message);
             }
         }
+
+        _logger.LogInformation(
+            "Soulseek search '{Query}': {Count} hits after {Elapsed:F1}s ({Reason})",
+            query, hits.Count, (DateTime.UtcNow - started).TotalSeconds, stopReason);
 
         // Fire-and-forget cleanup so we don't accumulate completed searches
         _ = Task.Run(async () =>
@@ -297,6 +336,42 @@ public class SoulseekClient
             _logger.LogWarning("Failed to parse Soulseek responses: {Msg}", ex.Message);
         }
         return hits;
+    }
+
+    /// <summary>
+    /// <summary>
+    /// True once slskd says the search has stopped gathering responses.
+    ///
+    /// Deliberately reads the STATUS object rather than inferring completion from
+    /// the responses endpoint, and deliberately is not used to decide whether
+    /// results exist: status reports a responseCount well before /responses will
+    /// return the files, so trusting it for anything except "is it over" makes a
+    /// too-short wait look perfectly healthy.
+    ///
+    /// Any failure returns false, so an unreadable status simply means the caller
+    /// keeps polling until the ceiling rather than giving up early.
+    /// </summary>
+    private async Task<bool> IsSearchFinishedAsync(string searchId, CancellationToken ct)
+    {
+        try
+        {
+            using var resp = await SendAsync(HttpMethod.Get, $"{Base}/api/v0/searches/{searchId}", null, ct);
+            if (!resp.IsSuccessStatusCode) return false;
+
+            using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
+            if (!doc.RootElement.TryGetProperty("state", out var stateEl)) return false;
+
+            // slskd reports compound states such as "Completed, TimedOut" or
+            // "Completed, ResponseLimitReached"; all of them mean it is done.
+            var state = stateEl.GetString() ?? "";
+            return state.Contains("Completed", StringComparison.OrdinalIgnoreCase)
+                || state.Contains("Cancelled", StringComparison.OrdinalIgnoreCase)
+                || state.Contains("Errored", StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     /// <summary>

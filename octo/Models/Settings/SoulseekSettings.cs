@@ -35,6 +35,12 @@ public class SoulseekSettings
     /// responseCount well before /responses will hand the files over, so a status
     /// poll makes short waits look adequate when they are not.
     ///
+    /// This is a CEILING, not a duration: the search returns as soon as it has
+    /// enough usable candidates to choose from, or as soon as slskd says the search
+    /// has finished. A short value is therefore still a hard cap on finding
+    /// anything, while a generous one costs nothing when results arrive early or
+    /// when the search comes back empty.
+    ///
     /// Star-triggered downloads are fire-and-forget, so the wait costs the user
     /// nothing; it only delays the file landing.
     /// </summary>

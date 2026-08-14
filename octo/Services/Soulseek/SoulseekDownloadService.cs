@@ -227,7 +227,16 @@ public class SoulseekDownloadService : BaseDownloadService
         var primaryQuery = $"{routing.Artist} {cleanTitle}".Trim();
 
         Logger.LogInformation("Soulseek search-for-star: '{Query}'", primaryQuery);
-        var hits = await _slskd.SearchAsync(primaryQuery, _settings.MinFileSizeBytes > 0 ? 30 : 10, cancellationToken);
+        var hits = await _slskd.SearchAsync(
+            primaryQuery,
+            _settings.MinFileSizeBytes > 0 ? 30 : 10,
+            cancellationToken,
+            // Stop waiting once there is a real choice to make. Not on the first
+            // usable hit: ranking picks on queue length and upload speed, so
+            // committing to a single candidate would often mean committing to the
+            // slowest peer that happened to answer first. A handful is enough to
+            // choose well without waiting for stragglers.
+            enough: h => RankCandidates(h.ToList(), routing.Title!, routing.Duration).Count >= 3);
 
         var ranked = RankCandidates(hits, routing.Title!, routing.Duration);
 
@@ -238,7 +247,11 @@ public class SoulseekDownloadService : BaseDownloadService
         if (ranked.Count == 0 && !string.IsNullOrWhiteSpace(cleanTitle))
         {
             Logger.LogInformation("Soulseek primary query returned no usable hits; retrying with title-only");
-            hits = await _slskd.SearchAsync(cleanTitle, _settings.MinFileSizeBytes > 0 ? 30 : 10, cancellationToken);
+            hits = await _slskd.SearchAsync(
+                cleanTitle,
+                _settings.MinFileSizeBytes > 0 ? 30 : 10,
+                cancellationToken,
+                enough: h => RankCandidates(h.ToList(), routing.Title!, routing.Duration).Count >= 3);
             ranked = RankCandidates(hits, routing.Title!, routing.Duration);
         }
 
