@@ -405,6 +405,148 @@ function updateDiscoveryBanner() {
 document.getElementById('f-lastfm-key')?.addEventListener('input', updateDiscoveryBanner);
 
 // ────────────────────────────────────────────────────────────────
+// Library status, library picker, and the download-folder browser
+//
+// Octo fronts Navidrome, so Navidrome's library is the source of truth for where
+// downloads belong. The status line states the whole chain (what Navidrome
+// reports, whether Octo can see it, what is therefore in effect) because when
+// that chain breaks the symptom is silent: files download fine and never appear.
+// ────────────────────────────────────────────────────────────────
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c =>
+  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+async function refreshLibraryStatus() {
+  const row = document.getElementById('library-status-row');
+  const out = document.getElementById('library-status');
+  const pickRow = document.getElementById('library-pick-row');
+  const pick = document.getElementById('f-library-path');
+  if (!row || !out) return;
+  try {
+    const r = await fetch('/api/admin/library-status', { cache: 'no-store' });
+    if (!r.ok) return;
+    const s = await r.json();
+
+    const bits = [];
+    if (s.navidromeReports) {
+      bits.push(s.visibleToOcto
+        ? `Navidrome's library is <code>${esc(s.navidromeReports)}</code>, and Octo can see it.`
+        : `Navidrome reports <code>${esc(s.navidromeReports)}</code>, but <strong>Octo cannot see that path</strong>. Mount it into Octo's container, or set Navidrome's remotePath, or pick a folder below.`);
+    } else if (s.autoDetect) {
+      bits.push('Waiting on Navidrome to report its music folder. Until then the path below is used.');
+    } else {
+      bits.push('Auto-detect is off, so the path below is used verbatim.');
+    }
+    bits.push(`Downloads go to <code>${esc(s.effectiveDownloadPath || '(unset)')}</code>${s.writable ? '' : ' — <strong>not writable by Octo</strong>'}.`);
+    if (!s.rescanAuthenticated) {
+      bits.push('No Navidrome admin identity yet, so the rescan after a download may not run. Set admin credentials, or sign in once from a client.');
+    }
+    out.innerHTML = bits.join(' ');
+    row.hidden = false;
+
+    // Only ask which library when there is genuinely a choice to make.
+    const libs = s.libraries || [];
+    if (pick && pickRow && libs.length > 1) {
+      pick.innerHTML = [`<option value="">First library Navidrome reports</option>`]
+        .concat(libs.map(l => {
+          const label = `${l.name || l.folder}${l.visible ? '' : ' (not visible to Octo)'}`;
+          return `<option value="${esc(l.folder)}">${esc(label)}</option>`;
+        })).join('');
+      pick.value = s.pinnedLibraryPath || '';
+      pickRow.hidden = false;
+    }
+  } catch { /* status is informational; never block the settings UI on it */ }
+}
+refreshLibraryStatus();
+
+// ── Browse for a download folder ────────────────────────────────
+// The endpoint requires a Navidrome admin, because an unauthenticated directory
+// lister would turn every Octo install into one. The token lives in memory only:
+// not sessionStorage, so it dies with the tab.
+let browseToken = null;
+
+async function browseFetch(path) {
+  const url = '/api/admin/browse' + (path ? `?path=${encodeURIComponent(path)}` : '');
+  return fetch(url, { cache: 'no-store', headers: { 'X-Octo-Browse-Token': browseToken || '' } });
+}
+
+async function browseAuthenticate(result) {
+  const username = window.prompt('Navidrome admin username');
+  if (!username) return false;
+  const password = window.prompt('Navidrome password for ' + username);
+  if (!password) return false;
+  const r = await fetch('/api/admin/browse/auth', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    result.innerHTML = esc(data.error || 'Sign-in failed.');
+    return false;
+  }
+  browseToken = data.token;
+  return true;
+}
+
+function renderBrowse(data, result, input) {
+  const rows = [];
+  if (data.parent) {
+    rows.push(`<button type="button" class="btn btn-ghost detect-pick browse-nav" data-path="${esc(data.parent)}">.. <span class="detect-tag">up</span></button>`);
+  }
+  for (const e of data.entries || []) {
+    rows.push(`<button type="button" class="btn btn-ghost detect-pick browse-nav" data-path="${esc(e.path)}">${esc(e.name)}<span class="detect-tag">${e.writable ? 'writable' : 'read-only'}</span></button>`);
+  }
+  const here = data.path
+    ? `<code>${esc(data.path)}</code> ${data.writable ? '' : '<strong>(Octo cannot write here)</strong>'}`
+    : 'Drives';
+  const note = data.containerised
+    ? '<div class="detect-tag">Octo runs in a container, so this is what it can see — the host\'s own drives are not visible unless mounted.</div>'
+    : '';
+  const useBtn = data.path && data.exists
+    ? `<button type="button" class="btn" id="browse-use" data-path="${esc(data.path)}">Use this folder</button>`
+    : '';
+  const truncated = data.truncated ? '<div class="detect-tag">Showing the first 1000 folders.</div>' : '';
+
+  result.innerHTML = `${here}${note}<div class="detect-list">${rows.join('')}</div>${truncated}<div style="margin-top:8px">${useBtn}</div>`;
+
+  result.querySelectorAll('.browse-nav').forEach(b =>
+    b.addEventListener('click', () => openBrowse(b.dataset.path)));
+  document.getElementById('browse-use')?.addEventListener('click', () => {
+    input.value = data.path;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    result.innerHTML = `Set to <code>${esc(data.path)}</code>. Save, then restart Octo to apply.`;
+  });
+}
+
+async function openBrowse(path) {
+  const result = document.getElementById('browse-result');
+  const input = document.getElementById('f-download-path');
+  if (!result || !input) return;
+  result.hidden = false;
+  result.textContent = 'Loading…';
+  try {
+    let r = await browseFetch(path);
+    if (r.status === 401) {
+      if (!await browseAuthenticate(result)) return;
+      r = await browseFetch(path);
+    }
+    if (!r.ok) {
+      const data = await r.json().catch(() => ({}));
+      result.innerHTML = esc(data.error || `Browse failed (HTTP ${r.status}).`);
+      return;
+    }
+    renderBrowse(await r.json(), result, input);
+  } catch (e) {
+    result.textContent = 'Browse failed: ' + (e?.message || 'unknown error');
+  }
+}
+
+document.getElementById('btn-browse-path')?.addEventListener('click', () => {
+  const current = document.getElementById('f-download-path')?.value?.trim();
+  openBrowse(current || '');
+});
+
+// ────────────────────────────────────────────────────────────────
 // Detect Subsonic/Navidrome server on the local network
 // ────────────────────────────────────────────────────────────────
 const detectBtn = document.getElementById('btn-detect-server');

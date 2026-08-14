@@ -229,6 +229,21 @@
         <div class="set-section">
           <div class="set-head"><h3 class="set-title">Storage</h3></div>
           <form data-section="library" class="set-card">
+            <!-- Where downloads actually land, stated plainly. Filled by admin.js
+                 from /api/admin/library-status; hidden until it answers. -->
+            <div class="set-row stack" id="library-status-row" hidden>
+              <div class="set-info">
+                <div class="set-info-t">Where downloads go</div>
+                <div class="set-info-d" id="library-status"></div>
+              </div>
+            </div>
+            <div class="set-row stack" id="library-pick-row" hidden>
+              <div class="set-info">
+                <div class="set-info-t">Navidrome library</div>
+                <div class="set-info-d">This server has more than one library. Pick the one Octo should download into; otherwise it uses whichever Navidrome lists first.</div>
+              </div>
+              <select class="set-input" id="f-library-path" name="Subsonic.LibraryPath" data-restart="true"></select>
+            </div>
             <div class="set-row">
               <div class="set-info">
                 <div class="set-info-t">Auto-detect download path from Navidrome</div>
@@ -241,7 +256,11 @@
                 <div class="set-info-t">Download path <span class="set-opt">override / fallback</span></div>
                 <div class="set-info-d">Path INSIDE the Octo container where downloaded files land (default /music, backed by the DOWNLOAD_PATH bind mount). To move the library on the host, change DOWNLOAD_PATH in .env instead; a host path like E:\Media\Music does not work here. With auto-detect on, this is only used until Navidrome's folder is detected.</div>
               </div>
-              <input class="set-input" id="f-download-path" name="Library.DownloadPath" data-restart="true" placeholder="/music" />
+              <div class="field-inline">
+                <input class="set-input" id="f-download-path" name="Library.DownloadPath" data-restart="true" placeholder="/music" />
+                <button type="button" class="btn btn-ghost" id="btn-browse-path">Browse…</button>
+              </div>
+              <div class="detect-result" id="browse-result"></div>
             </div>
           </form>
         </div>

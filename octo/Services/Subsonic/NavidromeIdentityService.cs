@@ -5,6 +5,11 @@ using Octo.Models.Settings;
 
 namespace Octo.Services.Subsonic;
 
+/// <summary>One library as Navidrome reports it. <paramref name="Folder"/> is the
+/// path Octo should use: remotePath when Navidrome supplies one (how other services
+/// see the same library), otherwise its own path.</summary>
+public record NavidromeLibrary(string? Id, string? Name, string Folder);
+
 /// <summary>
 /// Octo's own standing identity toward the upstream Navidrome. Octo is a proxy, so
 /// most requests carry the client's credentials. But background work has no client
@@ -33,6 +38,7 @@ public class NavidromeIdentityService
     private string? _username;
 
     private string? _detectedFolder;
+    private List<NavidromeLibrary> _libraries = new();
     private DateTime _detectedAt;
     private static readonly TimeSpan DetectTtl = TimeSpan.FromMinutes(30);
     private readonly SemaphoreSlim _detectGate = new(1, 1);
@@ -49,6 +55,11 @@ public class NavidromeIdentityService
 
     /// <summary>The Navidrome music folder detected from /api/library, or null.</summary>
     public string? DetectedMusicFolder { get { lock (_lock) return _detectedFolder; } }
+
+    /// <summary>Every library Navidrome reported on the last successful detection.
+    /// Empty until one has run. Used by the admin UI to offer a choice instead of
+    /// silently adopting whichever one Navidrome listed first.</summary>
+    public IReadOnlyList<NavidromeLibrary> KnownLibraries { get { lock (_lock) return _libraries; } }
 
     /// <summary>
     /// Effective download path: an explicit override wins, else the Navidrome-detected
@@ -147,11 +158,45 @@ public class NavidromeIdentityService
             if (doc.RootElement.ValueKind != JsonValueKind.Array || doc.RootElement.GetArrayLength() == 0)
                 return null;
 
-            var lib = doc.RootElement[0];
-            var remote = lib.TryGetProperty("remotePath", out var rp) ? rp.GetString() : null;
-            var path = lib.TryGetProperty("path", out var p) ? p.GetString() : null;
-            var folder = !string.IsNullOrEmpty(remote) ? remote : path;
-            if (string.IsNullOrEmpty(folder)) return null;
+            // Navidrome can serve several libraries. Read them all: taking [0] and
+            // calling it "the" music folder meant a multi-library server had its
+            // download target chosen by whatever order Navidrome happened to return,
+            // with no way to say otherwise.
+            var libraries = new List<NavidromeLibrary>();
+            foreach (var entry in doc.RootElement.EnumerateArray())
+            {
+                // remotePath is the path as OTHER services see this library, which is
+                // what Octo needs; path is how Navidrome itself sees it.
+                var remote = entry.TryGetProperty("remotePath", out var rp) ? rp.GetString() : null;
+                var path = entry.TryGetProperty("path", out var p) ? p.GetString() : null;
+                var f = !string.IsNullOrEmpty(remote) ? remote : path;
+                if (string.IsNullOrEmpty(f)) continue;
+                libraries.Add(new NavidromeLibrary(
+                    entry.TryGetProperty("id", out var idEl) ? idEl.ToString() : null,
+                    entry.TryGetProperty("name", out var nameEl) ? nameEl.GetString() : null,
+                    f));
+            }
+            if (libraries.Count == 0) return null;
+            lock (_lock) _libraries = libraries;
+
+            // An explicit pin wins. Absent one, behave exactly as before and take the
+            // first entry, so an existing install's download target cannot move on
+            // update. A pin that no longer matches anything Navidrome reports falls
+            // back the same way rather than stranding downloads.
+            var pinned = _settings.LibraryPath?.Trim();
+            var chosen = libraries[0];
+            if (!string.IsNullOrEmpty(pinned))
+            {
+                var match = libraries.FirstOrDefault(l =>
+                    string.Equals(l.Folder, pinned, StringComparison.Ordinal));
+                if (match != null) chosen = match;
+                else
+                    _logger.LogWarning(
+                        "Pinned library path '{Pinned}' is not among the {Count} libraries " +
+                        "Navidrome reports; using '{Fallback}' instead.",
+                        pinned, libraries.Count, chosen.Folder);
+            }
+            var folder = chosen.Folder;
 
             // Safety gate: only ADOPT the detected path if it actually exists inside
             // Octo's own container. Navidrome reports the path as IT sees it, which is

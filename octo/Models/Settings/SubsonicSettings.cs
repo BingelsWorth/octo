@@ -127,6 +127,16 @@ public class SubsonicSettings
     public bool AutoDetectDownloadPath { get; set; } = true;
 
     /// <summary>
+    /// Which Navidrome library to download into, given as its folder path, for
+    /// servers that serve more than one. Empty (the default) keeps the historical
+    /// behaviour of taking the first library Navidrome reports. A value that no
+    /// longer matches any reported library is ignored with a warning rather than
+    /// leaving downloads with nowhere to go.
+    /// Environment variable: SUBSONIC__LIBRARYPATH
+    /// </summary>
+    public string LibraryPath { get; set; } = "";
+
+    /// <summary>
     /// Explicit content filter mode (default: All)
     /// Environment variable: EXPLICIT_FILTER
     /// Values: "All", "ExplicitOnly", "CleanOnly"
