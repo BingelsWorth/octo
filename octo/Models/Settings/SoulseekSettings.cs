@@ -23,10 +23,22 @@ public class SoulseekSettings
 
     /// <summary>
     /// How long to wait (seconds) for a Soulseek search to gather peer responses
-    /// before returning results. Soulseek searches stream in over time; a longer wait
-    /// gives more candidates, a shorter wait keeps radio responsive.
+    /// before returning results. Soulseek searches stream in over time, so this is
+    /// the difference between finding a lossless file and silently settling for a
+    /// transcode.
+    ///
+    /// This was 6, which measurement showed is simply too short: polling slskd's
+    /// /responses for the same query returned nothing at 6s, 10s or 15s, then 14
+    /// responses including 5 FLACs at 20s — reproducibly, across three runs. The
+    /// effect was that every star fell back to YouTube MP3 while lossless copies
+    /// were sitting there unseen. Note that the search status object reports a
+    /// responseCount well before /responses will hand the files over, so a status
+    /// poll makes short waits look adequate when they are not.
+    ///
+    /// Star-triggered downloads are fire-and-forget, so the wait costs the user
+    /// nothing; it only delays the file landing.
     /// </summary>
-    public int SearchWaitSeconds { get; set; } = 6;
+    public int SearchWaitSeconds { get; set; } = 30;
 
     /// <summary>
     /// Minimum file size in bytes to consider a search hit a real lossless file.
