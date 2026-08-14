@@ -10,6 +10,12 @@
  *   • Dark surface palette ramps from --bg-0 (deepest) to --bg-3 (lightest)
  */
 
+/* The hidden attribute must actually hide. Any class that sets `display` is an
+ * author style and so outranks the browser's own [hidden] rule no matter how
+ * specific it looks — .set-row's `display: flex` was enough to keep a row Octo
+ * had marked hidden on screen, empty, overlapping the row beneath it. */
+[hidden] { display: none !important; }
+
 :root {
   /* Surfaces — near-black base with a faint blue-gray (Winters' Glass) cast */
   --bg-0: #0c0c0d;        /* page */
