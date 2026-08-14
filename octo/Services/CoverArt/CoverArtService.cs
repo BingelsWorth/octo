@@ -127,9 +127,16 @@ public class CoverArtService
     /// background. Used when iTunes lookup whiffs so we never 404 a cover-art
     /// request — Subsonic clients drop entries whose cover fetch fails.
     /// </summary>
-    public byte[] GetPlaceholderCover()
+    /// <param name="branded">
+    /// Whether to stamp the Octo logo. True for external tracks, where the badge
+    /// says where the track came from. **False for anything in the user's own
+    /// library**: a local file that simply has no embedded art, or whose art could
+    /// not be read in time, is not Octo's, and branding it reads as Octo claiming
+    /// a song the user already owned.
+    /// </param>
+    public byte[] GetPlaceholderCover(bool branded = true)
     {
-        var logo = GetOctoLogo();
+        var logo = branded ? GetOctoLogo() : null;
         const int Size = 600;
 
         try

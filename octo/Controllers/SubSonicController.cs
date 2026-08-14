@@ -1209,9 +1209,15 @@ public class SubsonicController : ControllerBase
             var contentType = result.ContentType ?? "image/jpeg";
             return File(result.Body, contentType);
         }
-        catch
+        catch (Exception ex)
         {
-            return ServePlaceholder();
+            // Unbranded on purpose. This is the user's own file; stamping the Octo
+            // logo on it makes Octo look like it is claiming a track the user
+            // already owned. Reading embedded art off a cloud-backed mount can take
+            // seconds cold, so this path is reached by ordinary slowness, not just
+            // by missing art — all the more reason not to brand it.
+            _logger.LogDebug("cover art relay failed for local id {Id}: {Msg}", id, ex.Message);
+            return ServePlaceholder(branded: false);
         }
     }
 
@@ -1221,9 +1227,9 @@ public class SubsonicController : ControllerBase
     /// drop play-queue entries whose cover-art request fails, so we always serve
     /// something rather than fail.
     /// </summary>
-    private IActionResult ServePlaceholder()
+    private IActionResult ServePlaceholder(bool branded = true)
     {
-        var bytes = _coverArtService?.GetPlaceholderCover();
+        var bytes = _coverArtService?.GetPlaceholderCover(branded);
         if (bytes == null || bytes.Length == 0) return NotFound();
         return File(bytes, "image/jpeg");
     }
