@@ -463,7 +463,9 @@ refreshLibraryStatus();
 // The endpoint requires a Navidrome admin, because an unauthenticated directory
 // lister would turn every Octo install into one. The token lives in memory only:
 // not sessionStorage, so it dies with the tab.
-let browseToken = null;
+// The session lives in an HttpOnly cookie the server sets, so it survives a page
+// reload and this script never holds it (and could not read it if it tried).
+// Nothing about the sign-in is stored client-side, least of all the password.
 // Where Navidrome says its library is. Used as the browser's starting point when
 // the path field is empty, so it opens on the folder Octo is actually using
 // rather than at the filesystem root.
@@ -471,7 +473,8 @@ let effectiveLibraryPath = '';
 
 async function browseFetch(path) {
   const url = '/api/admin/browse' + (path ? `?path=${encodeURIComponent(path)}` : '');
-  return fetch(url, { cache: 'no-store', headers: { 'X-Octo-Browse-Token': browseToken || '' } });
+  // same-origin credentials carry the session cookie; nothing to attach by hand.
+  return fetch(url, { cache: 'no-store', credentials: 'same-origin' });
 }
 
 // Resolves to {username, password} or null if dismissed. A native prompt() was
@@ -535,6 +538,7 @@ async function browseAuthenticate(result) {
   if (!creds) return false;
   const r = await fetch('/api/admin/browse/auth', {
     method: 'POST',
+    credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(creds),
   });
@@ -543,8 +547,7 @@ async function browseAuthenticate(result) {
     result.innerHTML = esc(data.error || 'Sign-in failed.');
     return false;
   }
-  browseToken = data.token;
-  return true;
+  return true;   // the session is now in the cookie the response set
 }
 
 function renderBrowse(data, result, input) {

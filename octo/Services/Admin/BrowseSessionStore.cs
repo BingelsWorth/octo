@@ -17,7 +17,13 @@ namespace Octo.Services.Admin;
 /// </summary>
 public class BrowseSessionStore
 {
-    private static readonly TimeSpan Ttl = TimeSpan.FromMinutes(15);
+    /// <summary>
+    /// Sliding lifetime of a browse session. Long enough that configuring a server
+    /// is not punctuated by repeated sign-ins, short enough that an unattended
+    /// browser does not stay authorised indefinitely. The token is HttpOnly and
+    /// SameSite=Strict, so reaching it means reaching the machine.
+    /// </summary>
+    public static readonly TimeSpan Ttl = TimeSpan.FromHours(12);
 
     private readonly ConcurrentDictionary<string, (string User, DateTime Expires)> _sessions = new();
 

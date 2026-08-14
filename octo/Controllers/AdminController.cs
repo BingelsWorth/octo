@@ -167,7 +167,23 @@ public class AdminController : ControllerBase
                 return Unauthorized(new { error = "That account is not a Navidrome admin." });
 
             _logger.LogInformation("Browse session opened for Navidrome admin {User}", req.Username);
-            return Ok(new { token = _browseSessions.Create(req.Username) });
+            var token = _browseSessions.Create(req.Username);
+
+            // Hand the session back as an HttpOnly cookie rather than something the
+            // page has to hold. It survives a reload, so the user is not asked to
+            // sign in again every time they come back to the settings, and script
+            // on the page cannot read it even if something managed to inject some.
+            // Secure only over HTTPS, since this is normally reached over plain HTTP
+            // on a LAN and a Secure cookie would simply be dropped there.
+            Response.Cookies.Append(BrowseCookieName, token, new CookieOptions
+            {
+                HttpOnly = true,
+                SameSite = SameSiteMode.Strict,
+                Secure = Request.IsHttps,
+                Path = "/api/admin",
+                MaxAge = BrowseSessionStore.Ttl,
+            });
+            return Ok(new { ok = true });
         }
         catch (Exception ex)
         {
@@ -184,7 +200,10 @@ public class AdminController : ControllerBase
     [HttpGet("browse")]
     public IActionResult Browse([FromQuery] string? path, [FromHeader(Name = "X-Octo-Browse-Token")] string? token)
     {
-        if (!_browseSessions.Validate(token))
+        // Cookie first (how the admin UI authenticates), header second so the
+        // endpoint stays usable from curl or a script without one.
+        var session = Request.Cookies[BrowseCookieName] ?? token;
+        if (!_browseSessions.Validate(session))
             return Unauthorized(new { error = "Browse session required." });
 
         var result = _browser.Browse(path);
@@ -207,6 +226,10 @@ public class AdminController : ControllerBase
 
     /// <summary>Credentials for <see cref="BrowseAuth"/>. Body-only by design.</summary>
     public record BrowseAuthRequest(string? Username, string? Password);
+
+    /// <summary>Cookie carrying the browse session. Scoped to /api/admin so it is
+    /// never sent with the Subsonic traffic Octo proxies.</summary>
+    private const string BrowseCookieName = "octo_browse";
 
     /// <summary>The running log of songs Octo has fetched, newest first.</summary>
     [HttpGet("downloads")]
