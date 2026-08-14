@@ -469,15 +469,69 @@ async function browseFetch(path) {
   return fetch(url, { cache: 'no-store', headers: { 'X-Octo-Browse-Token': browseToken || '' } });
 }
 
+// Resolves to {username, password} or null if dismissed. A native prompt() was
+// used here first: it cannot be themed, and it has no password mode, so the
+// password appeared in clear on screen.
+function askCredentials() {
+  const modal = document.getElementById('signin-modal');
+  const user = document.getElementById('signin-user');
+  const pass = document.getElementById('signin-pass');
+  const err = document.getElementById('signin-error');
+  const submit = document.getElementById('signin-submit');
+  const cancel = document.getElementById('signin-cancel');
+  if (!modal) return Promise.resolve(null);
+
+  user.value = '';
+  pass.value = '';
+  err.textContent = '';
+  modal.hidden = false;
+  // Focus straight away rather than inside requestAnimationFrame: rAF only runs
+  // when the page is producing frames, so a background or non-compositing tab
+  // would open the dialog with nothing focused. setTimeout is the belt-and-braces
+  // retry for browsers that will not focus an element in the same tick it is shown.
+  user.focus();
+  if (document.activeElement !== user) setTimeout(() => user.focus(), 0);
+
+  return new Promise(resolve => {
+    const close = (value) => {
+      modal.hidden = true;
+      submit.removeEventListener('click', onSubmit);
+      cancel.removeEventListener('click', onCancel);
+      modal.removeEventListener('keydown', onKey);
+      modal.removeEventListener('mousedown', onBackdrop);
+      pass.value = '';
+      resolve(value);
+    };
+    const onSubmit = () => {
+      if (!user.value.trim() || !pass.value) {
+        err.textContent = 'Both a username and a password are required.';
+        return;
+      }
+      close({ username: user.value.trim(), password: pass.value });
+    };
+    const onCancel = () => close(null);
+    const onKey = (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); onSubmit(); }
+      if (e.key === 'Escape') { e.preventDefault(); onCancel(); }
+    };
+    // Clicking the backdrop dismisses, but only the backdrop itself — a drag
+    // that starts inside the card must not count as an outside click.
+    const onBackdrop = (e) => { if (e.target === modal) onCancel(); };
+
+    submit.addEventListener('click', onSubmit);
+    cancel.addEventListener('click', onCancel);
+    modal.addEventListener('keydown', onKey);
+    modal.addEventListener('mousedown', onBackdrop);
+  });
+}
+
 async function browseAuthenticate(result) {
-  const username = window.prompt('Navidrome admin username');
-  if (!username) return false;
-  const password = window.prompt('Navidrome password for ' + username);
-  if (!password) return false;
+  const creds = await askCredentials();
+  if (!creds) return false;
   const r = await fetch('/api/admin/browse/auth', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username, password }),
+    body: JSON.stringify(creds),
   });
   const data = await r.json().catch(() => ({}));
   if (!r.ok) {

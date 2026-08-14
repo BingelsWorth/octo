@@ -693,6 +693,24 @@
 
   <div id="toast" role="status" aria-live="polite"></div>
 
+  <!-- Sign-in modal for the folder browser. Hidden until needed; the browser
+       endpoint refuses to list anything without a Navidrome admin. -->
+  <div class="modal-backdrop" id="signin-modal" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="signin-title">
+      <div class="modal-title" id="signin-title">Sign in to browse</div>
+      <div class="modal-desc">Browsing folders needs a Navidrome <strong>admin</strong> account. Octo checks it with your Navidrome server and never stores it.</div>
+      <div class="modal-fields">
+        <input class="set-input" id="signin-user" type="text" autocomplete="username" placeholder="Username" />
+        <input class="set-input" id="signin-pass" type="password" autocomplete="current-password" placeholder="Password" />
+      </div>
+      <div class="modal-error" id="signin-error"></div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" id="signin-cancel">Cancel</button>
+        <button type="button" class="btn btn-primary" id="signin-submit">Sign in</button>
+      </div>
+    </div>
+  </div>
+
   <script src="/admin/admin.js"></script>
 </body>
 </html>
