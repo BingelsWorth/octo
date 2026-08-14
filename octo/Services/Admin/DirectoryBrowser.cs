@@ -3,7 +3,11 @@ namespace Octo.Services.Admin;
 /// <summary>One directory offered to the picker.</summary>
 public record BrowseEntry(string Name, string Path, bool Writable);
 
-/// <summary>A directory listing: where we are, where up is, and what is here.</summary>
+/// <summary>A directory listing: where we are, where up is, and what is here.
+/// <paramref name="AudioFiles"/> counts audio files directly in this folder. It
+/// exists because listing directories alone makes a flat library — thousands of
+/// loose tracks and a handful of album folders — look almost empty, giving no way
+/// to tell the right folder from a stray one.</summary>
 public record BrowseResult(
     string Path,
     string? Parent,
@@ -11,7 +15,8 @@ public record BrowseResult(
     bool Writable,
     bool Exists,
     IReadOnlyList<BrowseEntry> Entries,
-    bool Truncated);
+    bool Truncated,
+    int AudioFiles);
 
 /// <summary>
 /// Lists directories so the admin UI can pick a download folder instead of the user
@@ -31,6 +36,17 @@ public class DirectoryBrowser
     /// <summary>A pathological directory must not hang the UI or the response.</summary>
     public const int MaxEntries = 1000;
 
+    /// <summary>
+    /// Extensions counted as music. Only the count is ever reported, never the
+    /// file names, so the picker can say "2,352 tracks here" without turning into
+    /// a file lister.
+    /// </summary>
+    private static readonly HashSet<string> AudioExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".flac", ".mp3", ".m4a", ".aac", ".ogg", ".oga", ".opus",
+        ".wav", ".wma", ".aiff", ".aif", ".ape", ".wv", ".mpc", ".dsf", ".dff",
+    };
+
     private readonly ILogger<DirectoryBrowser> _logger;
 
     public DirectoryBrowser(ILogger<DirectoryBrowser> logger) => _logger = logger;
@@ -44,7 +60,7 @@ public class DirectoryBrowser
         if (string.IsNullOrWhiteSpace(path))
         {
             return OperatingSystem.IsWindows()
-                ? new BrowseResult("", null, separator, false, true, Drives(), false)
+                ? new BrowseResult("", null, separator, false, true, Drives(), false, 0)
                 : Listing("/", separator);
         }
 
@@ -59,7 +75,7 @@ public class DirectoryBrowser
         catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
         {
             _logger.LogDebug("browse: rejected path {Path}: {Msg}", path, ex.Message);
-            return new BrowseResult(path, null, separator, false, false, Array.Empty<BrowseEntry>(), false);
+            return new BrowseResult(path, null, separator, false, false, Array.Empty<BrowseEntry>(), false, 0);
         }
 
         return Listing(full, separator);
@@ -74,34 +90,46 @@ public class DirectoryBrowser
     private BrowseResult Listing(string full, string separator)
     {
         if (!Directory.Exists(full))
-            return new BrowseResult(full, ParentOf(full), separator, false, false, Array.Empty<BrowseEntry>(), false);
+            return new BrowseResult(full, ParentOf(full), separator, false, false, Array.Empty<BrowseEntry>(), false, 0);
 
         var entries = new List<BrowseEntry>();
         var truncated = false;
+        var audioFiles = 0;
         try
         {
-            foreach (var dir in Directory.EnumerateDirectories(full))
+            // One pass over the directory yields both the subfolders and the audio
+            // count. Counting is free here because the enumeration is already
+            // happening; doing it per subfolder instead would cost a round trip
+            // each, and on a cloud mount that is seconds per folder.
+            foreach (var item in Directory.EnumerateFileSystemEntries(full))
             {
-                if (entries.Count >= MaxEntries) { truncated = true; break; }
                 try
                 {
-                    entries.Add(new BrowseEntry(Path.GetFileName(dir), dir, IsWritable(dir)));
+                    if (Directory.Exists(item))
+                    {
+                        if (entries.Count >= MaxEntries) { truncated = true; continue; }
+                        entries.Add(new BrowseEntry(Path.GetFileName(item), item, IsWritable(item)));
+                    }
+                    else if (AudioExtensions.Contains(Path.GetExtension(item)))
+                    {
+                        audioFiles++;
+                    }
                 }
                 catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
                 {
-                    // One unreadable subdirectory must not fail the whole listing.
-                    _logger.LogDebug("browse: skipping {Dir}: {Msg}", dir, ex.Message);
+                    // One unreadable entry must not fail the whole listing.
+                    _logger.LogDebug("browse: skipping {Item}: {Msg}", item, ex.Message);
                 }
             }
         }
         catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
         {
             _logger.LogDebug("browse: cannot enumerate {Path}: {Msg}", full, ex.Message);
-            return new BrowseResult(full, ParentOf(full), separator, false, true, Array.Empty<BrowseEntry>(), false);
+            return new BrowseResult(full, ParentOf(full), separator, false, true, Array.Empty<BrowseEntry>(), false, 0);
         }
 
         entries.Sort((a, b) => string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase));
-        return new BrowseResult(full, ParentOf(full), separator, IsWritable(full), true, entries, truncated);
+        return new BrowseResult(full, ParentOf(full), separator, IsWritable(full), true, entries, truncated, audioFiles);
     }
 
     private static string? ParentOf(string full)

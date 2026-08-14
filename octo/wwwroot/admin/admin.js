@@ -425,6 +425,7 @@ async function refreshLibraryStatus() {
     const r = await fetch('/api/admin/library-status', { cache: 'no-store' });
     if (!r.ok) return;
     const s = await r.json();
+    effectiveLibraryPath = s.effectiveDownloadPath || '';
 
     const bits = [];
     if (s.navidromeReports) {
@@ -463,6 +464,10 @@ refreshLibraryStatus();
 // lister would turn every Octo install into one. The token lives in memory only:
 // not sessionStorage, so it dies with the tab.
 let browseToken = null;
+// Where Navidrome says its library is. Used as the browser's starting point when
+// the path field is empty, so it opens on the folder Octo is actually using
+// rather than at the filesystem root.
+let effectiveLibraryPath = '';
 
 async function browseFetch(path) {
   const url = '/api/admin/browse' + (path ? `?path=${encodeURIComponent(path)}` : '');
@@ -550,8 +555,14 @@ function renderBrowse(data, result, input) {
   for (const e of data.entries || []) {
     rows.push(`<button type="button" class="btn btn-ghost detect-pick browse-nav" data-path="${esc(e.path)}">${esc(e.name)}<span class="detect-tag">${e.writable ? 'writable' : 'read-only'}</span></button>`);
   }
+  // The track count is what tells you this is the right folder. A library of
+  // loose files under a few album folders otherwise renders as almost empty,
+  // because only directories are listed.
+  const tracks = data.audioFiles > 0
+    ? ` <span class="detect-tag">${data.audioFiles.toLocaleString()} audio ${data.audioFiles === 1 ? 'file' : 'files'} here</span>`
+    : (data.path && !data.entries?.length ? ' <span class="detect-tag">empty</span>' : '');
   const here = data.path
-    ? `<code>${esc(data.path)}</code> ${data.writable ? '' : '<strong>(Octo cannot write here)</strong>'}`
+    ? `<code>${esc(data.path)}</code>${tracks} ${data.writable ? '' : '<strong>(Octo cannot write here)</strong>'}`
     : 'Drives';
   const note = data.containerised
     ? '<div class="detect-tag">Octo runs in a container, so this is what it can see — the host\'s own drives are not visible unless mounted.</div>'
@@ -597,7 +608,7 @@ async function openBrowse(path) {
 
 document.getElementById('btn-browse-path')?.addEventListener('click', () => {
   const current = document.getElementById('f-download-path')?.value?.trim();
-  openBrowse(current || '');
+  openBrowse(current || effectiveLibraryPath || '');
 });
 
 // ────────────────────────────────────────────────────────────────

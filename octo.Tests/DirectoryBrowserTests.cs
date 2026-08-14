@@ -61,6 +61,30 @@ public class DirectoryBrowserTests
     }
 
     [Fact]
+    public void AFlatLibraryReportsItsTrackCountRatherThanLookingEmpty()
+    {
+        // The real library is ~2,350 loose tracks under four album folders. Listing
+        // directories alone made it render as an almost-empty folder, so there was
+        // no way to tell the right folder from a stray one.
+        var root = NewTempDir();
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(root, "Currents"));
+            foreach (var n in new[] { "a.flac", "b.mp3", "c.m4a", "d.opus" })
+                File.WriteAllText(Path.Combine(root, n), "x");
+            File.WriteAllText(Path.Combine(root, "cover.jpg"), "x");   // not audio
+            File.WriteAllText(Path.Combine(root, "notes.txt"), "x");   // not audio
+
+            var result = NewBrowser().Browse(root);
+
+            Assert.Equal(4, result.AudioFiles);
+            Assert.Single(result.Entries);                              // still directories only
+            Assert.DoesNotContain(result.Entries, e => e.Name.Contains('.'));
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [Fact]
     public void AMissingPathIsReportedRatherThanThrowing()
     {
         var missing = Path.Combine(Path.GetTempPath(), "octo-not-here-" + Guid.NewGuid().ToString("N"));

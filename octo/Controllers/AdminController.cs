@@ -197,6 +197,7 @@ public class AdminController : ControllerBase
             result.Exists,
             result.Entries,
             result.Truncated,
+            result.AudioFiles,
             // Under Docker this is the container's mount namespace, not the host's
             // drives. Saying so in the payload keeps the UI honest about why a
             // user's D: drive is nowhere to be seen.
