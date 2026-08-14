@@ -73,6 +73,12 @@ services:
     restart: unless-stopped
     environment:
       MAX_CONCURRENT_YTDLP: ${YTDLP_MAX_CONCURRENT:-5}
+      # Slots of the above that background work (prewarm, star-downloads) can
+      # never occupy, so pressing play does not queue behind a prewarm burst.
+      GATE_RESERVE_INTERACTIVE: ${YTDLP_GATE_RESERVE:-2}
+      # Background gives up on a full gate quickly: it is fire-and-forget and
+      # already stale by the time a long queue clears.
+      BG_GATE_WAIT_SEC: ${YTDLP_BG_GATE_WAIT_SEC:-10}
       SEARCH_CACHE_MAX: ${YTDLP_SEARCH_CACHE_MAX:-1024}
       URL_CACHE_MAX: ${YTDLP_URL_CACHE_MAX:-512}
       URL_CACHE_TTL: ${YTDLP_URL_CACHE_TTL:-3600}
