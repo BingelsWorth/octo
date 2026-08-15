@@ -92,14 +92,50 @@ public class NtfySinkTests
     }
 
     [Fact]
-    public async Task CoverArtBecomesAttachAndAbsentMeansNoKey()
+    public async Task CoverArtBecomesIconAndAttachAndAbsentMeansNoKeys()
     {
         var (sink, handler) = Build("https://ntfy.sh/octo");
 
+        // Icon shows in the notification shade, attach when expanded — art in
+        // both places is the "really nice" ask for the phone side.
         await sink.SendAsync(Message(image: "https://cdn.example/cover.jpg"), CancellationToken.None);
         Assert.Contains("\"attach\":\"https://cdn.example/cover.jpg\"", handler.Body);
+        Assert.Contains("\"icon\":\"https://cdn.example/cover.jpg\"", handler.Body);
 
         await sink.SendAsync(Message(image: null), CancellationToken.None);
         Assert.DoesNotContain("attach", handler.Body);
+        Assert.DoesNotContain("icon", handler.Body);
+    }
+
+    [Fact]
+    public void FieldsFoldIntoDotSeparatedStatsWithTheAlbumLineFirst()
+    {
+        var body = NtfySink.BuildBody(new NotificationMessage(
+            NotificationEventType.DownloadCompleted,
+            "Downloaded: A – B",
+            "prose fallback",
+            null,
+            Description: "Some Album",
+            Fields: new List<KeyValuePair<string, string>>
+            {
+                new("Format", "FLAC"),
+                new("Source", "Soulseek"),
+                new("Size", "33.1 MB"),
+                new("Length", "3:43"),
+            }));
+
+        Assert.Equal("Some Album\nFLAC · Soulseek · 33.1 MB · 3:43", body);
+    }
+
+    [Fact]
+    public void ProseEventsKeepTheirBodyVerbatim()
+    {
+        var body = NtfySink.BuildBody(new NotificationMessage(
+            NotificationEventType.LosslessFallback,
+            "Lossless miss: A – B",
+            "Soulseek failed (nothing usable); settling for YouTube MP3.",
+            null));
+
+        Assert.Equal("Soulseek failed (nothing usable); settling for YouTube MP3.", body);
     }
 }

@@ -49,11 +49,17 @@ public sealed class NtfySink : INotificationSink
         {
             ["topic"] = topic,
             ["title"] = message.Title,
-            ["message"] = message.Body,
+            ["message"] = BuildBody(message),
             ["tags"] = new JsonArray(TagFor(message.Type)),
         };
         if (!string.IsNullOrEmpty(message.ImageUrl))
+        {
+            // Both slots on purpose: icon is what the phone shows in the
+            // notification shade next to the text, attach is the full-size art
+            // when the notification is expanded.
+            payload["icon"] = message.ImageUrl;
             payload["attach"] = message.ImageUrl;
+        }
 
         var http = _httpFactory.CreateClient(NotificationService.ClientName);
         using var req = new HttpRequestMessage(HttpMethod.Post, serverRoot)
@@ -65,6 +71,22 @@ public sealed class NtfySink : INotificationSink
 
         using var resp = await http.SendAsync(req, ct);
         resp.EnsureSuccessStatusCode();
+    }
+
+    /// <summary>
+    /// ntfy is plain text, so the song card renders as lines rather than embed
+    /// fields: the album on its own line, then the stats dot-separated. Built
+    /// from the same NotificationMessage as Discord's card, so the transports
+    /// carry identical facts.
+    /// </summary>
+    internal static string BuildBody(NotificationMessage message)
+    {
+        if (message.Fields is not { Count: > 0 }) return message.Body;
+
+        var stats = string.Join(" · ", message.Fields.Select(f => f.Value));
+        return string.IsNullOrEmpty(message.Description)
+            ? stats
+            : $"{message.Description}\n{stats}";
     }
 
     /// <summary>

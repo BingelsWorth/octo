@@ -21,15 +21,20 @@ public sealed class NotificationService
     private readonly IReadOnlyList<INotificationSink> _sinks;
     private readonly IOptionsMonitor<NotificationSettings> _opts;
     private readonly ILogger<NotificationService> _logger;
+    private readonly Octo.Services.Metadata.DeezerMetadataService? _deezer;
 
+    // Deezer is optional so tests can construct the service without an HTTP
+    // stack; the DI container resolves it in production.
     public NotificationService(
         IEnumerable<INotificationSink> sinks,
         IOptionsMonitor<NotificationSettings> opts,
-        ILogger<NotificationService> logger)
+        ILogger<NotificationService> logger,
+        Octo.Services.Metadata.DeezerMetadataService? deezer = null)
     {
         _sinks = sinks.ToList();
         _opts = opts;
         _logger = logger;
+        _deezer = deezer;
     }
 
     /// <summary>THE publish call. Never throws and never blocks the caller.</summary>
@@ -46,6 +51,13 @@ public sealed class NotificationService
 
             var configured = _sinks.Where(s => s.IsConfigured).ToList();
             if (configured.Count == 0) return;
+
+            // Events fired from deep in the download path (Started, Fallback,
+            // Failed) only carry artist/title — the routing has no artwork. This
+            // whole method is already off the caller's path, so a cached Deezer
+            // lookup here is free and gives every event art instead of only the
+            // ones that happened to have it in scope.
+            evt = await EnsureCoverArtAsync(evt);
 
             var message = Render(evt);
             await Task.WhenAll(configured.Select(async sink =>
@@ -90,6 +102,29 @@ public sealed class NotificationService
             }
         }
         return results;
+    }
+
+    /// <summary>Best-effort: fills a missing cover (and album) from Deezer's cached
+    /// lookup. Any failure returns the event untouched — art is decoration, and
+    /// decoration must never delay or break a notification.</summary>
+    private async Task<NotificationEvent> EnsureCoverArtAsync(NotificationEvent evt)
+    {
+        if (!string.IsNullOrEmpty(evt.CoverArtUrl) || _deezer is null) return evt;
+        if (string.IsNullOrEmpty(evt.Artist) || string.IsNullOrEmpty(evt.Title)) return evt;
+        try
+        {
+            var meta = await _deezer.EnrichTrackAsync(evt.Artist, evt.Title, includeYear: false);
+            if (meta is null) return evt;
+            return evt with
+            {
+                CoverArtUrl = meta.AlbumCoverUrl,
+                Album = string.IsNullOrEmpty(evt.Album) ? meta.AlbumTitle : evt.Album,
+            };
+        }
+        catch
+        {
+            return evt;
+        }
     }
 
     internal static bool IsEnabled(NotificationSettings s, NotificationEventType type) => type switch
