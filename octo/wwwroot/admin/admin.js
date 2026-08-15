@@ -405,6 +405,29 @@ function updateDiscoveryBanner() {
 document.getElementById('f-lastfm-key')?.addEventListener('input', updateDiscoveryBanner);
 
 // ────────────────────────────────────────────────────────────────
+// Notifications: send a test through every configured transport
+// ────────────────────────────────────────────────────────────────
+document.getElementById('btn-test-notification')?.addEventListener('click', async () => {
+  const box = document.getElementById('test-notification-result');
+  const btn = document.getElementById('btn-test-notification');
+  if (!box) return;
+  box.hidden = false;
+  box.textContent = 'Sending…';
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/admin/test-notification', { method: 'POST' });
+    const d = await r.json();
+    const parts = (d.results || []).map(s =>
+      `${s.sink}: ${!s.configured ? 'not configured' : s.ok ? 'OK' : 'failed — ' + s.detail}`);
+    box.textContent = parts.length ? parts.join('  ·  ') : 'No transports registered.';
+  } catch (e) {
+    box.textContent = 'Test failed: ' + (e?.message || 'unknown error');
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// ────────────────────────────────────────────────────────────────
 // Library status, library picker, and the download-folder browser
 //
 // Octo fronts Navidrome, so Navidrome's library is the source of truth for where

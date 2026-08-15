@@ -42,6 +42,8 @@ builder.Services.Configure<SoulseekSettings>(
     builder.Configuration.GetSection("Soulseek"));
 builder.Services.Configure<LastFmSettings>(
     builder.Configuration.GetSection("LastFm"));
+builder.Services.Configure<NotificationSettings>(
+    builder.Configuration.GetSection("Notifications"));
 
 builder.Services.AddSingleton<ILocalLibraryService, LocalLibraryService>();
 
@@ -114,6 +116,18 @@ builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = TimeSpan.FromSe
 
 builder.Services.AddHttpClient<LastFmService>();
 builder.Services.AddSingleton<LastFmService>();
+
+// Push notifications (ntfy / Discord webhook). The orchestrator takes
+// IEnumerable<INotificationSink>, so adding a transport is one registration line.
+// Short timeout on purpose: a slow notification server must never be felt
+// anywhere near the download path.
+builder.Services.AddHttpClient(Octo.Services.Notifications.NotificationService.ClientName,
+    c => c.Timeout = TimeSpan.FromSeconds(10));
+builder.Services.AddSingleton<Octo.Services.Notifications.INotificationSink,
+    Octo.Services.Notifications.NtfySink>();
+builder.Services.AddSingleton<Octo.Services.Notifications.INotificationSink,
+    Octo.Services.Notifications.DiscordSink>();
+builder.Services.AddSingleton<Octo.Services.Notifications.NotificationService>();
 
 builder.Services.AddSingleton<IStartupValidator, SubsonicStartupValidator>();
 builder.Services.AddSingleton<IStartupValidator, SoulseekStartupValidator>();

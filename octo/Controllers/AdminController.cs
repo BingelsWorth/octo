@@ -29,6 +29,8 @@ public class AdminController : ControllerBase
     private readonly IOptionsMonitor<SubsonicSettings> _subsonicOpts;
     private readonly IOptionsMonitor<SoulseekSettings> _soulseekOpts;
     private readonly IOptionsMonitor<LastFmSettings> _lastFmOpts;
+    private readonly IOptionsMonitor<NotificationSettings> _notificationOpts;
+    private readonly Octo.Services.Notifications.NotificationService _notifications;
     private readonly IConfiguration _config;
     private readonly SoulseekClient _slskd;
     private readonly SubsonicProxyService _proxy;
@@ -48,6 +50,8 @@ public class AdminController : ControllerBase
         IOptionsMonitor<SubsonicSettings> subsonicOpts,
         IOptionsMonitor<SoulseekSettings> soulseekOpts,
         IOptionsMonitor<LastFmSettings> lastFmOpts,
+        IOptionsMonitor<NotificationSettings> notificationOpts,
+        Octo.Services.Notifications.NotificationService notifications,
         IConfiguration config,
         SoulseekClient slskd,
         SubsonicProxyService proxy,
@@ -68,6 +72,8 @@ public class AdminController : ControllerBase
         _subsonicOpts = subsonicOpts;
         _soulseekOpts = soulseekOpts;
         _lastFmOpts = lastFmOpts;
+        _notificationOpts = notificationOpts;
+        _notifications = notifications;
         _config = config;
         _slskd = slskd;
         _proxy = proxy;
@@ -224,6 +230,18 @@ public class AdminController : ControllerBase
         });
     }
 
+    /// <summary>
+    /// Sends a test notification through every configured sink so URLs and tokens can
+    /// be verified without waiting for a real download. Reports per-sink outcome,
+    /// including the transport's real error text on failure.
+    /// </summary>
+    [HttpPost("test-notification")]
+    public async Task<IActionResult> TestNotification(CancellationToken ct)
+    {
+        var results = await _notifications.SendTestAsync(ct);
+        return Ok(new { results });
+    }
+
     /// <summary>Credentials for <see cref="BrowseAuth"/>. Body-only by design.</summary>
     public record BrowseAuthRequest(string? Username, string? Password);
 
@@ -270,6 +288,7 @@ public class AdminController : ControllerBase
         var subsonic = _subsonicOpts.CurrentValue;
         var soulseek = _soulseekOpts.CurrentValue;
         var lastfm = _lastFmOpts.CurrentValue;
+        var notif = _notificationOpts.CurrentValue;
 
         // Use Dictionary<string, object> so System.Text.Json doesn't camelCase
         // the keys. The admin UI's form fields are named "Subsonic.FolderStructure"
@@ -322,6 +341,17 @@ public class AdminController : ControllerBase
                 ["EnableRadio"] = lastfm.EnableRadio,
                 ["RadioTrackCount"] = lastfm.RadioTrackCount,
                 ["RadioCacheDurationHours"] = lastfm.RadioCacheDurationHours,
+            },
+            ["Notifications"] = new Dictionary<string, object>
+            {
+                ["NtfyUrl"] = notif.NtfyUrl ?? "",
+                ["NtfyToken"] = notif.NtfyToken ?? "",
+                ["DiscordWebhookUrl"] = notif.DiscordWebhookUrl ?? "",
+                ["NotifyDownloadStarted"] = notif.NotifyDownloadStarted,
+                ["NotifyDownloadCompleted"] = notif.NotifyDownloadCompleted,
+                ["NotifyLosslessFallback"] = notif.NotifyLosslessFallback,
+                ["NotifyDownloadFailed"] = notif.NotifyDownloadFailed,
+                ["NotifyAlbumCompleted"] = notif.NotifyAlbumCompleted,
             },
             ["_meta"] = new Dictionary<string, object>
             {
@@ -397,6 +427,7 @@ public class AdminController : ControllerBase
         var subsonic = _subsonicOpts.CurrentValue;
         var soulseek = _soulseekOpts.CurrentValue;
         var lastfm = _lastFmOpts.CurrentValue;
+        var notif = _notificationOpts.CurrentValue;
 
         var effective = new JsonObject
         {
@@ -443,6 +474,17 @@ public class AdminController : ControllerBase
                 ["EnableRadio"] = lastfm.EnableRadio,
                 ["RadioTrackCount"] = lastfm.RadioTrackCount,
                 ["RadioCacheDurationHours"] = lastfm.RadioCacheDurationHours,
+            },
+            ["Notifications"] = new JsonObject
+            {
+                ["NtfyUrl"] = notif.NtfyUrl ?? "",
+                ["NtfyToken"] = notif.NtfyToken ?? "",
+                ["DiscordWebhookUrl"] = notif.DiscordWebhookUrl ?? "",
+                ["NotifyDownloadStarted"] = notif.NotifyDownloadStarted,
+                ["NotifyDownloadCompleted"] = notif.NotifyDownloadCompleted,
+                ["NotifyLosslessFallback"] = notif.NotifyLosslessFallback,
+                ["NotifyDownloadFailed"] = notif.NotifyDownloadFailed,
+                ["NotifyAlbumCompleted"] = notif.NotifyAlbumCompleted,
             },
         };
         var json = effective.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
@@ -525,6 +567,11 @@ public class AdminController : ControllerBase
             "YouTube:ShimUrl",
             "LastFm:ApiKey", "LastFm:EnableRadio", "LastFm:RadioTrackCount",
             "LastFm:RadioCacheDurationHours",
+            "Notifications:NtfyUrl", "Notifications:NtfyToken",
+            "Notifications:DiscordWebhookUrl",
+            "Notifications:NotifyDownloadStarted", "Notifications:NotifyDownloadCompleted",
+            "Notifications:NotifyLosslessFallback", "Notifications:NotifyDownloadFailed",
+            "Notifications:NotifyAlbumCompleted",
         };
         var rows = new List<object>();
         foreach (var k in keys)
@@ -533,7 +580,11 @@ public class AdminController : ControllerBase
             // Mask anything that smells like a secret so a screenshot of the
             // page doesn't leak credentials.
             var isSecret = k.EndsWith("Password", StringComparison.OrdinalIgnoreCase)
-                        || k.EndsWith("ApiKey", StringComparison.OrdinalIgnoreCase);
+                        || k.EndsWith("ApiKey", StringComparison.OrdinalIgnoreCase)
+                        // A Discord webhook URL embeds its token, so the whole URL is
+                        // the secret; ntfy tokens are credentials outright.
+                        || k.EndsWith("Token", StringComparison.OrdinalIgnoreCase)
+                        || k.EndsWith("WebhookUrl", StringComparison.OrdinalIgnoreCase);
             var display = isSecret && !string.IsNullOrEmpty(v)
                 ? new string('•', Math.Min(v.Length, 16))
                 : v;

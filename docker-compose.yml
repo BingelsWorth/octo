@@ -55,6 +55,16 @@ services:
       LastFm__EnableRadio: ${LASTFM_ENABLE_RADIO:-true}
       LastFm__RadioTrackCount: ${LASTFM_RADIO_TRACK_COUNT:-50}
       LastFm__RadioCacheDurationHours: ${LASTFM_RADIO_CACHE_HOURS:-24}
+
+      # ----- Notifications (ntfy / Discord webhook) — both optional -----
+      Notifications__NtfyUrl: ${NTFY_URL:-}
+      Notifications__NtfyToken: ${NTFY_TOKEN:-}
+      Notifications__DiscordWebhookUrl: ${DISCORD_WEBHOOK_URL:-}
+      Notifications__NotifyDownloadStarted: ${NOTIFY_DOWNLOAD_STARTED:-false}
+      Notifications__NotifyDownloadCompleted: ${NOTIFY_DOWNLOAD_COMPLETED:-true}
+      Notifications__NotifyLosslessFallback: ${NOTIFY_LOSSLESS_FALLBACK:-true}
+      Notifications__NotifyDownloadFailed: ${NOTIFY_DOWNLOAD_FAILED:-true}
+      Notifications__NotifyAlbumCompleted: ${NOTIFY_ALBUM_COMPLETED:-true}
     volumes:
       - ${DOWNLOAD_PATH:-./downloads}:/music
       # Editable settings file — admin UI writes here, ASP.NET hot-reloads on

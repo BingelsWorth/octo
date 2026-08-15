@@ -40,9 +40,10 @@ public class SoulseekDownloadService : BaseDownloadService
         IHttpClientFactory httpClientFactory,
         NavidromeIdentityService navIdentity,
         DownloadHistoryService history,
+        Octo.Services.Notifications.NotificationService notifications,
         IServiceProvider serviceProvider,
         ILogger<SoulseekDownloadService> logger)
-        : base(configuration, localLibraryService, metadataService, subsonicSettings.Value, navIdentity, history, serviceProvider, logger)
+        : base(configuration, localLibraryService, metadataService, subsonicSettings.Value, navIdentity, history, notifications, serviceProvider, logger)
     {
         _slskd = slskd;
         _settings = soulseekSettings.Value;
@@ -150,7 +151,7 @@ public class SoulseekDownloadService : BaseDownloadService
     // =========================================================================
     private const int MaxPeerAttempts = 5;
 
-    protected override async Task<string> DownloadTrackAsync(string trackId, Song song, CancellationToken cancellationToken)
+    protected override async Task<string> DownloadTrackAsync(string trackId, Song song, bool suppressNotify, CancellationToken cancellationToken)
     {
         var routing = _idRegistry.Lookup(song.ExternalId ?? "") ?? SoulseekMetadataService.TryDecodeExternalId(song.ExternalId ?? "");
         if (routing is null || !routing.HasArtistTitle)
@@ -161,25 +162,40 @@ public class SoulseekDownloadService : BaseDownloadService
         switch (SubsonicSettings.DownloadSource)
         {
             case DownloadSource.YouTube:
-                return await DownloadViaYouTubeAsync(routing, cancellationToken);
+                return await DownloadViaYouTubeAsync(routing, suppressNotify, announceStart: true, cancellationToken);
             case DownloadSource.SoulseekThenYouTube:
                 // The filter matters: a cancelled token means nobody is waiting for
                 // this any more, so falling back would start a second download only
                 // to have it throw on the same token.
-                try { return await DownloadViaSoulseekAsync(routing, cancellationToken); }
+                try { return await DownloadViaSoulseekAsync(routing, suppressNotify, cancellationToken); }
                 catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
                 {
                     Logger.LogWarning("Soulseek download failed ({Msg}); falling back to YouTube MP3", ex.Message);
-                    return await DownloadViaYouTubeAsync(routing, cancellationToken);
+                    if (!suppressNotify)
+                    {
+                        Notifications.Notify(new Octo.Services.Notifications.NotificationEvent
+                        {
+                            Type = Octo.Services.Notifications.NotificationEventType.LosslessFallback,
+                            Artist = routing.Artist,
+                            Title = routing.Title,
+                            Album = routing.Album,
+                            Source = "YouTube",
+                            Format = "MP3",
+                            Detail = ex.Message,
+                        });
+                    }
+                    // announceStart false: the fallback event above already announces
+                    // the MP3, and one gesture should never ping twice.
+                    return await DownloadViaYouTubeAsync(routing, suppressNotify, announceStart: false, cancellationToken);
                 }
             default:
-                return await DownloadViaSoulseekAsync(routing, cancellationToken);
+                return await DownloadViaSoulseekAsync(routing, suppressNotify, cancellationToken);
         }
     }
 
     // Lossy MP3 via the yt-dlp shim's /download. The shim writes <dest>.mp3 in
     // the final layout with clean tags + cover, so there is no post-move.
-    private async Task<string> DownloadViaYouTubeAsync(SoulseekRouting routing, CancellationToken cancellationToken)
+    private async Task<string> DownloadViaYouTubeAsync(SoulseekRouting routing, bool suppressNotify, bool announceStart, CancellationToken cancellationToken)
     {
         if (string.IsNullOrEmpty(DownloadPath))
             throw new InvalidOperationException("DownloadPath is not configured");
@@ -193,6 +209,19 @@ public class SoulseekDownloadService : BaseDownloadService
         }
         if (string.IsNullOrEmpty(videoId))
             throw new FileNotFoundException($"No YouTube match for '{routing.Artist} - {routing.Title}'");
+
+        if (!suppressNotify && announceStart)
+        {
+            Notifications.Notify(new Octo.Services.Notifications.NotificationEvent
+            {
+                Type = Octo.Services.Notifications.NotificationEventType.DownloadStarted,
+                Artist = routing.Artist,
+                Title = routing.Title,
+                Album = routing.Album,
+                Source = "YouTube",
+                Format = "MP3",
+            });
+        }
 
         var ytArtist = SanitizeForFs(routing.Artist) ?? "Unknown Artist";
         // Strip a redundant "Artist - " prefix from the title before naming the file,
@@ -216,7 +245,7 @@ public class SoulseekDownloadService : BaseDownloadService
 
     // Lossless FLAC via Soulseek/slskd: walk the top-N peers in quality order,
     // first successful transfer wins.
-    private async Task<string> DownloadViaSoulseekAsync(SoulseekRouting routing, CancellationToken cancellationToken)
+    private async Task<string> DownloadViaSoulseekAsync(SoulseekRouting routing, bool suppressNotify, CancellationToken cancellationToken)
     {
         // Clean the title before searching Soulseek. Last.fm's track.search
         // sometimes returns `title="Adele - Hello"` with the artist redundantly
@@ -263,6 +292,7 @@ public class SoulseekDownloadService : BaseDownloadService
             ranked.Count, primaryQuery);
 
         Exception? lastError = null;
+        var startAnnounced = false;
         foreach (var (hit, attemptIdx) in ranked.Select((h, i) => (h, i + 1)))
         {
             Logger.LogInformation("Soulseek attempt {N}/{Total}: {User} -> {File} (queue={Q}, speed={S})",
@@ -280,6 +310,26 @@ public class SoulseekDownloadService : BaseDownloadService
                 Logger.LogWarning("Soulseek enqueue failed for {User} ({Msg}); trying next peer", hit.Username, ex.Message);
                 lastError = ex;
                 continue;
+            }
+
+            // Announced only after a peer actually accepted the transfer -- firing
+            // before the loop would claim a start that five straight rejections later
+            // never happened. Once per track: a retry on the next peer is the same
+            // download, not a new one. SizeBytes is this candidate's advertised size;
+            // DownloadCompleted carries the real file's.
+            if (!suppressNotify && !startAnnounced)
+            {
+                startAnnounced = true;
+                Notifications.Notify(new Octo.Services.Notifications.NotificationEvent
+                {
+                    Type = Octo.Services.Notifications.NotificationEventType.DownloadStarted,
+                    Artist = routing.Artist,
+                    Title = routing.Title,
+                    Album = routing.Album,
+                    Source = "Soulseek",
+                    Format = _settings.PreferredExtension.ToUpperInvariant(),
+                    SizeBytes = hit.Size,
+                });
             }
 
             // Cancelling the WAIT must never cancel the TRANSFER. slskd already

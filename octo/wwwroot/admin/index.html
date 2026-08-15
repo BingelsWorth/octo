@@ -69,6 +69,12 @@
             </svg>
             <span>Last.fm</span>
           </button>
+          <button class="sidebar-nav-item" data-tab="notifications">
+            <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M8 2a4 4 0 0 0-4 4v3L2.5 11h11L12 9V6a4 4 0 0 0-4-4z"/><path d="M6.5 13a1.5 1.5 0 0 0 3 0"/>
+            </svg>
+            <span>Notifications</span>
+          </button>
           <button class="sidebar-nav-item" data-tab="soulseek">
             <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
               <circle cx="7" cy="7" r="4"/><path d="m10 10 3 3"/>
@@ -505,6 +511,87 @@
                 <div class="set-info-d">How long Last.fm responses are cached server-side.</div>
               </div>
               <input class="set-input" id="f-lastfm-cache" name="LastFm.RadioCacheDurationHours" type="number" min="0" />
+            </div>
+          </form>
+        </div>
+      </section>
+
+      <!-- ─── NOTIFICATIONS ─────────────────────────────────── -->
+      <section data-pane="notifications">
+        <header class="page-header">
+          <div>
+            <h1>Notifications</h1>
+            <p>Push a message when Octo fetches (or fails to fetch) music. ntfy and Discord; either works alone.</p>
+          </div>
+          <button class="btn" id="btn-test-notification" type="button">Send test</button>
+        </header>
+
+        <div id="test-notification-result" class="notice" hidden></div>
+
+        <div class="set-section">
+          <div class="set-head"><h3 class="set-title">Transports</h3></div>
+          <form data-section="notifications-transports" class="set-card">
+            <div class="set-row stack">
+              <div class="set-info">
+                <div class="set-info-t">ntfy topic URL</div>
+                <div class="set-info-d">Leave empty to disable ntfy. Pick any unique topic name, subscribe to it in the <a href="https://ntfy.sh/" target="_blank" rel="noopener">ntfy app</a>, and paste the same URL here.</div>
+              </div>
+              <input class="set-input" id="f-ntfy-url" name="Notifications.NtfyUrl" placeholder="https://ntfy.sh/your-topic" />
+            </div>
+            <div class="set-row stack">
+              <div class="set-info">
+                <div class="set-info-t">ntfy access token <span class="set-opt">optional</span></div>
+                <div class="set-info-d">Only needed on servers with access control. Sent as a Bearer token.</div>
+              </div>
+              <input class="set-input" id="f-ntfy-token" name="Notifications.NtfyToken" type="password" autocomplete="off" />
+            </div>
+            <div class="set-row stack">
+              <div class="set-info">
+                <div class="set-info-t">Discord webhook URL</div>
+                <div class="set-info-d">Leave empty to disable Discord. Server Settings &rarr; Integrations &rarr; Webhooks. The URL contains its own secret, so it is stored like a password.</div>
+              </div>
+              <input class="set-input" id="f-discord-webhook" name="Notifications.DiscordWebhookUrl" type="password" autocomplete="off" placeholder="https://discord.com/api/webhooks/…" />
+            </div>
+          </form>
+        </div>
+
+        <div class="set-section">
+          <div class="set-head"><h3 class="set-title">Events</h3></div>
+          <form data-section="notifications-events" class="set-card">
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Download started</div>
+                <div class="set-info-d">A transfer actually began, saying up front whether it found a FLAC or is settling for MP3.</div>
+              </div>
+              <label class="switch"><input type="checkbox" id="f-notify-started" name="Notifications.NotifyDownloadStarted" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Download completed</div>
+                <div class="set-info-d">A track landed: format, source and size, with album art.</div>
+              </div>
+              <label class="switch"><input type="checkbox" id="f-notify-completed" name="Notifications.NotifyDownloadCompleted" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Lossless fallback</div>
+                <div class="set-info-d">Soulseek came up empty and Octo settled for a YouTube MP3. The quality-loss alarm.</div>
+              </div>
+              <label class="switch"><input type="checkbox" id="f-notify-fallback" name="Notifications.NotifyLosslessFallback" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Download failed</div>
+                <div class="set-info-d">Both sources failed for a starred track.</div>
+              </div>
+              <label class="switch"><input type="checkbox" id="f-notify-failed" name="Notifications.NotifyDownloadFailed" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Album completed</div>
+                <div class="set-info-d">One summary per album: tracks fetched and how many are lossless. Per-track pings are muted during album downloads.</div>
+              </div>
+              <label class="switch"><input type="checkbox" id="f-notify-album" name="Notifications.NotifyAlbumCompleted" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
             </div>
           </form>
         </div>
