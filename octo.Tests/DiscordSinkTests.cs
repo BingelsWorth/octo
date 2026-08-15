@@ -47,6 +47,81 @@ public class DiscordSinkTests
     }
 
     [Fact]
+    public void FieldsTurnTheEmbedIntoASongCard()
+    {
+        var rendered = Octo.Services.Notifications.NotificationService.Render(new NotificationEvent
+        {
+            Type = NotificationEventType.DownloadCompleted,
+            Artist = "Randy Rogers Band",
+            Title = "In My Arms Instead",
+            Album = "Randy Rogers Band",
+            Format = "FLAC",
+            Source = "Soulseek",
+            SizeBytes = 34_684_600,
+            DurationSeconds = 223,
+            Year = 2008,
+            CoverArtUrl = "https://cdn.example/cover.jpg",
+        });
+        var embed = DiscordSink.BuildPayload(rendered)["embeds"]![0]!;
+
+        // Album as the description line, stats as inline fields, cover full-width.
+        Assert.Equal("Randy Rogers Band", (string)embed["description"]!);
+        var fields = embed["fields"]!.AsArray()
+            .ToDictionary(f => (string)f!["name"]!, f => (string)f!["value"]!);
+        Assert.Equal("FLAC", fields["Format"]);
+        Assert.Equal("Soulseek", fields["Source"]);
+        Assert.Equal("33.1 MB", fields["Size"]);
+        Assert.Equal("3:43", fields["Length"]);
+        Assert.Equal("≈1,244 kbps", fields["Bitrate"]);
+        Assert.Equal("2008", fields["Year"]);
+        Assert.All(embed["fields"]!.AsArray(), f => Assert.True((bool)f!["inline"]!));
+        // The card uses the full-width image slot, not the corner thumbnail, and
+        // does not repeat the prose body alongside the structured fields.
+        Assert.Equal("https://cdn.example/cover.jpg", (string)embed["image"]!["url"]!);
+        Assert.Null(embed["thumbnail"]);
+        Assert.DoesNotContain("FLAC via Soulseek", (string?)embed["description"] ?? "");
+    }
+
+    [Fact]
+    public void UnknownStatsAreOmittedFromTheCardNotRenderedAsPlaceholders()
+    {
+        var rendered = Octo.Services.Notifications.NotificationService.Render(new NotificationEvent
+        {
+            Type = NotificationEventType.DownloadStarted,
+            Artist = "A",
+            Title = "B",
+            Format = "MP3",
+            Source = "YouTube",
+            // no size, no duration, no year — the YouTube started path
+        });
+        var embed = DiscordSink.BuildPayload(rendered)["embeds"]![0]!;
+
+        var names = embed["fields"]!.AsArray().Select(f => (string)f!["name"]!).ToList();
+        Assert.Equal(new[] { "Format", "Source" }, names);
+    }
+
+    [Fact]
+    public void AlbumSummaryRendersItsCountsAsFields()
+    {
+        var rendered = Octo.Services.Notifications.NotificationService.Render(new NotificationEvent
+        {
+            Type = NotificationEventType.AlbumCompleted,
+            Artist = "Tame Impala",
+            Title = "Currents",
+            TrackCount = 15,
+            LosslessCount = 12,
+            FailedCount = 1,
+        });
+        var embed = DiscordSink.BuildPayload(rendered)["embeds"]![0]!;
+
+        var fields = embed["fields"]!.AsArray()
+            .ToDictionary(f => (string)f!["name"]!, f => (string)f!["value"]!);
+        Assert.Equal("15", fields["Tracks"]);
+        Assert.Equal("12", fields["Lossless"]);
+        Assert.Equal("1", fields["Failed"]);
+    }
+
+    [Fact]
     public void NoThumbnailKeyWithoutCoverArt()
     {
         var payload = DiscordSink.BuildPayload(Message(image: null));

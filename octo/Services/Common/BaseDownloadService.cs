@@ -270,6 +270,10 @@ public abstract class BaseDownloadService : IDownloadService
                     Source = ext == "FLAC" ? "Soulseek" : "YouTube",
                     CoverArtUrl = cover,
                     SizeBytes = size,
+                    // EnrichAndTagAsync ran before this hook, so these are the
+                    // Deezer-enriched values the file itself was tagged with.
+                    DurationSeconds = song.Duration,
+                    Year = song.Year,
                 });
             }
         }

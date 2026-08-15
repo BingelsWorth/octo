@@ -40,14 +40,39 @@ public sealed class DiscordSink : INotificationSink
         var embed = new JsonObject
         {
             ["title"] = Truncate(message.Title, 256),
-            ["description"] = Truncate(message.Body, 4096),
             ["color"] = ColorFor(message.Type),
             ["footer"] = new JsonObject { ["text"] = "Octo" },
             ["timestamp"] = DateTime.UtcNow.ToString("o"),
         };
-        // Key omitted entirely when there is no cover: Discord rejects a null url.
-        if (!string.IsNullOrEmpty(message.ImageUrl))
-            embed["thumbnail"] = new JsonObject { ["url"] = message.ImageUrl };
+
+        if (message.Fields is { Count: > 0 })
+        {
+            // Song-card layout: the album as the description line, the stats as
+            // inline fields (Discord flows up to three per row), and the cover
+            // full-width. Body prose is NOT repeated here — the fields carry the
+            // same facts, structured.
+            if (!string.IsNullOrEmpty(message.Description))
+                embed["description"] = Truncate(message.Description, 4096);
+            embed["fields"] = new JsonArray(message.Fields
+                .Select(f => (JsonNode)new JsonObject
+                {
+                    ["name"] = Truncate(f.Key, 256),
+                    ["value"] = Truncate(f.Value, 1024),
+                    ["inline"] = true,
+                })
+                .ToArray());
+            // Full-width art, not the corner thumbnail: on a song card the cover
+            // IS the card.
+            if (!string.IsNullOrEmpty(message.ImageUrl))
+                embed["image"] = new JsonObject { ["url"] = message.ImageUrl };
+        }
+        else
+        {
+            embed["description"] = Truncate(message.Body, 4096);
+            // Key omitted entirely when there is no cover: Discord rejects a null url.
+            if (!string.IsNullOrEmpty(message.ImageUrl))
+                embed["thumbnail"] = new JsonObject { ["url"] = message.ImageUrl };
+        }
 
         return new JsonObject { ["embeds"] = new JsonArray(embed) };
     }

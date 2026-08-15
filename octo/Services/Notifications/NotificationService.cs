@@ -104,7 +104,9 @@ public sealed class NotificationService
         _ => false,
     };
 
-    /// <summary>Single source of truth for the text both transports carry.</summary>
+    /// <summary>Single source of truth for the text both transports carry. Track
+    /// events additionally get structured stat fields so layout-capable transports
+    /// can render a song card instead of prose.</summary>
     internal static NotificationMessage Render(NotificationEvent evt)
     {
         var track = string.IsNullOrEmpty(evt.Artist) ? evt.Title ?? "unknown track"
@@ -116,15 +118,20 @@ public sealed class NotificationService
                 evt.Type,
                 $"Downloading: {track}",
                 $"{evt.Format} via {evt.Source}" + (evt.SizeBytes is long sb and > 0 ? $" ({FormatSize(sb)})" : ""),
-                evt.CoverArtUrl),
+                evt.CoverArtUrl,
+                Description: evt.Album,
+                Fields: TrackFields(evt)),
 
             NotificationEventType.DownloadCompleted => new NotificationMessage(
                 evt.Type,
                 $"Downloaded: {track}",
                 (string.IsNullOrEmpty(evt.Album) ? "" : evt.Album + "\n")
                     + $"{evt.Format} via {evt.Source}"
-                    + (evt.SizeBytes is long cb and > 0 ? $", {FormatSize(cb)}" : ""),
-                evt.CoverArtUrl),
+                    + (evt.SizeBytes is long cb and > 0 ? $", {FormatSize(cb)}" : "")
+                    + (evt.DurationSeconds is int ds and > 0 ? $" · {FormatDuration(ds)}" : ""),
+                evt.CoverArtUrl,
+                Description: evt.Album,
+                Fields: TrackFields(evt)),
 
             NotificationEventType.LosslessFallback => new NotificationMessage(
                 evt.Type,
@@ -143,7 +150,9 @@ public sealed class NotificationService
                 $"Album complete: {track}",
                 $"{evt.TrackCount} tracks fetched, {evt.LosslessCount} lossless"
                     + (evt.FailedCount is int f and > 0 ? $", {f} failed" : ""),
-                evt.CoverArtUrl),
+                evt.CoverArtUrl,
+                Description: null,
+                Fields: AlbumFields(evt)),
 
             _ => new NotificationMessage(
                 evt.Type,
@@ -153,8 +162,46 @@ public sealed class NotificationService
         };
     }
 
+    /// <summary>The stats a song card shows, in display order, skipping unknowns.
+    /// Bitrate is derived from size and duration — it describes the actual file,
+    /// which is the number a lossless-vs-lossy glance wants.</summary>
+    private static List<KeyValuePair<string, string>> TrackFields(NotificationEvent evt)
+    {
+        var fields = new List<KeyValuePair<string, string>>();
+        void Add(string name, string? value)
+        {
+            if (!string.IsNullOrEmpty(value))
+                fields.Add(new KeyValuePair<string, string>(name, value));
+        }
+
+        Add("Format", evt.Format);
+        Add("Source", evt.Source);
+        if (evt.SizeBytes is long size and > 0) Add("Size", FormatSize(size));
+        if (evt.DurationSeconds is int dur and > 0)
+        {
+            Add("Length", FormatDuration(dur));
+            if (evt.SizeBytes is long b and > 0)
+                Add("Bitrate", $"≈{b * 8 / dur / 1000:N0} kbps");
+        }
+        if (evt.Year is int year and > 0) Add("Year", year.ToString());
+        return fields;
+    }
+
+    private static List<KeyValuePair<string, string>> AlbumFields(NotificationEvent evt) =>
+        new()
+        {
+            new("Tracks", (evt.TrackCount ?? 0).ToString()),
+            new("Lossless", (evt.LosslessCount ?? 0).ToString()),
+            new("Failed", (evt.FailedCount ?? 0).ToString()),
+        };
+
     internal static string FormatSize(long bytes) =>
         bytes >= 1024L * 1024 * 1024 ? $"{bytes / (1024.0 * 1024 * 1024):F1} GB"
         : bytes >= 1024L * 1024 ? $"{bytes / (1024.0 * 1024):F1} MB"
         : $"{bytes / 1024.0:F0} KB";
+
+    internal static string FormatDuration(int seconds) =>
+        seconds >= 3600
+            ? $"{seconds / 3600}:{seconds % 3600 / 60:D2}:{seconds % 60:D2}"
+            : $"{seconds / 60}:{seconds % 60:D2}";
 }

@@ -220,6 +220,7 @@ public class SoulseekDownloadService : BaseDownloadService
                 Album = routing.Album,
                 Source = "YouTube",
                 Format = "MP3",
+                DurationSeconds = routing.Duration,
             });
         }
 
@@ -329,6 +330,7 @@ public class SoulseekDownloadService : BaseDownloadService
                     Source = "Soulseek",
                     Format = _settings.PreferredExtension.ToUpperInvariant(),
                     SizeBytes = hit.Size,
+                    DurationSeconds = routing.Duration,
                 });
             }
 
