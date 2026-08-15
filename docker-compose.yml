@@ -45,7 +45,7 @@ services:
       Soulseek__BaseUrl: http://slskd:5030
       Soulseek__Username: ${SLSKD_USERNAME:-slskd}
       Soulseek__Password: ${SLSKD_PASSWORD:-slskd}
-      Soulseek__SearchWaitSeconds: ${SLSKD_SEARCH_WAIT_SECONDS:-6}
+      Soulseek__SearchWaitSeconds: ${SLSKD_SEARCH_WAIT_SECONDS:-30}
       Soulseek__MinFileSizeBytes: ${SLSKD_MIN_FILE_SIZE_BYTES:-5242880}
       Soulseek__PreferredExtension: ${SLSKD_PREFERRED_EXTENSION:-flac}
       Soulseek__DownloadTimeoutSeconds: ${SLSKD_DOWNLOAD_TIMEOUT_SECONDS:-180}
@@ -55,6 +55,16 @@ services:
       LastFm__EnableRadio: ${LASTFM_ENABLE_RADIO:-true}
       LastFm__RadioTrackCount: ${LASTFM_RADIO_TRACK_COUNT:-50}
       LastFm__RadioCacheDurationHours: ${LASTFM_RADIO_CACHE_HOURS:-24}
+
+      # ----- Notifications (ntfy / Discord webhook) — both optional -----
+      Notifications__NtfyUrl: ${NTFY_URL:-}
+      Notifications__NtfyToken: ${NTFY_TOKEN:-}
+      Notifications__DiscordWebhookUrl: ${DISCORD_WEBHOOK_URL:-}
+      Notifications__NotifyDownloadStarted: ${NOTIFY_DOWNLOAD_STARTED:-false}
+      Notifications__NotifyDownloadCompleted: ${NOTIFY_DOWNLOAD_COMPLETED:-true}
+      Notifications__NotifyLosslessFallback: ${NOTIFY_LOSSLESS_FALLBACK:-true}
+      Notifications__NotifyDownloadFailed: ${NOTIFY_DOWNLOAD_FAILED:-true}
+      Notifications__NotifyAlbumCompleted: ${NOTIFY_ALBUM_COMPLETED:-true}
     volumes:
       - ${DOWNLOAD_PATH:-./downloads}:/music
       # Editable settings file — admin UI writes here, ASP.NET hot-reloads on
@@ -73,6 +83,12 @@ services:
     restart: unless-stopped
     environment:
       MAX_CONCURRENT_YTDLP: ${YTDLP_MAX_CONCURRENT:-5}
+      # Slots of the above that background work (prewarm, star-downloads) can
+      # never occupy, so pressing play does not queue behind a prewarm burst.
+      GATE_RESERVE_INTERACTIVE: ${YTDLP_GATE_RESERVE:-2}
+      # Background gives up on a full gate quickly: it is fire-and-forget and
+      # already stale by the time a long queue clears.
+      BG_GATE_WAIT_SEC: ${YTDLP_BG_GATE_WAIT_SEC:-10}
       SEARCH_CACHE_MAX: ${YTDLP_SEARCH_CACHE_MAX:-1024}
       URL_CACHE_MAX: ${YTDLP_URL_CACHE_MAX:-512}
       URL_CACHE_TTL: ${YTDLP_URL_CACHE_TTL:-3600}

@@ -168,12 +168,22 @@ public class SoulseekMetadataService : IMusicMetadataService
     // means playback reuses this exact video (durations match) and it is prewarmed.
     private const int TopDurationResolveLimit = 8;
 
+    // Shared across ALL invocations, not created per call. The shim runs 5
+    // yt-dlp processes at a time; per-invocation semaphores let the three
+    // prewarm triggers (radio, scrobble, external search) stack to 12
+    // concurrent /search against it, and the old value of 6 here exceeded the
+    // whole gate on its own. Sized to the shim's background capacity
+    // (MAX_CONCURRENT_YTDLP - GATE_RESERVE_INTERACTIVE). This service is
+    // registered as a singleton, so an instance field is already process-wide
+    // without being static (which would make parallel test runs hostile).
+    private readonly SemaphoreSlim _prewarmGate = new(3);
+    private static readonly TimeSpan PrewarmQueueWait = TimeSpan.FromSeconds(2);
+
     public async Task ResolveTopDurationsAsync(List<Song> songs, CancellationToken ct = default)
     {
-        var sem = new SemaphoreSlim(6);
         var tasks = songs.Where(s => !s.IsLocal).Take(TopDurationResolveLimit).Select(async song =>
         {
-            await sem.WaitAsync(ct);
+            if (!await _prewarmGate.WaitAsync(PrewarmQueueWait, ct)) return;
             try
             {
                 // Fast metadata-only lookup (flat search, no URL solve). Pass the
@@ -193,7 +203,7 @@ public class SoulseekMetadataService : IMusicMetadataService
                 }
             }
             catch { /* best-effort; keeps the existing duration on a miss */ }
-            finally { sem.Release(); }
+            finally { _prewarmGate.Release(); }
         });
         await Task.WhenAll(tasks);
     }
@@ -234,18 +244,19 @@ public class SoulseekMetadataService : IMusicMetadataService
             .ToList();
         if (targets.Count == 0) return Task.CompletedTask;
 
-        // Concurrency cap below the shim's MAX_CONCURRENT_YTDLP=8 so we don't
-        // monopolize it during a search burst (the shim is also serving any
-        // in-flight /stream calls).
-        var sem = new SemaphoreSlim(4);
         var tasks = targets.Select(async t =>
         {
-            await sem.WaitAsync(ct);
+            // Bounded wait, then drop. With a shared limiter an unbounded wait
+            // lets a skip-happy user pile up prewarm tasks for songs they left
+            // behind five tracks ago. Prewarm is best-effort by design, so its
+            // queueing is best-effort too.
+            if (!await _prewarmGate.WaitAsync(PrewarmQueueWait, ct)) return;
             try
             {
                 var routing = t.routing!;
                 if (!string.IsNullOrEmpty(routing.YouTubeId)) return;
-                var hit = await _youtube.SearchAsync($"{routing.Artist} {routing.Title}", routing.Duration, ct);
+                var hit = await _youtube.SearchAsync($"{routing.Artist} {routing.Title}",
+                    routing.Duration, background: true, ct: ct);
                 if (hit is { VideoId: { Length: > 0 } })
                 {
                     routing.YouTubeId = hit.VideoId;
@@ -253,7 +264,7 @@ public class SoulseekMetadataService : IMusicMetadataService
                 }
             }
             catch { /* best-effort warm; never throw out of fire-and-forget */ }
-            finally { sem.Release(); }
+            finally { _prewarmGate.Release(); }
         });
         return Task.WhenAll(tasks);
     }

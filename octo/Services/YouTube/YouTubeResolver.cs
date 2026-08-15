@@ -29,11 +29,19 @@ public class YouTubeResolver
     /// <summary>
     /// Resolves "Artist - Title" to a single best YouTube hit via the shim.
     /// </summary>
-    public async Task<YouTubeHit?> SearchAsync(string query, int? durationHint = null, CancellationToken ct = default)
+    /// <param name="background">
+    /// True only for fire-and-forget prewarm. The shim keeps a slice of its
+    /// yt-dlp gate unreachable to background work, so a user pressing play never
+    /// queues behind a prewarm burst. Absence means interactive, so a call site
+    /// that forgets this fails safe: slower prewarm, never a slower play.
+    /// </param>
+    public async Task<YouTubeHit?> SearchAsync(string query, int? durationHint = null,
+        bool background = false, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(query)) return null;
         var url = $"{_baseUrl}/search?q={Uri.EscapeDataString(query)}"
-            + (durationHint is int dh && dh > 0 ? $"&duration={dh}" : "");
+            + (durationHint is int dh && dh > 0 ? $"&duration={dh}" : "")
+            + (background ? "&bg=1" : "");
         try
         {
             var http = _httpClientFactory.CreateClient(SearchClientName);

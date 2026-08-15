@@ -136,6 +136,21 @@ Prebuilt multi-arch images are also published to `ghcr.io/winters27/octo`, tagge
 
 Every setting has a form, every backing service has a live status indicator, and the **Raw Config** tab lets you edit the whole effective configuration as a JSON file if you'd rather work that way. Changes hot-reload — no rebuild, no restart for most settings.
 
+## Notifications
+
+Optional push notifications for the download lifecycle, because Subsonic has no way to
+tell you a starred track landed — or quietly settled for a lossy copy.
+
+- **Two transports, either works alone**: [ntfy](https://ntfy.sh/) (paste a topic URL,
+  subscribe to the same topic in the ntfy app) and Discord webhooks (rich embed with
+  album art). A transport is on when its URL is set.
+- **Five events, each with its own toggle** in the dashboard's Notifications tab:
+  download started (did it find lossless, or is it settling?), download completed,
+  lossless fallback, download failed, and one summary per album instead of a ping per
+  track.
+- A **Send test** button verifies your URLs and tokens without waiting for a real
+  download, and reports each transport's outcome separately.
+
 ---
 
 ## Frequently asked questions

@@ -37,6 +37,8 @@ import requests
 from requests.adapters import HTTPAdapter
 from flask import Flask, Response, abort, jsonify, request, stream_with_context
 
+from gate import TieredGate
+
 YTDLP = os.environ.get("YTDLP_PATH", "/usr/local/bin/yt-dlp")
 PORT = int(os.environ.get("PORT", "8080"))
 
@@ -54,6 +56,22 @@ _AUDIO_FORMAT = os.environ.get(
     "YTDLP_AUDIO_FORMAT",
     "140/bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio",
 )
+
+# User-Agent sent to googlevideo when proxying bytes. Empty (the default) keeps
+# requests' own python-requests/x.y, i.e. existing behaviour. Signed URLs from
+# some player clients are refused for a mismatched UA, so this exists to test
+# that without a code change; it is off by default so it cannot confound the
+# 403 diagnostics in stream().
+_UPSTREAM_UA = os.environ.get("UPSTREAM_USER_AGENT", "").strip()
+
+# yt-dlp's cache holds the player base.js and solved signatures, and is
+# deliberately persistent (see the note in _run). Nothing invalidates it, so a
+# rotated player leaves every resolve producing URLs googlevideo refuses.
+# Purging is the standard recovery, but doing it on every 403 would throw the
+# cache away during a burst and make things worse -- hence the interval.
+_CACHE_PURGE_MIN_INTERVAL_SEC = int(os.environ.get("CACHE_PURGE_MIN_INTERVAL_SEC", "900"))
+_CACHE_PURGE_LOCK = threading.Lock()
+_last_cache_purge = 0.0
 
 # In-memory LRU cache of search-query -> json result. Cuts repeat searches
 # from a 3-8s yt-dlp invocation to a dict lookup. Bounded so we never grow
@@ -120,29 +138,62 @@ def _url_cache_evict(video_id: str):
     with _URL_CACHE_LOCK:
         _URL_CACHE.pop(video_id, None)
 
+def _url_cache_evict_if(video_id: str, expected_url: str):
+    """Evict only if the cache still holds the URL that just failed.
+
+    Two threads can 403 on the same stale URL (an iOS client sends a
+    `Range: bytes=0-1` probe and then the real GET). An unconditional evict lets
+    the second thread discard the good URL the first one just resolved, and fork
+    another yt-dlp to rediscover it.
+    """
+    with _URL_CACHE_LOCK:
+        entry = _URL_CACHE.get(video_id)
+        if entry and entry[1] == expected_url:
+            _URL_CACHE.pop(video_id, None)
+
 # Cap concurrent yt-dlp processes globally. Each one is fork+exec heavy;
-# letting them stack starves a small container.
-_GATE = threading.Semaphore(int(os.environ.get("MAX_CONCURRENT_YTDLP", "5")))
+# letting them stack starves a small container. GATE_RESERVE_INTERACTIVE of the
+# slots are unreachable by background work (prewarm, /download), so a user
+# pressing play never queues behind a prewarm burst.
+_MAX_CONCURRENT = int(os.environ.get("MAX_CONCURRENT_YTDLP", "5"))
+_RESERVE_INTERACTIVE = int(os.environ.get("GATE_RESERVE_INTERACTIVE", "2"))
+_GATE = TieredGate(_MAX_CONCURRENT, _RESERVE_INTERACTIVE)
 # Max time a queued request will wait for a free slot. Long enough that a
 # burst of 10 parallel radio-resolution searches all eventually succeed
 # rather than dropping requests on the floor.
 _GATE_WAIT_SEC = int(os.environ.get("GATE_WAIT_SEC", "45"))
+# Background waits far less than that: it is fire-and-forget, it is already
+# stale by the time a 45s queue clears, and a parked thread is one of a finite
+# gunicorn pool. Shedding it early is better than holding a thread for nothing.
+_BG_GATE_WAIT_SEC = int(os.environ.get("BG_GATE_WAIT_SEC", "10"))
+# How long an interactive resolve coalesces behind an in-flight one before
+# giving up and resolving in parallel. See _resolve_url.
+_INFLIGHT_WAIT_SEC = float(os.environ.get("INFLIGHT_WAIT_SEC", "0.25"))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("ytdlp-shim")
 
 app = Flask(__name__)
 
+log.info(
+    "gate: total=%d reserve=%d bg_capacity=%d",
+    _GATE.total, _GATE.reserve, _GATE.total - _GATE.reserve,
+)
 
-def _run(args: list[str], timeout: int = 20, label: str = "ytdlp") -> Optional[str]:
+
+def _run(args: list[str], timeout: int = 20, label: str = "ytdlp",
+         bg: bool = False) -> Optional[str]:
     """Run yt-dlp with a hard timeout. Returns stdout or None on any failure.
 
     Logs gate-wait and wall time so a real box can show whether interactive
-    resolves are queuing behind background prewarm (grep `gate_wait_ms`).
+    resolves are queuing behind background prewarm (grep `gate_wait_ms`), and
+    `bg` so the two can actually be told apart in the log.
     """
     t_acquire = time.monotonic()
-    if not _GATE.acquire(timeout=_GATE_WAIT_SEC):
-        log.warning("yt-dlp gate full after %ds, dropping: %s", _GATE_WAIT_SEC, " ".join(args))
+    wait = _BG_GATE_WAIT_SEC if bg else _GATE_WAIT_SEC
+    if not _GATE.acquire(bg, wait):
+        log.warning("yt-dlp gate full after %ds (bg=%d), dropping: %s",
+                    wait, int(bg), " ".join(args))
         return None
     gate_ms = (time.monotonic() - t_acquire) * 1000.0
     try:
@@ -164,18 +215,30 @@ def _run(args: list[str], timeout: int = 20, label: str = "ytdlp") -> Optional[s
             log.warning("yt-dlp timed out (%s, gate_wait_ms=%.0f): %s", label, gate_ms, " ".join(args))
             return None
         wall_ms = (time.monotonic() - t_run) * 1000.0
-        log.info("ytdlp label=%s gate_wait_ms=%.0f wall_ms=%.0f rc=%d", label, gate_ms, wall_ms, cp.returncode)
+        log.info("ytdlp label=%s bg=%d gate_wait_ms=%.0f wall_ms=%.0f rc=%d",
+                 label, int(bg), gate_ms, wall_ms, cp.returncode)
         if cp.returncode != 0:
             log.warning("yt-dlp exit %d (%s): %s", cp.returncode, label, cp.stderr.strip()[:300])
             return None
         return cp.stdout
     finally:
-        _GATE.release()
+        _GATE.release(bg)
 
 
 @app.get("/health")
 def health():
     return jsonify(ok=True)
+
+
+def _is_bg() -> bool:
+    """True for fire-and-forget prewarm, which yields gate slots to real plays.
+
+    Absence means interactive, so a caller that forgets the flag fails safe:
+    slower background, never a deprioritised play. NEVER fold this into a cache
+    key -- the result is identical either way, and keying on it would halve the
+    hit rate for no benefit.
+    """
+    return request.args.get("bg") == "1"
 
 
 @app.get("/search")
@@ -186,13 +249,14 @@ def search():
 
     hint_str = request.args.get("duration", "").strip()
     duration_hint = int(hint_str) if hint_str.isdigit() else None
+    bg = _is_bg()
 
     cache_key = f"{q.lower()}|{duration_hint or ''}"
     cached = _cache_get(cache_key)
     if cached is not None:
         return jsonify(**cached)
 
-    payload = _search_with_hint(q, duration_hint) if duration_hint is not None else _search_single(q)
+    payload = _search_with_hint(q, duration_hint, bg) if duration_hint is not None else _search_single(q, bg)
     if payload is None:
         return jsonify(error="search_failed"), 502
     if not payload.get("video_id"):
@@ -211,7 +275,7 @@ def _payload_from(data: dict) -> dict:
     }
 
 
-def _search_single(q: str) -> Optional[dict]:
+def _search_single(q: str, bg: bool = False) -> Optional[dict]:
     """No duration hint: fast path. One extraction yields metadata AND the
     stream URL, which we warm into the URL cache so /stream is a cache hit."""
     out = _run(
@@ -224,6 +288,7 @@ def _search_single(q: str) -> Optional[dict]:
         ],
         timeout=15,
         label="search+resolve",
+        bg=bg,
     )
     if out is None:
         return None
@@ -246,9 +311,13 @@ def _search_single(q: str) -> Optional[dict]:
     return payload
 
 
-def _search_with_hint(q: str, duration_hint: int) -> Optional[dict]:
+def _search_with_hint(q: str, duration_hint: int, bg: bool = False) -> Optional[dict]:
     """Duration hint present: pick the closest-length of 5 flat candidates
-    (cheap, no per-video extraction), then resolve the winner's URL once."""
+    (cheap, no per-video extraction), then resolve the winner's URL once.
+
+    Note this path costs TWO gated yt-dlp runs per track (search5 then resolve),
+    where the no-hint path gets both from one extraction.
+    """
     out = _run(
         [
             f"ytsearch5:{q}",
@@ -257,6 +326,7 @@ def _search_with_hint(q: str, duration_hint: int) -> Optional[dict]:
         ],
         timeout=20,
         label="search5",
+        bg=bg,
     )
     if out is None:
         return None
@@ -280,7 +350,7 @@ def _search_with_hint(q: str, duration_hint: int) -> Optional[dict]:
     payload = _payload_from(candidates[0])
     if payload.get("video_id"):
         # Warm the URL cache for the coming /stream (single-flight + cached).
-        _resolve_url(payload["video_id"])
+        _resolve_url(payload["video_id"], bg)
     return payload
 
 
@@ -421,7 +491,7 @@ def meta():
     return jsonify(**payload)
 
 
-def _resolve_url(video_id: str) -> Optional[str]:
+def _resolve_url(video_id: str, bg: bool = False) -> Optional[str]:
     cached = _url_cache_get(video_id)
     if cached:
         return cached
@@ -431,29 +501,65 @@ def _resolve_url(video_id: str) -> Optional[str]:
     # second identical `yt-dlp -g`.
     with _INFLIGHT_LOCK:
         lock = _INFLIGHT.setdefault(video_id, threading.Lock())
-    with lock:
+
+    # An interactive caller must not inherit a background leader's queue
+    # position. The leader may be parked in the gate for seconds, and that wait
+    # is invisible to the reserve because a follower never reaches a gate at
+    # all -- it is asleep on this lock. If the leader does not hand over
+    # promptly, resolve in parallel: one extra yt-dlp fork is far cheaper than a
+    # user-visible stall.
+    coalesced = lock.acquire(timeout=_GATE_WAIT_SEC if bg else _INFLIGHT_WAIT_SEC)
+    try:
+        # Re-check on BOTH branches. The leader may have finished while we
+        # waited, and without this every interactive caller for a contended id
+        # forks its own resolve -- burning the very slots the reserve protects.
         cached = _url_cache_get(video_id)
         if cached:
             return cached
-        try:
-            out = _run(
-                [
-                    "-g",
-                    "-f", _AUDIO_FORMAT,
-                    f"https://www.youtube.com/watch?v={video_id}",
-                ],
-                timeout=15,
-                label="resolve",
-            )
-            if not out:
-                return None
-            url = out.strip().split("\n", 1)[0].strip()
-            if url:
-                _url_cache_put(video_id, url)
-            return url or None
-        finally:
+        out = _run(
+            [
+                "-g",
+                "-f", _AUDIO_FORMAT,
+                f"https://www.youtube.com/watch?v={video_id}",
+            ],
+            timeout=15,
+            label="resolve",
+            bg=bg,
+        )
+        if not out:
+            return None
+        url = out.strip().split("\n", 1)[0].strip()
+        if url:
+            _url_cache_put(video_id, url)
+        return url or None
+    finally:
+        # Only the thread that actually holds the lock may pop and release it.
+        if coalesced:
             with _INFLIGHT_LOCK:
                 _INFLIGHT.pop(video_id, None)
+            lock.release()
+
+
+def _purge_ytdlp_cache(video_id: str) -> None:
+    """Drop yt-dlp's player/signature cache after a 403 survives a re-resolve.
+
+    The cache is persistent by design (see _run), which means a rotated YouTube
+    player leaves every resolve producing URLs googlevideo refuses, forever.
+    Purging is the standard recovery. It is rate-limited because doing it on
+    every 403 would throw away base.js during a burst and make things worse, and
+    it deliberately does not retry the current play -- the next one benefits.
+    """
+    global _last_cache_purge
+    with _CACHE_PURGE_LOCK:
+        now = time.monotonic()
+        if now - _last_cache_purge < _CACHE_PURGE_MIN_INTERVAL_SEC:
+            return
+        _last_cache_purge = now
+    log.warning(
+        "stream %s: 403 survived a re-resolve, purging yt-dlp cache "
+        "(rotated player is the usual cause)", video_id,
+    )
+    _run(["--rm-cache-dir"], timeout=30, label="rm-cache", bg=True)
 
 
 def _open_upstream(url: str, headers: dict, video_id: str):
@@ -485,6 +591,8 @@ def stream():
     incoming_range = request.headers.get("Range")
     if incoming_range:
         upstream_headers["Range"] = incoming_range
+    if _UPSTREAM_UA:
+        upstream_headers["User-Agent"] = _UPSTREAM_UA
 
     upstream = _open_upstream(url, upstream_headers, video_id)
     # A signed googlevideo URL can expire between resolve and play (long or
@@ -492,11 +600,26 @@ def stream():
     # the bad entry, re-resolve once, and retry before surfacing a failure, so
     # one stale URL does not fail every play of this id for the cache TTL.
     if upstream is not None and upstream.status_code in (403, 410):
+        # Google states the reason in the body and headers. Closing without
+        # reading them threw away the only direct evidence of why a play failed,
+        # which cost a long debugging session on 2026-08-14. Bounded read: a
+        # refusal body is small, and we are about to discard the response.
+        try:
+            detail = upstream.raw.read(512, decode_content=True) or b""
+        except Exception:
+            detail = b""
+        log.warning(
+            "stream %s: upstream %d headers=%s body=%r",
+            video_id, upstream.status_code, dict(upstream.headers), detail[:200],
+        )
         upstream.close()
-        log.info("stream %s: signed url expired (%d), re-resolving", video_id, upstream.status_code)
-        _url_cache_evict(video_id)
+        _url_cache_evict_if(video_id, url)
         url = _resolve_url(video_id)
         upstream = _open_upstream(url, upstream_headers, video_id) if url else None
+        # A freshly resolved URL that is refused again is not an expiry; the
+        # most common remaining cause is a stale cached player.
+        if upstream is not None and upstream.status_code in (403, 410):
+            _purge_ytdlp_cache(video_id)
 
     if upstream is None or upstream.status_code not in (200, 206):
         code = upstream.status_code if upstream is not None else "n/a"
@@ -571,6 +694,10 @@ def download():
         ],
         timeout=300,
         label="download",
+        # Background on purpose, regardless of what triggered it: this holds its
+        # slot for up to five minutes, and a single star-triggered download must
+        # never be able to sit in a slot a play is waiting for.
+        bg=True,
     )
     path = f"{full_dest}.mp3"
     if out is None or not os.path.exists(path):

@@ -405,6 +405,239 @@ function updateDiscoveryBanner() {
 document.getElementById('f-lastfm-key')?.addEventListener('input', updateDiscoveryBanner);
 
 // ────────────────────────────────────────────────────────────────
+// Notifications: send a test through every configured transport
+// ────────────────────────────────────────────────────────────────
+document.getElementById('btn-test-notification')?.addEventListener('click', async () => {
+  const box = document.getElementById('test-notification-result');
+  const btn = document.getElementById('btn-test-notification');
+  if (!box) return;
+  box.hidden = false;
+  box.textContent = 'Sending…';
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/admin/test-notification', { method: 'POST' });
+    const d = await r.json();
+    const parts = (d.results || []).map(s =>
+      `${s.sink}: ${!s.configured ? 'not configured' : s.ok ? 'OK' : 'failed — ' + s.detail}`);
+    box.textContent = parts.length ? parts.join('  ·  ') : 'No transports registered.';
+  } catch (e) {
+    box.textContent = 'Test failed: ' + (e?.message || 'unknown error');
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// ────────────────────────────────────────────────────────────────
+// Library status, library picker, and the download-folder browser
+//
+// Octo fronts Navidrome, so Navidrome's library is the source of truth for where
+// downloads belong. The status line states the whole chain (what Navidrome
+// reports, whether Octo can see it, what is therefore in effect) because when
+// that chain breaks the symptom is silent: files download fine and never appear.
+// ────────────────────────────────────────────────────────────────
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c =>
+  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+async function refreshLibraryStatus() {
+  const row = document.getElementById('library-status-row');
+  const out = document.getElementById('library-status');
+  const pickRow = document.getElementById('library-pick-row');
+  const pick = document.getElementById('f-library-path');
+  if (!row || !out) return;
+  try {
+    const r = await fetch('/api/admin/library-status', { cache: 'no-store' });
+    if (!r.ok) return;
+    const s = await r.json();
+    effectiveLibraryPath = s.effectiveDownloadPath || '';
+
+    const bits = [];
+    if (s.navidromeReports) {
+      bits.push(s.visibleToOcto
+        ? `Navidrome's library is <code>${esc(s.navidromeReports)}</code>, and Octo can see it.`
+        : `Navidrome reports <code>${esc(s.navidromeReports)}</code>, but <strong>Octo cannot see that path</strong>. Mount it into Octo's container, or set Navidrome's remotePath, or pick a folder below.`);
+    } else if (s.autoDetect) {
+      bits.push('Waiting on Navidrome to report its music folder. Until then the path below is used.');
+    } else {
+      bits.push('Auto-detect is off, so the path below is used verbatim.');
+    }
+    bits.push(`Downloads go to <code>${esc(s.effectiveDownloadPath || '(unset)')}</code>${s.writable ? '' : ' — <strong>not writable by Octo</strong>'}.`);
+    if (!s.rescanAuthenticated) {
+      bits.push('No Navidrome admin identity yet, so the rescan after a download may not run. Set admin credentials, or sign in once from a client.');
+    }
+    out.innerHTML = bits.join(' ');
+    row.hidden = false;
+
+    // Only ask which library when there is genuinely a choice to make.
+    const libs = s.libraries || [];
+    if (pick && pickRow && libs.length > 1) {
+      pick.innerHTML = [`<option value="">First library Navidrome reports</option>`]
+        .concat(libs.map(l => {
+          const label = `${l.name || l.folder}${l.visible ? '' : ' (not visible to Octo)'}`;
+          return `<option value="${esc(l.folder)}">${esc(label)}</option>`;
+        })).join('');
+      pick.value = s.pinnedLibraryPath || '';
+      pickRow.hidden = false;
+    }
+  } catch { /* status is informational; never block the settings UI on it */ }
+}
+refreshLibraryStatus();
+
+// ── Browse for a download folder ────────────────────────────────
+// The endpoint requires a Navidrome admin, because an unauthenticated directory
+// lister would turn every Octo install into one. The token lives in memory only:
+// not sessionStorage, so it dies with the tab.
+// The session lives in an HttpOnly cookie the server sets, so it survives a page
+// reload and this script never holds it (and could not read it if it tried).
+// Nothing about the sign-in is stored client-side, least of all the password.
+// Where Navidrome says its library is. Used as the browser's starting point when
+// the path field is empty, so it opens on the folder Octo is actually using
+// rather than at the filesystem root.
+let effectiveLibraryPath = '';
+
+async function browseFetch(path) {
+  const url = '/api/admin/browse' + (path ? `?path=${encodeURIComponent(path)}` : '');
+  // same-origin credentials carry the session cookie; nothing to attach by hand.
+  return fetch(url, { cache: 'no-store', credentials: 'same-origin' });
+}
+
+// Resolves to {username, password} or null if dismissed. A native prompt() was
+// used here first: it cannot be themed, and it has no password mode, so the
+// password appeared in clear on screen.
+function askCredentials() {
+  const modal = document.getElementById('signin-modal');
+  const user = document.getElementById('signin-user');
+  const pass = document.getElementById('signin-pass');
+  const err = document.getElementById('signin-error');
+  const submit = document.getElementById('signin-submit');
+  const cancel = document.getElementById('signin-cancel');
+  if (!modal) return Promise.resolve(null);
+
+  user.value = '';
+  pass.value = '';
+  err.textContent = '';
+  modal.hidden = false;
+  // Focus straight away rather than inside requestAnimationFrame: rAF only runs
+  // when the page is producing frames, so a background or non-compositing tab
+  // would open the dialog with nothing focused. setTimeout is the belt-and-braces
+  // retry for browsers that will not focus an element in the same tick it is shown.
+  user.focus();
+  if (document.activeElement !== user) setTimeout(() => user.focus(), 0);
+
+  return new Promise(resolve => {
+    const close = (value) => {
+      modal.hidden = true;
+      submit.removeEventListener('click', onSubmit);
+      cancel.removeEventListener('click', onCancel);
+      modal.removeEventListener('keydown', onKey);
+      modal.removeEventListener('mousedown', onBackdrop);
+      pass.value = '';
+      resolve(value);
+    };
+    const onSubmit = () => {
+      if (!user.value.trim() || !pass.value) {
+        err.textContent = 'Both a username and a password are required.';
+        return;
+      }
+      close({ username: user.value.trim(), password: pass.value });
+    };
+    const onCancel = () => close(null);
+    const onKey = (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); onSubmit(); }
+      if (e.key === 'Escape') { e.preventDefault(); onCancel(); }
+    };
+    // Clicking the backdrop dismisses, but only the backdrop itself — a drag
+    // that starts inside the card must not count as an outside click.
+    const onBackdrop = (e) => { if (e.target === modal) onCancel(); };
+
+    submit.addEventListener('click', onSubmit);
+    cancel.addEventListener('click', onCancel);
+    modal.addEventListener('keydown', onKey);
+    modal.addEventListener('mousedown', onBackdrop);
+  });
+}
+
+async function browseAuthenticate(result) {
+  const creds = await askCredentials();
+  if (!creds) return false;
+  const r = await fetch('/api/admin/browse/auth', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(creds),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    result.innerHTML = esc(data.error || 'Sign-in failed.');
+    return false;
+  }
+  return true;   // the session is now in the cookie the response set
+}
+
+function renderBrowse(data, result, input) {
+  const rows = [];
+  if (data.parent) {
+    rows.push(`<button type="button" class="btn btn-ghost detect-pick browse-nav" data-path="${esc(data.parent)}">.. <span class="detect-tag">up</span></button>`);
+  }
+  for (const e of data.entries || []) {
+    rows.push(`<button type="button" class="btn btn-ghost detect-pick browse-nav" data-path="${esc(e.path)}">${esc(e.name)}<span class="detect-tag">${e.writable ? 'writable' : 'read-only'}</span></button>`);
+  }
+  // The track count is what tells you this is the right folder. A library of
+  // loose files under a few album folders otherwise renders as almost empty,
+  // because only directories are listed.
+  const tracks = data.audioFiles > 0
+    ? ` <span class="detect-tag">${data.audioFiles.toLocaleString()} audio ${data.audioFiles === 1 ? 'file' : 'files'} here</span>`
+    : (data.path && !data.entries?.length ? ' <span class="detect-tag">empty</span>' : '');
+  const here = data.path
+    ? `<code>${esc(data.path)}</code>${tracks} ${data.writable ? '' : '<strong>(Octo cannot write here)</strong>'}`
+    : 'Drives';
+  const note = data.containerised
+    ? '<div class="detect-tag">Octo runs in a container, so this is what it can see — the host\'s own drives are not visible unless mounted.</div>'
+    : '';
+  const useBtn = data.path && data.exists
+    ? `<button type="button" class="btn" id="browse-use" data-path="${esc(data.path)}">Use this folder</button>`
+    : '';
+  const truncated = data.truncated ? '<div class="detect-tag">Showing the first 1000 folders.</div>' : '';
+
+  result.innerHTML = `${here}${note}<div class="detect-list">${rows.join('')}</div>${truncated}<div style="margin-top:8px">${useBtn}</div>`;
+
+  result.querySelectorAll('.browse-nav').forEach(b =>
+    b.addEventListener('click', () => openBrowse(b.dataset.path)));
+  document.getElementById('browse-use')?.addEventListener('click', () => {
+    input.value = data.path;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    result.innerHTML = `Set to <code>${esc(data.path)}</code>. Save, then restart Octo to apply.`;
+  });
+}
+
+async function openBrowse(path) {
+  const result = document.getElementById('browse-result');
+  const input = document.getElementById('f-download-path');
+  if (!result || !input) return;
+  result.hidden = false;
+  result.textContent = 'Loading…';
+  try {
+    let r = await browseFetch(path);
+    if (r.status === 401) {
+      if (!await browseAuthenticate(result)) return;
+      r = await browseFetch(path);
+    }
+    if (!r.ok) {
+      const data = await r.json().catch(() => ({}));
+      result.innerHTML = esc(data.error || `Browse failed (HTTP ${r.status}).`);
+      return;
+    }
+    renderBrowse(await r.json(), result, input);
+  } catch (e) {
+    result.textContent = 'Browse failed: ' + (e?.message || 'unknown error');
+  }
+}
+
+document.getElementById('btn-browse-path')?.addEventListener('click', () => {
+  const current = document.getElementById('f-download-path')?.value?.trim();
+  openBrowse(current || effectiveLibraryPath || '');
+});
+
+// ────────────────────────────────────────────────────────────────
 // Detect Subsonic/Navidrome server on the local network
 // ────────────────────────────────────────────────────────────────
 const detectBtn = document.getElementById('btn-detect-server');

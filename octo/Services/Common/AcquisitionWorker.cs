@@ -1,3 +1,6 @@
+using Octo.Services.Notifications;
+using Octo.Services.Soulseek;
+
 namespace Octo.Services.Common;
 
 /// <summary>
@@ -13,13 +16,18 @@ public sealed class AcquisitionWorker : BackgroundService
 {
     private readonly TrackAcquisitionQueue _queue;
     private readonly IDownloadService _downloads;
+    private readonly ExternalIdRegistry _idRegistry;
+    private readonly NotificationService _notifications;
     private readonly ILogger<AcquisitionWorker> _logger;
 
     public AcquisitionWorker(TrackAcquisitionQueue queue, IDownloadService downloads,
+        ExternalIdRegistry idRegistry, NotificationService notifications,
         ILogger<AcquisitionWorker> logger)
     {
         _queue = queue;
         _downloads = downloads;
+        _idRegistry = idRegistry;
+        _notifications = notifications;
         _logger = logger;
     }
 
@@ -60,6 +68,12 @@ public sealed class AcquisitionWorker : BackgroundService
             {
                 _logger.LogError(ex, "Acquisition failed for {Provider}:{Id}",
                     request.Provider, request.ExternalId);
+                // Stars only: a shed play-triggered acquisition is a hint, a failed
+                // star is the user's explicit ask going unmet. This is the one place
+                // a terminal failure surfaces exactly once per gesture (album-walk
+                // per-track failures are caught inside the walk and aggregate into
+                // its summary instead).
+                if (request.IsStar) NotifyFailed(request, ex);
                 request.Completion.TrySetException(ex);
             }
             finally
@@ -71,5 +85,32 @@ public sealed class AcquisitionWorker : BackgroundService
         }
 
         _logger.LogInformation("Acquisition worker stopped");
+    }
+
+    /// <summary>
+    /// Own try/catch on purpose: a notification error must never disturb the
+    /// TrySetException/queue-release bookkeeping around it. Metadata comes from the
+    /// same routing pair the download path itself uses, so the names match what the
+    /// user starred.
+    /// </summary>
+    private void NotifyFailed(AcquisitionRequest request, Exception ex)
+    {
+        try
+        {
+            var routing = _idRegistry.Lookup(request.ExternalId)
+                ?? SoulseekMetadataService.TryDecodeExternalId(request.ExternalId);
+            _notifications.Notify(new NotificationEvent
+            {
+                Type = NotificationEventType.DownloadFailed,
+                Artist = routing?.Artist,
+                Title = routing?.Title,
+                Album = routing?.Album,
+                Detail = ex.Message,
+            });
+        }
+        catch (Exception nex)
+        {
+            _logger.LogWarning("Failure notification skipped: {Msg}", nex.Message);
+        }
     }
 }

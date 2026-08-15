@@ -29,10 +29,15 @@ public class AdminController : ControllerBase
     private readonly IOptionsMonitor<SubsonicSettings> _subsonicOpts;
     private readonly IOptionsMonitor<SoulseekSettings> _soulseekOpts;
     private readonly IOptionsMonitor<LastFmSettings> _lastFmOpts;
+    private readonly IOptionsMonitor<NotificationSettings> _notificationOpts;
+    private readonly Octo.Services.Notifications.NotificationService _notifications;
     private readonly IConfiguration _config;
     private readonly SoulseekClient _slskd;
     private readonly SubsonicProxyService _proxy;
     private readonly SubsonicDiscoveryService _discovery;
+    private readonly NavidromeIdentityService _navIdentity;
+    private readonly DirectoryBrowser _browser;
+    private readonly BrowseSessionStore _browseSessions;
     private readonly Octo.Services.Local.DownloadHistoryService _history;
     private readonly Octo.Services.Metadata.DeezerMetadataService _deezer;
     private readonly Octo.Services.CoverArt.CoverArtAggregator _coverArt;
@@ -45,10 +50,15 @@ public class AdminController : ControllerBase
         IOptionsMonitor<SubsonicSettings> subsonicOpts,
         IOptionsMonitor<SoulseekSettings> soulseekOpts,
         IOptionsMonitor<LastFmSettings> lastFmOpts,
+        IOptionsMonitor<NotificationSettings> notificationOpts,
+        Octo.Services.Notifications.NotificationService notifications,
         IConfiguration config,
         SoulseekClient slskd,
         SubsonicProxyService proxy,
         SubsonicDiscoveryService discovery,
+        NavidromeIdentityService navIdentity,
+        DirectoryBrowser browser,
+        BrowseSessionStore browseSessions,
         Octo.Services.Local.DownloadHistoryService history,
         Octo.Services.Metadata.DeezerMetadataService deezer,
         Octo.Services.CoverArt.CoverArtAggregator coverArt,
@@ -62,10 +72,15 @@ public class AdminController : ControllerBase
         _subsonicOpts = subsonicOpts;
         _soulseekOpts = soulseekOpts;
         _lastFmOpts = lastFmOpts;
+        _notificationOpts = notificationOpts;
+        _notifications = notifications;
         _config = config;
         _slskd = slskd;
         _proxy = proxy;
         _discovery = discovery;
+        _navIdentity = navIdentity;
+        _browser = browser;
+        _browseSessions = browseSessions;
         _history = history;
         _httpFactory = httpFactory;
         _lifetime = lifetime;
@@ -84,6 +99,155 @@ public class AdminController : ControllerBase
         var servers = await _discovery.ScanAsync(ct);
         return Ok(new { servers });
     }
+
+    /// <summary>
+    /// Where downloads will actually land, and why. Octo fronts Navidrome, so the
+    /// library Navidrome scans is the source of truth and the default; this states
+    /// the whole chain (what Navidrome reports, whether Octo can see it, what is
+    /// therefore in effect) so "my downloads went nowhere" is answerable from the
+    /// UI instead of the container logs.
+    /// </summary>
+    [HttpGet("library-status")]
+    public async Task<IActionResult> LibraryStatus(CancellationToken ct)
+    {
+        var subsonic = _subsonicOpts.CurrentValue;
+        var configured = _config["Library:DownloadPath"] ?? "";
+
+        // Cheap when already detected: this is TTL-cached inside the service.
+        await _navIdentity.DetectMusicFolderAsync(ct: ct);
+
+        var reported = _navIdentity.DetectedMusicFolder;
+        var effective = _navIdentity.EffectiveDownloadPath(configured);
+        var libraries = _navIdentity.KnownLibraries
+            .Select(l => new { l.Id, l.Name, l.Folder, visible = Directory.Exists(l.Folder) })
+            .ToList();
+
+        return Ok(new
+        {
+            autoDetect = subsonic.AutoDetectDownloadPath,
+            pinnedLibraryPath = subsonic.LibraryPath ?? "",
+            navidromeReports = reported,
+            // Navidrome describes paths as IT sees them. Whether Octo can see the
+            // same path is the difference between downloads being scanned and
+            // vanishing, so it is stated rather than implied.
+            visibleToOcto = !string.IsNullOrEmpty(reported) && Directory.Exists(reported),
+            configuredFallback = configured,
+            effectiveDownloadPath = effective,
+            writable = !string.IsNullOrEmpty(effective) && Directory.Exists(effective)
+                       && DirectoryBrowser.IsWritable(effective),
+            rescanAuthenticated = _navIdentity.GetScanAuth() != null,
+            libraries,
+        });
+    }
+
+    /// <summary>
+    /// Exchange Navidrome admin credentials for a short-lived browse token.
+    ///
+    /// Credentials arrive in the body, never the query string, so they cannot end up
+    /// in access logs or a referrer. Verification is delegated to the Navidrome Octo
+    /// already fronts: no new credential store, and admin rights are Navidrome's call
+    /// rather than something Octo asserts for itself.
+    /// </summary>
+    [HttpPost("browse/auth")]
+    public async Task<IActionResult> BrowseAuth([FromBody] BrowseAuthRequest req, CancellationToken ct)
+    {
+        var url = _subsonicOpts.CurrentValue.Url?.TrimEnd('/');
+        if (string.IsNullOrEmpty(url))
+            return StatusCode(503, new { error = "Navidrome URL is not configured yet." });
+        if (req is null || string.IsNullOrWhiteSpace(req.Username) || string.IsNullOrWhiteSpace(req.Password))
+            return Unauthorized(new { error = "Username and password are required." });
+
+        try
+        {
+            var http = _httpFactory.CreateClient();
+            var payload = JsonSerializer.Serialize(new { username = req.Username, password = req.Password });
+            using var content = new StringContent(payload, System.Text.Encoding.UTF8, "application/json");
+            using var resp = await http.PostAsync($"{url}/auth/login", content, ct);
+            if (!resp.IsSuccessStatusCode)
+                return Unauthorized(new { error = "Navidrome rejected those credentials." });
+
+            using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
+            var isAdmin = doc.RootElement.TryGetProperty("isAdmin", out var adminEl)
+                          && adminEl.ValueKind == JsonValueKind.True;
+            if (!isAdmin)
+                return Unauthorized(new { error = "That account is not a Navidrome admin." });
+
+            _logger.LogInformation("Browse session opened for Navidrome admin {User}", req.Username);
+            var token = _browseSessions.Create(req.Username);
+
+            // Hand the session back as an HttpOnly cookie rather than something the
+            // page has to hold. It survives a reload, so the user is not asked to
+            // sign in again every time they come back to the settings, and script
+            // on the page cannot read it even if something managed to inject some.
+            // Secure only over HTTPS, since this is normally reached over plain HTTP
+            // on a LAN and a Secure cookie would simply be dropped there.
+            Response.Cookies.Append(BrowseCookieName, token, new CookieOptions
+            {
+                HttpOnly = true,
+                SameSite = SameSiteMode.Strict,
+                Secure = Request.IsHttps,
+                Path = "/api/admin",
+                MaxAge = BrowseSessionStore.Ttl,
+            });
+            return Ok(new { ok = true });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("Browse auth against Navidrome failed: {Msg}", ex.Message);
+            return StatusCode(502, new { error = "Could not reach Navidrome to verify credentials." });
+        }
+    }
+
+    /// <summary>
+    /// List directories so the download folder can be picked rather than typed.
+    /// Requires a token from browse/auth; a 401 discloses nothing about the
+    /// filesystem, not even whether a path exists.
+    /// </summary>
+    [HttpGet("browse")]
+    public IActionResult Browse([FromQuery] string? path, [FromHeader(Name = "X-Octo-Browse-Token")] string? token)
+    {
+        // Cookie first (how the admin UI authenticates), header second so the
+        // endpoint stays usable from curl or a script without one.
+        var session = Request.Cookies[BrowseCookieName] ?? token;
+        if (!_browseSessions.Validate(session))
+            return Unauthorized(new { error = "Browse session required." });
+
+        var result = _browser.Browse(path);
+        return Ok(new
+        {
+            result.Path,
+            result.Parent,
+            result.Separator,
+            result.Writable,
+            result.Exists,
+            result.Entries,
+            result.Truncated,
+            result.AudioFiles,
+            // Under Docker this is the container's mount namespace, not the host's
+            // drives. Saying so in the payload keeps the UI honest about why a
+            // user's D: drive is nowhere to be seen.
+            containerised = !OperatingSystem.IsWindows() && Directory.Exists("/.dockerenv"),
+        });
+    }
+
+    /// <summary>
+    /// Sends a test notification through every configured sink so URLs and tokens can
+    /// be verified without waiting for a real download. Reports per-sink outcome,
+    /// including the transport's real error text on failure.
+    /// </summary>
+    [HttpPost("test-notification")]
+    public async Task<IActionResult> TestNotification(CancellationToken ct)
+    {
+        var results = await _notifications.SendTestAsync(ct);
+        return Ok(new { results });
+    }
+
+    /// <summary>Credentials for <see cref="BrowseAuth"/>. Body-only by design.</summary>
+    public record BrowseAuthRequest(string? Username, string? Password);
+
+    /// <summary>Cookie carrying the browse session. Scoped to /api/admin so it is
+    /// never sent with the Subsonic traffic Octo proxies.</summary>
+    private const string BrowseCookieName = "octo_browse";
 
     /// <summary>The running log of songs Octo has fetched, newest first.</summary>
     [HttpGet("downloads")]
@@ -124,6 +288,7 @@ public class AdminController : ControllerBase
         var subsonic = _subsonicOpts.CurrentValue;
         var soulseek = _soulseekOpts.CurrentValue;
         var lastfm = _lastFmOpts.CurrentValue;
+        var notif = _notificationOpts.CurrentValue;
 
         // Use Dictionary<string, object> so System.Text.Json doesn't camelCase
         // the keys. The admin UI's form fields are named "Subsonic.FolderStructure"
@@ -144,6 +309,7 @@ public class AdminController : ControllerBase
                 // fields never pre-filled with the saved value.
                 ["DownloadSource"] = subsonic.DownloadSource.ToString(),
                 ["AutoDetectDownloadPath"] = subsonic.AutoDetectDownloadPath,
+                ["LibraryPath"] = subsonic.LibraryPath,
                 ["FolderStructure"] = subsonic.FolderStructure.ToString(),
                 ["UseLocalStaging"] = subsonic.UseLocalStaging,
                 ["ExplicitFilter"] = subsonic.ExplicitFilter.ToString(),
@@ -175,6 +341,17 @@ public class AdminController : ControllerBase
                 ["EnableRadio"] = lastfm.EnableRadio,
                 ["RadioTrackCount"] = lastfm.RadioTrackCount,
                 ["RadioCacheDurationHours"] = lastfm.RadioCacheDurationHours,
+            },
+            ["Notifications"] = new Dictionary<string, object>
+            {
+                ["NtfyUrl"] = notif.NtfyUrl ?? "",
+                ["NtfyToken"] = notif.NtfyToken ?? "",
+                ["DiscordWebhookUrl"] = notif.DiscordWebhookUrl ?? "",
+                ["NotifyDownloadStarted"] = notif.NotifyDownloadStarted,
+                ["NotifyDownloadCompleted"] = notif.NotifyDownloadCompleted,
+                ["NotifyLosslessFallback"] = notif.NotifyLosslessFallback,
+                ["NotifyDownloadFailed"] = notif.NotifyDownloadFailed,
+                ["NotifyAlbumCompleted"] = notif.NotifyAlbumCompleted,
             },
             ["_meta"] = new Dictionary<string, object>
             {
@@ -250,6 +427,7 @@ public class AdminController : ControllerBase
         var subsonic = _subsonicOpts.CurrentValue;
         var soulseek = _soulseekOpts.CurrentValue;
         var lastfm = _lastFmOpts.CurrentValue;
+        var notif = _notificationOpts.CurrentValue;
 
         var effective = new JsonObject
         {
@@ -264,6 +442,7 @@ public class AdminController : ControllerBase
                 ["LosslessWaitTimeoutSeconds"] = subsonic.LosslessWaitTimeoutSeconds,
                 ["DownloadSource"] = subsonic.DownloadSource.ToString(),
                 ["AutoDetectDownloadPath"] = subsonic.AutoDetectDownloadPath,
+                ["LibraryPath"] = subsonic.LibraryPath,
                 ["FolderStructure"] = subsonic.FolderStructure.ToString(),
                 ["UseLocalStaging"] = subsonic.UseLocalStaging,
                 ["ExplicitFilter"] = subsonic.ExplicitFilter.ToString(),
@@ -295,6 +474,17 @@ public class AdminController : ControllerBase
                 ["EnableRadio"] = lastfm.EnableRadio,
                 ["RadioTrackCount"] = lastfm.RadioTrackCount,
                 ["RadioCacheDurationHours"] = lastfm.RadioCacheDurationHours,
+            },
+            ["Notifications"] = new JsonObject
+            {
+                ["NtfyUrl"] = notif.NtfyUrl ?? "",
+                ["NtfyToken"] = notif.NtfyToken ?? "",
+                ["DiscordWebhookUrl"] = notif.DiscordWebhookUrl ?? "",
+                ["NotifyDownloadStarted"] = notif.NotifyDownloadStarted,
+                ["NotifyDownloadCompleted"] = notif.NotifyDownloadCompleted,
+                ["NotifyLosslessFallback"] = notif.NotifyLosslessFallback,
+                ["NotifyDownloadFailed"] = notif.NotifyDownloadFailed,
+                ["NotifyAlbumCompleted"] = notif.NotifyAlbumCompleted,
             },
         };
         var json = effective.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
@@ -365,7 +555,7 @@ public class AdminController : ControllerBase
             "Subsonic:Url", "Subsonic:StorageMode", "Subsonic:DownloadMode",
             "Subsonic:DownloadOnStar", "Subsonic:DownloadAlbumOnStar",
             "Subsonic:WaitForLosslessOnPlay", "Subsonic:LosslessWaitTimeoutSeconds",
-            "Subsonic:DownloadSource", "Subsonic:AutoDetectDownloadPath",
+            "Subsonic:DownloadSource", "Subsonic:AutoDetectDownloadPath", "Subsonic:LibraryPath",
             "Subsonic:FolderStructure",
             "Subsonic:UseLocalStaging", "Subsonic:ExplicitFilter",
             "Subsonic:CacheDurationHours", "Subsonic:EnableExternalPlaylists",
@@ -377,6 +567,11 @@ public class AdminController : ControllerBase
             "YouTube:ShimUrl",
             "LastFm:ApiKey", "LastFm:EnableRadio", "LastFm:RadioTrackCount",
             "LastFm:RadioCacheDurationHours",
+            "Notifications:NtfyUrl", "Notifications:NtfyToken",
+            "Notifications:DiscordWebhookUrl",
+            "Notifications:NotifyDownloadStarted", "Notifications:NotifyDownloadCompleted",
+            "Notifications:NotifyLosslessFallback", "Notifications:NotifyDownloadFailed",
+            "Notifications:NotifyAlbumCompleted",
         };
         var rows = new List<object>();
         foreach (var k in keys)
@@ -385,7 +580,11 @@ public class AdminController : ControllerBase
             // Mask anything that smells like a secret so a screenshot of the
             // page doesn't leak credentials.
             var isSecret = k.EndsWith("Password", StringComparison.OrdinalIgnoreCase)
-                        || k.EndsWith("ApiKey", StringComparison.OrdinalIgnoreCase);
+                        || k.EndsWith("ApiKey", StringComparison.OrdinalIgnoreCase)
+                        // A Discord webhook URL embeds its token, so the whole URL is
+                        // the secret; ntfy tokens are credentials outright.
+                        || k.EndsWith("Token", StringComparison.OrdinalIgnoreCase)
+                        || k.EndsWith("WebhookUrl", StringComparison.OrdinalIgnoreCase);
             var display = isSecret && !string.IsNullOrEmpty(v)
                 ? new string('•', Math.Min(v.Length, 16))
                 : v;

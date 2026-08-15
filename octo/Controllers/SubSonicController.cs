@@ -1209,9 +1209,15 @@ public class SubsonicController : ControllerBase
             var contentType = result.ContentType ?? "image/jpeg";
             return File(result.Body, contentType);
         }
-        catch
+        catch (Exception ex)
         {
-            return ServePlaceholder();
+            // Unbranded on purpose. This is the user's own file; stamping the Octo
+            // logo on it makes Octo look like it is claiming a track the user
+            // already owned. Reading embedded art off a cloud-backed mount can take
+            // seconds cold, so this path is reached by ordinary slowness, not just
+            // by missing art — all the more reason not to brand it.
+            _logger.LogDebug("cover art relay failed for local id {Id}: {Msg}", id, ex.Message);
+            return ServePlaceholder(branded: false);
         }
     }
 
@@ -1221,9 +1227,9 @@ public class SubsonicController : ControllerBase
     /// drop play-queue entries whose cover-art request fails, so we always serve
     /// something rather than fail.
     /// </summary>
-    private IActionResult ServePlaceholder()
+    private IActionResult ServePlaceholder(bool branded = true)
     {
-        var bytes = _coverArtService?.GetPlaceholderCover();
+        var bytes = _coverArtService?.GetPlaceholderCover(branded);
         if (bytes == null || bytes.Length == 0) return NotFound();
         return File(bytes, "image/jpeg");
     }
@@ -1590,10 +1596,11 @@ public class SubsonicController : ControllerBase
         _radioQueueStore.Register(resolvedSongs.Select(s => s.Id));
 
         // Fire-and-forget prewarm for the top of the queue so the first few
-        // taps don't pay the full cold yt-dlp resolve. Cap below the shim's
-        // MAX_CONCURRENT_YTDLP=8 (the prewarm method handles its own
-        // concurrency limit internally). Local songs are skipped automatically
-        // by the prewarmer (they have no registry entry).
+        // taps don't pay the full cold yt-dlp resolve. The prewarm method
+        // handles its own concurrency limit, shared across every trigger, and
+        // marks its shim calls as background so they cannot occupy the slots
+        // the shim reserves for interactive plays. Local songs are skipped
+        // automatically by the prewarmer (they have no registry entry).
         _ = _metadataService.PrewarmYouTubeIdsAsync(resolvedSongs, topN: 8);
 
         return BuildSimilarSongsResponse(format, resolvedSongs, responseKey);

@@ -42,6 +42,8 @@ builder.Services.Configure<SoulseekSettings>(
     builder.Configuration.GetSection("Soulseek"));
 builder.Services.Configure<LastFmSettings>(
     builder.Configuration.GetSection("LastFm"));
+builder.Services.Configure<NotificationSettings>(
+    builder.Configuration.GetSection("Notifications"));
 
 builder.Services.AddSingleton<ILocalLibraryService, LocalLibraryService>();
 
@@ -64,9 +66,9 @@ builder.Services.AddSingleton<YouTubeResolver>();
 builder.Services.AddHttpClient(YouTubeResolver.SearchClientName, c =>
 {
     // 60s rather than 30s because back-to-back search3 prewarm bursts can fill
-    // the shim's MAX_CONCURRENT_YTDLP=8 gate and queue requests behind 5-8s
-    // yt-dlp ytsearch1: invocations. 30s was canceling the tail of every
-    // prewarm batch.
+    // the shim's yt-dlp gate (MAX_CONCURRENT_YTDLP, which ships as 5) and queue
+    // requests behind 5-8s yt-dlp ytsearch1: invocations. 30s was canceling the
+    // tail of every prewarm batch.
     c.Timeout = TimeSpan.FromSeconds(60);
 });
 builder.Services.AddHttpClient(YouTubeResolver.StreamClientName, c =>
@@ -77,6 +79,11 @@ builder.Services.AddSingleton<ExternalIdRegistry>();
 builder.Services.AddSingleton<RadioQueueStore>();
 builder.Services.AddSingleton<Octo.Services.Subsonic.NavidromeIdentityService>();
 builder.Services.AddSingleton<Octo.Services.Subsonic.SubsonicDiscoveryService>();
+builder.Services.AddSingleton<Octo.Services.Admin.DirectoryBrowser>();
+// Singleton so browse tokens survive between requests; they are in-memory only,
+// so a restart ends every browse session, which is the right trade for a token
+// that grants filesystem visibility.
+builder.Services.AddSingleton<Octo.Services.Admin.BrowseSessionStore>();
 builder.Services.AddSingleton<Octo.Services.Metadata.DeezerMetadataService>();
 
 // Deezer's public API allows roughly 50 requests per 5 seconds and signals refusal with
@@ -109,6 +116,18 @@ builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = TimeSpan.FromSe
 
 builder.Services.AddHttpClient<LastFmService>();
 builder.Services.AddSingleton<LastFmService>();
+
+// Push notifications (ntfy / Discord webhook). The orchestrator takes
+// IEnumerable<INotificationSink>, so adding a transport is one registration line.
+// Short timeout on purpose: a slow notification server must never be felt
+// anywhere near the download path.
+builder.Services.AddHttpClient(Octo.Services.Notifications.NotificationService.ClientName,
+    c => c.Timeout = TimeSpan.FromSeconds(10));
+builder.Services.AddSingleton<Octo.Services.Notifications.INotificationSink,
+    Octo.Services.Notifications.NtfySink>();
+builder.Services.AddSingleton<Octo.Services.Notifications.INotificationSink,
+    Octo.Services.Notifications.DiscordSink>();
+builder.Services.AddSingleton<Octo.Services.Notifications.NotificationService>();
 
 builder.Services.AddSingleton<IStartupValidator, SubsonicStartupValidator>();
 builder.Services.AddSingleton<IStartupValidator, SoulseekStartupValidator>();

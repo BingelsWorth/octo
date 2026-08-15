@@ -26,6 +26,7 @@ public abstract class BaseDownloadService : IDownloadService
     private readonly IServiceProvider _serviceProvider;
     private readonly NavidromeIdentityService _navIdentity;
     private readonly DownloadHistoryService _history;
+    protected readonly Octo.Services.Notifications.NotificationService Notifications;
 
     // The configured Library:DownloadPath. With auto-detect on this is only a
     // fallback used until Navidrome's real music folder is detected.
@@ -73,6 +74,7 @@ public abstract class BaseDownloadService : IDownloadService
         SubsonicSettings subsonicSettings,
         NavidromeIdentityService navIdentity,
         DownloadHistoryService history,
+        Octo.Services.Notifications.NotificationService notifications,
         IServiceProvider serviceProvider,
         ILogger logger)
     {
@@ -82,6 +84,7 @@ public abstract class BaseDownloadService : IDownloadService
         SubsonicSettings = subsonicSettings;
         _navIdentity = navIdentity;
         _history = history;
+        Notifications = notifications;
         _serviceProvider = serviceProvider;
         Logger = logger;
 
@@ -200,14 +203,15 @@ public abstract class BaseDownloadService : IDownloadService
     /// </summary>
     /// <param name="trackId">External track ID</param>
     /// <param name="song">Song metadata</param>
+    /// <param name="suppressNotify">Mute per-track notifications (album walk, cache fills)</param>
     /// <param name="cancellationToken">Cancellation token</param>
     /// <returns>Local file path where the track was saved</returns>
-    protected abstract Task<string> DownloadTrackAsync(string trackId, Song song, CancellationToken cancellationToken);
+    protected abstract Task<string> DownloadTrackAsync(string trackId, Song song, bool suppressNotify, CancellationToken cancellationToken);
 
     /// <summary>Record a completed download in the fetched-songs log. Best-effort:
     /// format + source are derived from the file extension (flac -> Soulseek/lossless,
     /// otherwise -> YouTube/lossy), which matches Octo's two download sources.</summary>
-    private async Task RecordHistoryAsync(Song song, string localPath)
+    private async Task RecordHistoryAsync(Song song, string localPath, bool suppressNotify)
     {
         try
         {
@@ -250,6 +254,28 @@ public abstract class BaseDownloadService : IDownloadService
                 SizeBytes = size,
                 DownloadedAt = DateTime.UtcNow.ToString("o"),
             });
+
+            // Same chokepoint as the fetched-songs log, reusing the locals it just
+            // assembled (Deezer-enriched cover and album included) — anything worth
+            // logging is worth telling the user about, with the same data.
+            if (!suppressNotify)
+            {
+                Notifications.Notify(new Octo.Services.Notifications.NotificationEvent
+                {
+                    Type = Octo.Services.Notifications.NotificationEventType.DownloadCompleted,
+                    Artist = song.Artist,
+                    Title = song.Title,
+                    Album = album,
+                    Format = string.IsNullOrEmpty(ext) ? "?" : ext,
+                    Source = ext == "FLAC" ? "Soulseek" : "YouTube",
+                    CoverArtUrl = cover,
+                    SizeBytes = size,
+                    // EnrichAndTagAsync ran before this hook, so these are the
+                    // Deezer-enriched values the file itself was tagged with.
+                    DurationSeconds = song.Duration,
+                    Year = song.Year,
+                });
+            }
         }
         catch (Exception ex)
         {
@@ -283,7 +309,11 @@ public abstract class BaseDownloadService : IDownloadService
     /// otherwise skips library registration, the fetched-songs log and the rescan, which
     /// is wrong for a deliberate "keep this" gesture like hearting an album.
     /// </param>
-    protected async Task<string> DownloadSongInternalAsync(string externalProvider, string externalId, bool triggerAlbumDownload, CancellationToken cancellationToken = default, bool forcePermanent = false)
+    /// <param name="suppressNotify">
+    /// Mute per-track notifications. Set by the album walk, which fires one summary
+    /// at the end instead of a ping per track.
+    /// </param>
+    protected async Task<string> DownloadSongInternalAsync(string externalProvider, string externalId, bool triggerAlbumDownload, CancellationToken cancellationToken = default, bool forcePermanent = false, bool suppressNotify = false)
     {
         if (externalProvider != ProviderName)
         {
@@ -292,6 +322,9 @@ public abstract class BaseDownloadService : IDownloadService
 
         var songId = $"ext-{externalProvider}-{externalId}";
         var isCache = !forcePermanent && SubsonicSettings.StorageMode == StorageMode.Cache;
+        // Cache-mode fills are background plumbing, not a user gesture: they skip the
+        // fetched-songs log, so they skip notifications for the same reason.
+        var silence = suppressNotify || isCache;
         
         // Acquire lock BEFORE checking existence to prevent race conditions with concurrent requests
         await DownloadLock.WaitAsync(cancellationToken);
@@ -398,7 +431,7 @@ public abstract class BaseDownloadService : IDownloadService
             // orphan that Octo has no record of. A client giving up on a slow
             // download used to abort exactly here, which is why a completed
             // download could never be played.
-            var localPath = await DownloadTrackAsync(externalId, song, cancellationToken);
+            var localPath = await DownloadTrackAsync(externalId, song, silence, cancellationToken);
 
             downloadInfo.Status = DownloadStatus.Completed;
             downloadInfo.LocalPath = localPath;
@@ -434,7 +467,7 @@ public abstract class BaseDownloadService : IDownloadService
             if (!isCache)
             {
                 await LocalLibraryService.RegisterDownloadedSongAsync(song, localPath);
-                await RecordHistoryAsync(song, localPath);
+                await RecordHistoryAsync(song, localPath, silence);
 
                 // Trigger a Subsonic library rescan (with debounce)
                 _ = Task.Run(async () =>
@@ -500,8 +533,11 @@ public abstract class BaseDownloadService : IDownloadService
             .Where(s => s.ExternalId != excludeTrackExternalId && !string.IsNullOrEmpty(s.ExternalId))
             .ToList();
 
-        Logger.LogInformation("Found {Count} additional tracks to download for album '{AlbumTitle}'", 
+        Logger.LogInformation("Found {Count} additional tracks to download for album '{AlbumTitle}'",
             tracksToDownload.Count, album.Title);
+
+        // Per-track notifications are muted below; these feed one summary instead.
+        int succeeded = 0, lossless = 0, failed = 0;
 
         foreach (var track in tracksToDownload)
         {
@@ -534,7 +570,9 @@ public abstract class BaseDownloadService : IDownloadService
                 }
 
                 Logger.LogInformation("Downloading track '{Title}' from album '{Album}'", track.Title, album.Title);
-                await DownloadSongInternalAsync(ProviderName, track.ExternalId!, triggerAlbumDownload: false, CancellationToken.None, forcePermanent: true);
+                var path = await DownloadSongInternalAsync(ProviderName, track.ExternalId!, triggerAlbumDownload: false, CancellationToken.None, forcePermanent: true, suppressNotify: true);
+                succeeded++;
+                if (path.EndsWith(".flac", StringComparison.OrdinalIgnoreCase)) lossless++;
 
                 // Force a rescan per track so the album fills in progressively in the
                 // client instead of appearing all at once at the end. The per-download
@@ -545,11 +583,33 @@ public abstract class BaseDownloadService : IDownloadService
             catch (Exception ex)
             {
                 Logger.LogWarning(ex, "Failed to download track {TrackId} '{Title}'", track.ExternalId, track.Title);
+                failed++;
             }
         }
 
         Logger.LogInformation("Completed background download for album '{AlbumTitle}'", album.Title);
+
+        var summary = BuildAlbumSummary(album, succeeded, lossless, failed);
+        if (summary is not null) Notifications.Notify(summary);
     }
+
+    /// <summary>
+    /// Null when the walk did no work — a re-star whose tracks are all already
+    /// present must not ping the phone. Counts cover the walked tracks only; the
+    /// track whose star triggered the walk got its own DownloadCompleted.
+    /// </summary>
+    internal static Octo.Services.Notifications.NotificationEvent? BuildAlbumSummary(
+        Album album, int succeeded, int lossless, int failed)
+        => succeeded + failed == 0 ? null : new Octo.Services.Notifications.NotificationEvent
+        {
+            Type = Octo.Services.Notifications.NotificationEventType.AlbumCompleted,
+            Artist = album.Artist,
+            Title = album.Title,
+            CoverArtUrl = album.CoverArtUrl,
+            TrackCount = succeeded,
+            LosslessCount = lossless,
+            FailedCount = failed,
+        };
     
     #endregion
     
