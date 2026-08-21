@@ -79,10 +79,12 @@ async function refreshStatus() {
 function setStatusCard(svc, probe) {
   const card = document.querySelector(`.status-card[data-svc="${svc}"]`);
   if (!card) return;
-  card.classList.toggle('bad', !probe.ok);
+  const state = probe.warning ? 'warn' : probe.ok ? 'ok' : 'bad';
+  card.classList.toggle('bad', state === 'bad');
+  card.classList.toggle('warn', state === 'warn');
   const dot = card.querySelector('.status-dot');
   const body = card.querySelector('.status-card-body');
-  if (dot)  dot.className  = `status-dot ${probe.ok ? 'ok' : 'bad'}`;
+  if (dot)  dot.className  = `status-dot ${state}`;
   if (body) body.textContent = probe.detail || (probe.ok ? 'online' : 'unreachable');
 }
 
@@ -109,9 +111,12 @@ async function loadSettings() {
     const [section, key] = el.name.split('.');
     const value = currentSettings?.[section]?.[key];
     if (value === undefined || value === null) return;
-    if (el.type === 'checkbox') el.checked = !!value;
+    if (el.dataset.json === 'true') el.value = JSON.stringify(value ?? []);
+    else if (el.type === 'checkbox') el.checked = !!value;
     else el.value = value;
   });
+
+  renderHeartSourceOrder(currentSettings?.Subsonic?.HeartDownloadSources);
 
   // Meta references
   const cfgPath = document.getElementById('meta-config-path');
@@ -151,6 +156,7 @@ function ensureSaveBar(form) {
   actions.className = 'form-actions';
   actions.innerHTML = `
     <button type="submit" class="btn btn-primary">Save</button>
+    ${form.id === 'lidarr-connection-form' ? '<button type="button" class="btn btn-ghost" id="lidarr-test-connection">Test connection</button>' : ''}
     <span class="saved-status"></span>
     <span class="restart-hint">
       <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
@@ -183,7 +189,10 @@ document.querySelectorAll('form[data-section]').forEach(form => {
       const [section, key] = el.name.split('.');
       patch[section] = patch[section] || {};
       let value;
-      if (el.type === 'checkbox') value = el.checked;
+      if (el.dataset.json === 'true') {
+        try { value = JSON.parse(el.value || '[]'); }
+        catch { value = []; }
+      } else if (el.type === 'checkbox') value = el.checked;
       else if (el.type === 'number' || el.dataset.number === 'true') {
         value = el.value === '' ? null : Number(el.value);
         if (Number.isNaN(value)) value = null;
@@ -228,6 +237,150 @@ document.querySelectorAll('form[data-section]').forEach(form => {
   });
 });
 
+// Heart acquisition is a short priority chain, not a workflow graph. Keep all
+// sources visible so disabling one never destroys the user's chosen order.
+const heartSourceMeta = {
+  Soulseek: { title: 'Soulseek', detail: 'Lossless FLAC from slskd peers' },
+  YouTube: { title: 'YouTube', detail: 'Lossy MP3 from the yt-dlp shim' },
+  Lidarr: { title: 'Lidarr', detail: 'Album-level handoff to your Lidarr server' },
+};
+let heartSourceSteps = [];
+
+function normalizeHeartSourceSteps(steps) {
+  const seen = new Set();
+  const normalized = [];
+  (Array.isArray(steps) ? steps : []).forEach(step => {
+    const source = step?.Source ?? step?.source;
+    if (!heartSourceMeta[source] || seen.has(source)) return;
+    seen.add(source);
+    normalized.push({ Source: source, Enabled: Boolean(step?.Enabled ?? step?.enabled) });
+  });
+  ['Soulseek', 'YouTube', 'Lidarr'].forEach(source => {
+    if (!seen.has(source)) normalized.push({ Source: source, Enabled: source === 'Soulseek' });
+  });
+  return normalized;
+}
+
+function renderHeartSourceOrder(steps = heartSourceSteps) {
+  const list = document.getElementById('heart-source-order');
+  if (!list) return;
+  heartSourceSteps = normalizeHeartSourceSteps(steps);
+  list.innerHTML = heartSourceSteps.map((step, index) => {
+    const meta = heartSourceMeta[step.Source];
+    return `
+      <div class="source-priority-row${step.Enabled ? '' : ' is-disabled'}"
+           data-source="${step.Source}" data-index="${index}">
+        <button type="button" class="source-drag" draggable="true"
+                aria-label="Drag ${meta.title} to reorder" title="Drag to reorder">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3h1M10 3h1M5 8h1M10 8h1M5 13h1M10 13h1"/></svg>
+        </button>
+        <span class="source-step" aria-hidden="true">${index + 1}</span>
+        <span class="source-copy">
+          <span class="source-title">${meta.title}</span>
+          <span class="source-detail">${meta.detail}</span>
+        </span>
+        <span class="source-move">
+          <button type="button" data-move="up" aria-label="Move ${meta.title} up" ${index === 0 ? 'disabled' : ''}>
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 10 4-4 4 4"/></svg>
+          </button>
+          <button type="button" data-move="down" aria-label="Move ${meta.title} down" ${index === heartSourceSteps.length - 1 ? 'disabled' : ''}>
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg>
+          </button>
+        </span>
+        <label class="switch source-enabled">
+          <input type="checkbox" aria-label="Enable ${meta.title}" ${step.Enabled ? 'checked' : ''} />
+          <span class="sw-track"></span><span class="sw-thumb"></span>
+        </label>
+      </div>`;
+  }).join('');
+  syncHeartSourceInput();
+}
+
+function syncHeartSourceInput() {
+  const input = document.getElementById('f-heart-download-sources');
+  const help = document.getElementById('heart-source-order-help');
+  if (input) {
+    input.value = JSON.stringify(heartSourceSteps);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+  if (help) help.textContent = heartSourceSteps.some(step => step.Enabled)
+    ? 'Drag a handle or use the arrow buttons to change priority. Disabled sources keep their position and are skipped.'
+    : 'No heart download sources are enabled. Hearts will not acquire files.';
+}
+
+function moveHeartSource(from, to) {
+  if (from === to || from < 0 || to < 0 ||
+      from >= heartSourceSteps.length || to >= heartSourceSteps.length) return;
+  const [step] = heartSourceSteps.splice(from, 1);
+  heartSourceSteps.splice(to, 0, step);
+  renderHeartSourceOrder();
+  document.querySelector(`.source-priority-row[data-index="${to}"] .source-drag`)?.focus();
+}
+
+const heartSourceList = document.getElementById('heart-source-order');
+heartSourceList?.addEventListener('click', event => {
+  const button = event.target.closest('[data-move]');
+  if (!button) return;
+  const row = button.closest('.source-priority-row');
+  const from = Number(row.dataset.index);
+  moveHeartSource(from, from + (button.dataset.move === 'up' ? -1 : 1));
+});
+heartSourceList?.addEventListener('change', event => {
+  if (!event.target.matches('.source-enabled input')) return;
+  const row = event.target.closest('.source-priority-row');
+  const source = row.dataset.source;
+  heartSourceSteps[Number(row.dataset.index)].Enabled = event.target.checked;
+  renderHeartSourceOrder();
+  document.querySelector(`.source-priority-row[data-source="${source}"] .source-enabled input`)?.focus();
+});
+heartSourceList?.addEventListener('dragstart', event => {
+  const handle = event.target.closest('.source-drag');
+  if (!handle) return;
+  const row = handle.closest('.source-priority-row');
+  event.dataTransfer.effectAllowed = 'move';
+  event.dataTransfer.setData('text/plain', row.dataset.index);
+  row.classList.add('is-dragging');
+});
+heartSourceList?.addEventListener('dragend', event => {
+  event.target.closest('.source-priority-row')?.classList.remove('is-dragging');
+});
+heartSourceList?.addEventListener('dragover', event => {
+  if (event.target.closest('.source-priority-row')) event.preventDefault();
+});
+heartSourceList?.addEventListener('drop', event => {
+  const row = event.target.closest('.source-priority-row');
+  if (!row) return;
+  event.preventDefault();
+  moveHeartSource(Number(event.dataTransfer.getData('text/plain')), Number(row.dataset.index));
+});
+
+document.getElementById('lidarr-test-connection')?.addEventListener('click', async (event) => {
+  const button = event.currentTarget;
+  const form = document.getElementById('lidarr-connection-form');
+  const status = form?.querySelector('.saved-status');
+  const baseUrl = document.getElementById('f-lidarr-url')?.value ?? '';
+  const apiKey = document.getElementById('f-lidarr-key')?.value ?? '';
+  button.disabled = true;
+  if (status) status.textContent = 'Testing…';
+  try {
+    const r = await fetch('/api/admin/lidarr/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ baseUrl, apiKey }),
+    });
+    const result = await r.json();
+    if (!r.ok) throw new Error(result.error || `HTTP ${r.status}`);
+    populateLidarrOptions(result.options || {});
+    if (status) status.textContent = result.message || 'Connected to Lidarr.';
+    toast(result.message || 'Connected to Lidarr.', 'ok');
+  } catch (err) {
+    if (status) status.textContent = `Test failed: ${err.message}`;
+    toast(`Lidarr test failed: ${err.message}`, 'error');
+  } finally {
+    button.disabled = false;
+  }
+});
+
 function isFieldDirty(el) {
   if (!currentSettings || !el.name?.includes('.')) return false;
   const [section, key] = el.name.split('.');
@@ -244,14 +397,12 @@ function isFieldDirty(el) {
 // Lidarr owns these choices. Keep them disabled until a saved connection can
 // supply real values; this avoids persisting a made-up profile id.
 async function loadLidarrOptions() {
-  const button = document.getElementById('lidarr-load-options');
   const status = document.getElementById('lidarr-options-status');
   const root = document.getElementById('f-lidarr-root');
   const quality = document.getElementById('f-lidarr-quality');
   const metadata = document.getElementById('f-lidarr-metadata');
   if (!root || !quality || !metadata) return;
 
-  if (button) button.disabled = true;
   if (status) status.textContent = 'Loading choices…';
   [root, quality, metadata].forEach(el => { el.disabled = true; });
   try {
@@ -259,34 +410,41 @@ async function loadLidarrOptions() {
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
 
-    const selectedRoot = currentSettings?.Lidarr?.RootFolderPath ?? '';
-    const selectedQuality = String(currentSettings?.Lidarr?.QualityProfileId ?? 0);
-    const selectedMetadata = String(currentSettings?.Lidarr?.MetadataProfileId ?? 0);
-    root.innerHTML = '<option value="">Choose a root folder</option>' +
-      (data.rootFolders || []).map(x => `<option value="${esc(x.path)}">${esc(x.path)}</option>`).join('');
-    quality.innerHTML = '<option value="0">Choose a quality profile</option>' +
-      (data.qualityProfiles || []).map(x => `<option value="${x.id}">${esc(x.name)}</option>`).join('');
-    metadata.innerHTML = '<option value="0">Choose a metadata profile</option>' +
-      (data.metadataProfiles || []).map(x => `<option value="${x.id}">${esc(x.name)}</option>`).join('');
-    root.value = selectedRoot;
-    quality.value = selectedQuality;
-    metadata.value = selectedMetadata;
-    [root, quality, metadata].forEach(el => { el.disabled = false; });
-    const empty = [];
-    if (!(data.rootFolders || []).length) empty.push('root folders');
-    if (!(data.qualityProfiles || []).length) empty.push('quality profiles');
-    if (!(data.metadataProfiles || []).length) empty.push('metadata profiles');
-    if (status) status.textContent = empty.length
-      ? `Connected, but Lidarr returned no ${empty.join(', ')}.`
-      : 'Connected. Choices loaded from Lidarr.';
+    populateLidarrOptions(data);
   } catch (err) {
     if (status) status.textContent = `Could not load choices: ${err.message}`;
-  } finally {
-    if (button) button.disabled = false;
   }
 }
 
-document.getElementById('lidarr-load-options')?.addEventListener('click', loadLidarrOptions);
+function populateLidarrOptions(data) {
+  const status = document.getElementById('lidarr-options-status');
+  const root = document.getElementById('f-lidarr-root');
+  const quality = document.getElementById('f-lidarr-quality');
+  const metadata = document.getElementById('f-lidarr-metadata');
+  if (!root || !quality || !metadata) return;
+  const selectedRoot = root.value || currentSettings?.Lidarr?.RootFolderPath || '';
+  const selectedQuality = quality.value !== '0'
+    ? quality.value : String(currentSettings?.Lidarr?.QualityProfileId ?? 0);
+  const selectedMetadata = metadata.value !== '0'
+    ? metadata.value : String(currentSettings?.Lidarr?.MetadataProfileId ?? 0);
+  root.innerHTML = '<option value="">Choose a root folder</option>' +
+    (data.rootFolders || []).map(x => `<option value="${esc(x.path)}">${esc(x.path)}</option>`).join('');
+  quality.innerHTML = '<option value="0">Choose a quality profile</option>' +
+    (data.qualityProfiles || []).map(x => `<option value="${x.id}">${esc(x.name)}</option>`).join('');
+  metadata.innerHTML = '<option value="0">Choose a metadata profile</option>' +
+    (data.metadataProfiles || []).map(x => `<option value="${x.id}">${esc(x.name)}</option>`).join('');
+  root.value = selectedRoot;
+  quality.value = selectedQuality;
+  metadata.value = selectedMetadata;
+  [root, quality, metadata].forEach(el => { el.disabled = false; });
+  const empty = [];
+  if (!(data.rootFolders || []).length) empty.push('root folders');
+  if (!(data.qualityProfiles || []).length) empty.push('quality profiles');
+  if (!(data.metadataProfiles || []).length) empty.push('metadata profiles');
+  if (status) status.textContent = empty.length
+    ? `Connected, but Lidarr returned no ${empty.join(', ')}.`
+    : 'Connected. Choices loaded from Lidarr.';
+}
 
 // ────────────────────────────────────────────────────────────────
 // Raw config editor

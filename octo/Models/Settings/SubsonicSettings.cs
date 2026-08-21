@@ -103,6 +103,20 @@ public enum DownloadSource
     Lidarr
 }
 
+/// <summary>A source that can participate in the ordered heart-acquisition chain.</summary>
+public enum HeartDownloadSource
+{
+    Soulseek,
+    YouTube,
+    Lidarr,
+}
+
+public sealed class HeartDownloadStep
+{
+    public HeartDownloadSource Source { get; set; }
+    public bool Enabled { get; set; }
+}
+
 public class SubsonicSettings
 {
     public string? Url { get; set; }
@@ -248,6 +262,44 @@ public class SubsonicSettings
     /// (FLAC with MP3 fallback), or "Lidarr" (heart-only, full album).
     /// </summary>
     public DownloadSource DownloadSource { get; set; } = DownloadSource.Soulseek;
+
+    /// <summary>
+    /// Ordered sources for explicit track and album hearts. Empty keeps older
+    /// DOWNLOAD_SOURCE configurations working; Lidarr remains last by default.
+    /// </summary>
+    public List<HeartDownloadStep> HeartDownloadSources { get; set; } = [];
+
+    public IReadOnlyList<HeartDownloadStep> EffectiveHeartDownloadSources()
+    {
+        var configured = HeartDownloadSources
+            .Where(step => Enum.IsDefined(step.Source))
+            .GroupBy(step => step.Source)
+            .Select(group => group.First())
+            .ToList();
+        if (configured.Count > 0)
+        {
+            foreach (var source in Enum.GetValues<HeartDownloadSource>())
+                if (configured.All(step => step.Source != source))
+                    configured.Add(new HeartDownloadStep { Source = source, Enabled = false });
+            return configured;
+        }
+
+        return DownloadSource switch
+        {
+            DownloadSource.YouTube => DefaultHeartSources(false, true, false),
+            DownloadSource.SoulseekThenYouTube => DefaultHeartSources(true, true, false),
+            DownloadSource.Lidarr => DefaultHeartSources(false, false, true),
+            _ => DefaultHeartSources(true, false, false),
+        };
+    }
+
+    private static IReadOnlyList<HeartDownloadStep> DefaultHeartSources(
+        bool soulseek, bool youtube, bool lidarr) =>
+        [
+            new() { Source = HeartDownloadSource.Soulseek, Enabled = soulseek },
+            new() { Source = HeartDownloadSource.YouTube, Enabled = youtube },
+            new() { Source = HeartDownloadSource.Lidarr, Enabled = lidarr },
+        ];
     
     /// <summary>
     /// Use local staging for cloud storage mounts (default: false)

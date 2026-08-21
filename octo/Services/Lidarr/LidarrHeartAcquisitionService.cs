@@ -12,8 +12,10 @@ namespace Octo.Services.Lidarr;
 
 public interface ILidarrHeartAcquisitionService
 {
-    void QueueTrack(string provider, string externalId);
-    void QueueAlbum(string provider, string externalId);
+    Task<bool> TryAcquireTrackAsync(
+        string provider, string externalId, bool notifyFailure = true);
+    Task<bool> TryAcquireAlbumAsync(
+        string provider, string externalId, bool notifyFailure = true);
 }
 
 /// <summary>
@@ -61,8 +63,9 @@ public sealed class LidarrHeartAcquisitionService : ILidarrHeartAcquisitionServi
             if (!string.IsNullOrWhiteSpace(entry.Path)) _recordedPaths.TryAdd(entry.Path, 0);
     }
 
-    public void QueueTrack(string provider, string externalId) =>
-        _ = RunDetachedAsync(async () =>
+    public Task<bool> TryAcquireTrackAsync(
+        string provider, string externalId, bool notifyFailure = true) =>
+        TryAcquireAsync(async () =>
         {
             var song = await _metadata.GetSongAsync(provider, externalId)
                 ?? throw new InvalidOperationException("The starred external track is no longer available.");
@@ -84,15 +87,16 @@ public sealed class LidarrHeartAcquisitionService : ILidarrHeartAcquisitionServi
                 Songs = new List<Song> { song },
             };
             await QueueResolvedAlbumAsync(album);
-        }, "track", externalId);
+        }, "track", externalId, notifyFailure);
 
-    public void QueueAlbum(string provider, string externalId) =>
-        _ = RunDetachedAsync(async () =>
+    public Task<bool> TryAcquireAlbumAsync(
+        string provider, string externalId, bool notifyFailure = true) =>
+        TryAcquireAsync(async () =>
         {
             var album = await _metadata.GetAlbumAsync(provider, externalId)
                 ?? throw new InvalidOperationException("The starred external album is no longer available.");
             await QueueResolvedAlbumAsync(album);
-        }, "album", externalId);
+        }, "album", externalId, notifyFailure);
 
     private async Task QueueResolvedAlbumAsync(Album album)
     {
@@ -101,19 +105,21 @@ public sealed class LidarrHeartAcquisitionService : ILidarrHeartAcquisitionServi
 
         var candidate = await _client.ResolveAlbumAsync(album.Artist, album.Title, album.Year);
         var lazy = _albumJobs.GetOrAdd(candidate.ForeignAlbumId,
-            _ => new Lazy<Task>(() => SubmitAndReconcileAsync(candidate, album),
+            _ => new Lazy<Task>(() => SubmitAndStartReconciliationAsync(candidate, album),
                 LazyThreadSafetyMode.ExecutionAndPublication));
         try
         {
             await lazy.Value;
         }
-        finally
+        catch
         {
             _albumJobs.TryRemove(new KeyValuePair<string, Lazy<Task>>(candidate.ForeignAlbumId, lazy));
+            throw;
         }
     }
 
-    private async Task SubmitAndReconcileAsync(LidarrAlbumCandidate candidate, Album album)
+    private async Task SubmitAndStartReconciliationAsync(
+        LidarrAlbumCandidate candidate, Album album)
     {
         var snapshot = _settings.CurrentValue;
         var albumId = await _client.EnsureAlbumAndSearchAsync(candidate);
@@ -130,28 +136,35 @@ public sealed class LidarrHeartAcquisitionService : ILidarrHeartAcquisitionServi
             Detail = "Album search accepted",
         });
 
-        try
+        _ = Task.Run(async () =>
         {
-            await ReconcileImportsAsync(albumId, album, snapshot);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Lidarr import reconciliation failed for '{Artist} - {Album}'",
-                album.Artist, album.Title);
-            if (snapshot.CompletionMode == LidarrCompletionMode.Imported)
+            try
             {
-                _notifications.Notify(new NotificationEvent
-                {
-                    Type = NotificationEventType.DownloadFailed,
-                    Artist = album.Artist,
-                    Title = album.Title,
-                    Album = album.Title,
-                    Source = "Lidarr",
-                    CoverArtUrl = album.CoverArtUrl,
-                    Detail = ex.Message,
-                });
+                await ReconcileImportsAsync(albumId, album, snapshot);
             }
-        }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Lidarr import reconciliation failed for '{Artist} - {Album}'",
+                    album.Artist, album.Title);
+                if (snapshot.CompletionMode == LidarrCompletionMode.Imported)
+                {
+                    _notifications.Notify(new NotificationEvent
+                    {
+                        Type = NotificationEventType.DownloadFailed,
+                        Artist = album.Artist,
+                        Title = album.Title,
+                        Album = album.Title,
+                        Source = "Lidarr",
+                        CoverArtUrl = album.CoverArtUrl,
+                        Detail = ex.Message,
+                    });
+                }
+            }
+            finally
+            {
+                _albumJobs.TryRemove(candidate.ForeignAlbumId, out _);
+            }
+        });
     }
 
     private async Task ReconcileImportsAsync(int albumId, Album album, LidarrSettings settings)
@@ -297,18 +310,24 @@ public sealed class LidarrHeartAcquisitionService : ILidarrHeartAcquisitionServi
         return target;
     }
 
-    private async Task RunDetachedAsync(Func<Task> work, string kind, string externalId)
+    private async Task<bool> TryAcquireAsync(
+        Func<Task> work, string kind, string externalId, bool notifyFailure)
     {
-        try { await work(); }
+        try
+        {
+            await work();
+            return true;
+        }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Lidarr {Kind} heart failed for {Id}", kind, externalId);
-            _notifications.Notify(new NotificationEvent
+            if (notifyFailure) _notifications.Notify(new NotificationEvent
             {
                 Type = NotificationEventType.DownloadFailed,
                 Source = "Lidarr",
                 Detail = ex.Message,
             });
+            return false;
         }
     }
 }

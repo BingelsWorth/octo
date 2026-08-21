@@ -11,13 +11,13 @@ public class LidarrClientTests
 {
     private sealed class Handler : HttpMessageHandler
     {
-        public List<(HttpMethod Method, string Path, string? ApiKey, string? Body)> Requests { get; } = new();
+        public List<(HttpMethod Method, string Path, string Url, string? ApiKey, string? Body)> Requests { get; } = new();
         public required Func<HttpRequestMessage, string> Respond { get; init; }
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
             var body = request.Content is null ? null : await request.Content.ReadAsStringAsync(ct);
-            Requests.Add((request.Method, request.RequestUri!.PathAndQuery,
+            Requests.Add((request.Method, request.RequestUri!.PathAndQuery, request.RequestUri.ToString(),
                 request.Headers.TryGetValues("X-Api-Key", out var values) ? values.Single() : null, body));
             return new HttpResponseMessage(HttpStatusCode.OK)
             {
@@ -63,6 +63,25 @@ public class LidarrClientTests
         Assert.Equal("Lossless", Assert.Single(result.QualityProfiles).Name);
         Assert.Equal("Standard", Assert.Single(result.MetadataProfiles).Name);
         Assert.All(handler.Requests, r => Assert.Equal("secret", r.ApiKey));
+    }
+
+    [Fact]
+    public async Task ConnectionTestUsesEnteredUrlAndApiKeyWithoutSaving()
+    {
+        var handler = new Handler
+        {
+            Respond = request => request.RequestUri!.AbsolutePath == "/api/v1/system/status" ? "{}" : "[]",
+        };
+
+        await Build(handler).TestConnectionAsync("http://new-lidarr:8686/", "entered-key");
+
+        Assert.Contains(handler.Requests, request =>
+            request.Path == "/api/v1/system/status"
+            && request.Url == "http://new-lidarr:8686/api/v1/system/status");
+        Assert.All(handler.Requests, request => Assert.Equal("entered-key", request.ApiKey));
+        Assert.Contains(handler.Requests, request => request.Path == "/api/v1/rootfolder");
+        Assert.Contains(handler.Requests, request => request.Path == "/api/v1/qualityprofile");
+        Assert.Contains(handler.Requests, request => request.Path == "/api/v1/metadataprofile");
     }
 
     [Fact]

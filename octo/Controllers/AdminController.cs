@@ -316,6 +316,12 @@ public class AdminController : ControllerBase
                 // These two are rendered by the dashboard but were missing here, so their
                 // fields never pre-filled with the saved value.
                 ["DownloadSource"] = subsonic.DownloadSource.ToString(),
+                ["HeartDownloadSources"] = subsonic.EffectiveHeartDownloadSources()
+                    .Select(step => new Dictionary<string, object>
+                    {
+                        ["Source"] = step.Source.ToString(),
+                        ["Enabled"] = step.Enabled,
+                    }).ToList(),
                 ["AutoDetectDownloadPath"] = subsonic.AutoDetectDownloadPath,
                 ["LibraryPath"] = subsonic.LibraryPath,
                 ["FolderStructure"] = subsonic.FolderStructure.ToString(),
@@ -460,6 +466,13 @@ public class AdminController : ControllerBase
                 ["WaitForLosslessOnPlay"] = subsonic.WaitForLosslessOnPlay,
                 ["LosslessWaitTimeoutSeconds"] = subsonic.LosslessWaitTimeoutSeconds,
                 ["DownloadSource"] = subsonic.DownloadSource.ToString(),
+                ["HeartDownloadSources"] = new JsonArray(
+                    subsonic.EffectiveHeartDownloadSources()
+                        .Select(step => (JsonNode)new JsonObject
+                        {
+                            ["Source"] = step.Source.ToString(),
+                            ["Enabled"] = step.Enabled,
+                        }).ToArray()),
                 ["AutoDetectDownloadPath"] = subsonic.AutoDetectDownloadPath,
                 ["LibraryPath"] = subsonic.LibraryPath,
                 ["FolderStructure"] = subsonic.FolderStructure.ToString(),
@@ -669,6 +682,22 @@ public class AdminController : ControllerBase
         catch (Exception ex) { return BadRequest(new { error = ex.Message }); }
     }
 
+    public record LidarrConnectionTestRequest(string? BaseUrl, string? ApiKey);
+
+    /// <summary>Tests entered credentials without persisting them.</summary>
+    [HttpPost("lidarr/test")]
+    public async Task<IActionResult> TestLidarrConnection(
+        [FromBody] LidarrConnectionTestRequest request, CancellationToken ct)
+    {
+        try
+        {
+            var options = await _lidarr.TestConnectionAsync(
+                request.BaseUrl ?? "", request.ApiKey ?? "", ct);
+            return Ok(new { ok = true, message = "Connected to Lidarr. Choices loaded.", options });
+        }
+        catch (Exception ex) { return BadRequest(new { ok = false, error = ex.Message }); }
+    }
+
     /// <summary>
     /// Exit the process with code 1 so docker compose's restart policy brings
     /// the container back up with refreshed config. The caller gets an empty
@@ -721,11 +750,13 @@ public class AdminController : ControllerBase
     private async Task<ServiceProbe> ProbeLidarrAsync(CancellationToken ct)
     {
         var settings = _lidarrOpts.CurrentValue;
+        var lidarrEnabled = _subsonicOpts.CurrentValue.EffectiveHeartDownloadSources()
+            .Any(step => step.Enabled && step.Source == HeartDownloadSource.Lidarr);
         if (string.IsNullOrWhiteSpace(settings.BaseUrl) || string.IsNullOrWhiteSpace(settings.ApiKey))
-            return _subsonicOpts.CurrentValue.DownloadSource == DownloadSource.Lidarr
+            return lidarrEnabled
                 ? new ServiceProbe(false, "selected but not configured")
-                : new ServiceProbe(true, "not configured (optional)");
-        if (_subsonicOpts.CurrentValue.DownloadSource == DownloadSource.Lidarr
+                : new ServiceProbe(true, "not configured (optional)", Warning: true);
+        if (lidarrEnabled
             && (string.IsNullOrWhiteSpace(settings.RootFolderPath)
                 || settings.QualityProfileId <= 0 || settings.MetadataProfileId <= 0))
             return new ServiceProbe(false, "select a root folder and profiles");
@@ -767,7 +798,7 @@ public class AdminController : ControllerBase
         catch (Exception ex) { return new ServiceProbe(false, ex.Message); }
     }
 
-    private record ServiceProbe(bool Ok, string Detail);
+    private record ServiceProbe(bool Ok, string Detail, bool Warning = false);
 
     /// <summary>The release this build came from, e.g. "2026.07.29". Falls back to the
     /// assembly version if the informational version was not stamped.</summary>

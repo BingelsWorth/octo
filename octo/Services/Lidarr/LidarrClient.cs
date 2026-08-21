@@ -49,6 +49,21 @@ public sealed class LidarrClient
         catch { return false; }
     }
 
+    public async Task<LidarrOptions> TestConnectionAsync(
+        string baseUrl, string apiKey, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(baseUrl) || string.IsNullOrWhiteSpace(apiKey))
+            throw new InvalidOperationException("Lidarr URL and API key are required.");
+        using var request = CreateRequest(HttpMethod.Get, "/api/v1/system/status", baseUrl, apiKey);
+        using var response = await SendAsync(request, ct);
+
+        var rootsTask = GetArrayAsync("/api/v1/rootfolder", baseUrl, apiKey, ct);
+        var qualityTask = GetArrayAsync("/api/v1/qualityprofile", baseUrl, apiKey, ct);
+        var metadataTask = GetArrayAsync("/api/v1/metadataprofile", baseUrl, apiKey, ct);
+        await Task.WhenAll(rootsTask, qualityTask, metadataTask);
+        return MapOptions(rootsTask.Result, qualityTask.Result, metadataTask.Result);
+    }
+
     public async Task<LidarrOptions> GetOptionsAsync(CancellationToken ct = default)
     {
         var rootsTask = GetArrayAsync("/api/v1/rootfolder", ct);
@@ -56,11 +71,17 @@ public sealed class LidarrClient
         var metadataTask = GetArrayAsync("/api/v1/metadataprofile", ct);
         await Task.WhenAll(rootsTask, qualityTask, metadataTask);
 
-        return new LidarrOptions(
-            rootsTask.Result.Select(x => new LidarrRootFolder(Int(x, "id"), Str(x, "path"))).ToList(),
-            qualityTask.Result.Select(x => new LidarrChoice(Int(x, "id"), Str(x, "name"))).ToList(),
-            metadataTask.Result.Select(x => new LidarrChoice(Int(x, "id"), Str(x, "name"))).ToList());
+        return MapOptions(rootsTask.Result, qualityTask.Result, metadataTask.Result);
     }
+
+    private static LidarrOptions MapOptions(
+        IReadOnlyList<JsonObject> roots,
+        IReadOnlyList<JsonObject> quality,
+        IReadOnlyList<JsonObject> metadata) =>
+        new(
+            roots.Select(x => new LidarrRootFolder(Int(x, "id"), Str(x, "path"))).ToList(),
+            quality.Select(x => new LidarrChoice(Int(x, "id"), Str(x, "name"))).ToList(),
+            metadata.Select(x => new LidarrChoice(Int(x, "id"), Str(x, "name"))).ToList());
 
     public async Task<LidarrAlbumCandidate> ResolveAlbumAsync(
         string artist, string album, int? year, CancellationToken ct = default)
@@ -212,9 +233,14 @@ public sealed class LidarrClient
     private HttpRequestMessage CreateRequest(HttpMethod method, string path)
     {
         var settings = RequireSettings();
-        var request = new HttpRequestMessage(method,
-            $"{settings.BaseUrl!.TrimEnd('/')}{path}");
-        request.Headers.TryAddWithoutValidation("X-Api-Key", settings.ApiKey);
+        return CreateRequest(method, path, settings.BaseUrl!, settings.ApiKey!);
+    }
+
+    private static HttpRequestMessage CreateRequest(
+        HttpMethod method, string path, string baseUrl, string apiKey)
+    {
+        var request = new HttpRequestMessage(method, $"{baseUrl.TrimEnd('/')}{path}");
+        request.Headers.TryAddWithoutValidation("X-Api-Key", apiKey);
         return request;
     }
 
@@ -236,6 +262,18 @@ public sealed class LidarrClient
     private async Task<List<JsonObject>> GetArrayAsync(string path, CancellationToken ct)
     {
         using var request = CreateRequest(HttpMethod.Get, path);
+        return await GetArrayAsync(request, ct);
+    }
+
+    private async Task<List<JsonObject>> GetArrayAsync(
+        string path, string baseUrl, string apiKey, CancellationToken ct)
+    {
+        using var request = CreateRequest(HttpMethod.Get, path, baseUrl, apiKey);
+        return await GetArrayAsync(request, ct);
+    }
+
+    private async Task<List<JsonObject>> GetArrayAsync(HttpRequestMessage request, CancellationToken ct)
+    {
         using var response = await SendAsync(request, ct);
         await using var stream = await response.Content.ReadAsStreamAsync(ct);
         var node = await JsonNode.ParseAsync(stream, cancellationToken: ct) as JsonArray

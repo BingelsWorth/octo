@@ -180,9 +180,9 @@ Yes. Soulseek peers share full FLAC files with their existing ID3 tags intact. O
 
 You can use YouTube or an existing Lidarr server, or disable automatic acquisition entirely.
 
-To keep downloading but pull from YouTube instead, set `DOWNLOAD_SOURCE=YouTube` in `.env`, or pick it under **Downloads → Source** in the admin UI. Starring then saves a yt-dlp MP3 rather than a Soulseek FLAC. `SoulseekThenYouTube` is the middle setting: it tries for the FLAC first and only settles for the MP3 when no peer delivers.
+Use **Downloads → Heart download priority** in the admin UI to enable and order Soulseek, YouTube, and Lidarr. Octo tries each enabled source from top to bottom and stops at the first success. Disabled sources keep their position. `DOWNLOAD_SOURCE` remains the initial fallback for existing and env-only installations.
 
-To hand hearts to Lidarr, set `DOWNLOAD_SOURCE=Lidarr`, then configure its URL, API key, root folder, and profiles on Octo's Lidarr admin page. Lidarr works at album level, so hearting one track fetches its full album.
+Lidarr works at album level, so hearting one track fetches its full album. It is last and disabled by default; configure its URL, API key, root folder, and profiles on the Lidarr page, then enable it in the priority list.
 
 To stop downloading altogether, set `Subsonic__DownloadOnStar=false`. Hearting a song will still register the favorite, but won't trigger any download. You'll keep search and radio enrichment via YouTube preview, which is useful if you only want the discovery layer and prefer to acquire FLACs another way.
 
@@ -255,7 +255,7 @@ The admin UI's "Config sources" tab shows the merged effective value for every k
 
 ### Existing Lidarr setup
 
-Set `DOWNLOAD_SOURCE=Lidarr`, `LIDARR_URL`, and `LIDARR_API_KEY`, restart Octo, then open the **Lidarr** admin tab and load its root-folder and profile choices. Octo does not install or configure Lidarr's indexers or download client.
+Set `LIDARR_URL` and `LIDARR_API_KEY`, restart Octo, then open the **Lidarr** admin tab to test the connection and choose its root folder and profiles. Enable and position Lidarr under **Downloads → Heart download priority**. Octo does not install or configure Lidarr's indexers or download client.
 
 The selected Lidarr root and Octo's effective Navidrome library root must expose the same underlying files. Their container paths may differ: Octo translates the imported path relative to the selected Lidarr root. For example, Lidarr `/data/music/Artist/Album/file.flac` can map to Octo `/music/Artist/Album/file.flac` when both mounts point at the same host directory.
 
@@ -287,7 +287,7 @@ Octo hijacks these endpoints; everything else proxies to Navidrome unchanged:
 | `stream` | YouTube proxy with Range support, mp4/m4a passthrough |
 | `getCoverArt` | Deezer → iTunes → Last.fm aggregator with Octo watermark |
 | `getAlbum` | external album tracklists, and fills in tracks you're missing from an album you own |
-| `star` | trigger a download of the track or a whole album, from whichever source `DOWNLOAD_SOURCE` selects (Soulseek multi-peer FLAC by default) |
+| `star` | try enabled heart sources in priority order and stop after the first successful track/album acquisition |
 | `scrobble` | sliding-window prewarm of next 8 in queue |
 | `getTranscodeDecision` | OpenSubsonic — return direct-play for Octo IDs |
 

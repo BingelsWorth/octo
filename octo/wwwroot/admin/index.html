@@ -345,19 +345,17 @@
         <div class="set-section">
           <div class="set-head"><h3 class="set-title">Source</h3></div>
           <form data-section="downloads" class="set-card">
-            <div class="set-row stack">
+            <div class="set-row stack source-priority-setting">
               <div class="set-info">
-                <div class="set-info-t">Download source</div>
-                <div class="set-info-d">Soulseek gives lossless FLAC when a peer has the file. YouTube saves a lossy MP3, and "Soulseek, then YouTube" falls back to it when needed. Lidarr applies only to hearts and fetches the track's full album; permanent playback and playlist downloads remain direct. Same setting as <code>DOWNLOAD_SOURCE</code> in <code>.env</code>; set it in either place, this one wins.</div>
+                <div class="set-info-t" id="heart-source-order-label">Heart download priority</div>
+                <div class="set-info-d">Octo tries enabled sources from top to bottom and stops at the first success. Lidarr fetches the track's full album. Permanent playback and playlist downloads keep their existing direct behavior.</div>
               </div>
-              <div class="set-ctrl">
-                <div class="seg" data-seg-for="f-download-source"><span class="seg-thumb"></span></div>
-                <select id="f-download-source" name="Subsonic.DownloadSource" class="seg-src" hidden>
-                  <option value="Soulseek">Soulseek</option>
-                  <option value="YouTube">YouTube</option>
-                  <option value="SoulseekThenYouTube">Soulseek → YouTube</option>
-                  <option value="Lidarr">Lidarr</option>
-                </select>
+              <div class="source-priority-list" id="heart-source-order"
+                   aria-labelledby="heart-source-order-label" aria-describedby="heart-source-order-help"></div>
+              <input type="hidden" id="f-heart-download-sources"
+                     name="Subsonic.HeartDownloadSources" data-json="true" />
+              <div class="set-info-d" id="heart-source-order-help" role="status" aria-live="polite">
+                Drag a handle or use the arrow buttons to change priority. Disabled sources keep their position and are skipped.
               </div>
             </div>
             <div class="set-row">
@@ -711,7 +709,7 @@
             <div class="set-row stack">
               <div class="set-info">
                 <label class="set-info-t" for="f-lidarr-root">Root folder</label>
-                <div class="set-info-d">Save the connection first, then load choices from Lidarr. The same files must be mounted into Octo's Navidrome library root.</div>
+                <div class="set-info-d">Test or save the connection to load choices from Lidarr. The same files must be mounted into Octo's Navidrome library root.</div>
               </div>
               <select class="set-input" id="f-lidarr-root" name="Lidarr.RootFolderPath" disabled><option value="">Connect to Lidarr first</option></select>
             </div>
@@ -744,7 +742,6 @@
               <input class="set-input" id="f-lidarr-timeout" name="Lidarr.ImportTimeoutSeconds" type="number" min="60" step="60" />
             </div>
             <div class="set-row stack">
-              <button type="button" class="btn btn-ghost" id="lidarr-load-options">Load choices from Lidarr</button>
               <div class="set-info-d" id="lidarr-options-status" role="status" aria-live="polite"></div>
             </div>
           </form>
