@@ -169,16 +169,16 @@ public class SubsonicSettings
     public ExplicitFilter ExplicitFilter { get; set; } = ExplicitFilter.All;
     
     /// <summary>
-    /// Download mode for tracks (default: Track)
+    /// Legacy direct-download mode (default: Track), retained for playlist jobs.
     /// Environment variable: DOWNLOAD_MODE
-    /// Values: "Track" (download only played track), "Album" (download full album when playing a track)
+    /// Values: "Track" or "Album"
     /// </summary>
     public DownloadMode DownloadMode { get; set; } = DownloadMode.Track;
     
     /// <summary>
-    /// Storage mode for downloaded files (default: Permanent)
+    /// Legacy storage mode for direct-download jobs (default: Permanent).
     /// Environment variable: STORAGE_MODE
-    /// Values: "Permanent" (files saved to library), "Cache" (temporary files, auto-cleanup)
+    /// Ordinary external playback always streams from YouTube unless lossless waiting is enabled.
     /// </summary>
     public StorageMode StorageMode { get; set; } = StorageMode.Permanent;
     

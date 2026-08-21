@@ -47,7 +47,7 @@ public sealed class HeartAcquisitionCoordinator
             try
             {
                 await _directQueue.Enqueue(provider, externalId, isStar: true,
-                    triggerAlbumDownload: true, forcePermanent: true,
+                    triggerAlbumDownload: false, forcePermanent: true,
                     sourceOverride: ToDirectSource(steps[index]), notifyOnFailure: isLast);
                 return;
             }

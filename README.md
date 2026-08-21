@@ -261,13 +261,9 @@ The selected Lidarr root and Octo's effective Navidrome library root must expose
 
 `LIDARR_COMPLETION_MODE=Accepted` (default) returns control after Lidarr accepts the album search. `Imported` makes completion/failure notifications reflect the actual import, bounded by `LIDARR_IMPORT_TIMEOUT_SECONDS` (default 1800). Neither mode blocks playback or later hearts; imported files are reconciled into download history and trigger a Navidrome scan in the background.
 
-### Storage modes
+### Playback and acquisition
 
-- `Stream` *(default)* — preview-only. Heart a song to download.
-- `Permanent` — every song you play gets downloaded.
-- `Cache` — downloads expire after `CacheDurationHours`.
-
-In `Permanent` mode the download runs in the background and playback starts immediately from the preview source. The lossless copy lands in your library and shows up as its own track once your server scans it, so a track you have played appears twice for a while: the preview entry and the real file. **The star stays on the preview entry**, so re-star the library copy if you want it favourited there.
+Tracks already in your library play locally through Navidrome. Missing external results stream from YouTube. Playback does not acquire a permanent copy; heart the song or album to run the configured source priority.
 
 Set `WAIT_FOR_LOSSLESS_ON_PLAY=true` if you would rather the first play wait for the lossless file. It is off by default because a Soulseek fetch routinely takes minutes and most clients time out long before that, which looks like the play failing. The setting also changes what searches advertise for external tracks, so it needs a restart, and clients that cached earlier results should re-search after you change it.
 

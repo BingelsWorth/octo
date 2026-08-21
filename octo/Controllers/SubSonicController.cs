@@ -579,43 +579,21 @@ public class SubsonicController : ControllerBase
 
         try
         {
-            // Permanent mode keeps a copy of anything played. Queue it and carry on: the
-            // fetch runs on the acquisition worker, on a token that has nothing to do with
-            // this request, so the client hanging up can no longer destroy it.
-            Task<string>? acquisition = null;
-            if (_subsonicSettings.StorageMode == StorageMode.Permanent)
+            // Lossless-on-play remains an explicit opt-in. Normal playback never starts
+            // acquisition: owned ids already went to Navidrome above, and missing ids
+            // stream from YouTube below. Hearts are the normal permanent-copy gesture.
+            if (_subsonicSettings.WaitForLosslessOnPlay)
             {
-                acquisition = _acquisitions.Enqueue(provider!, externalId!, isStar: false,
+                var acquisition = _acquisitions.Enqueue(provider!, externalId!, isStar: false,
                     triggerAlbumDownload: false, forcePermanent: true);
-            }
-
-            if (acquisition is not null && _subsonicSettings.WaitForLosslessOnPlay)
-            {
                 return await ServeAcquiredAsync(acquisition, provider!, externalId!, id, format,
                     allowPreviewFallback: true);
-            }
-
-            // Cache mode is deliberately left on its original path. It skips library
-            // registration, so routing it through the queue would make every play
-            // re-download the same track forever.
-            if (_subsonicSettings.StorageMode == StorageMode.Cache)
-            {
-                var downloadStream = await _downloadService.DownloadAndStreamAsync(provider!, externalId!, HttpContext.RequestAborted);
-                return File(downloadStream, "audio/mpeg", enableRangeProcessing: true);
             }
 
             var direct = await TryDirectStreamAsync(provider!, externalId!, id);
             if (direct is not null) return direct;
 
             _logger.LogWarning("Direct stream not available for {Id}", id);
-
-            // No YouTube match. Wait on the SAME queued acquisition rather than starting a
-            // second one; without a lossless copy on the way there is nothing to serve.
-            // The preview already failed above, so a timeout fallback has nothing to serve.
-            if (acquisition is not null)
-                return await ServeAcquiredAsync(acquisition, provider!, externalId!, id, format,
-                    allowPreviewFallback: false);
-
             return _responseBuilder.CreateError(format, 70, "No playable source found for this track");
         }
         catch (OperationCanceledException)

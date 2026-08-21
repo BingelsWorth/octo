@@ -116,6 +116,8 @@ async function loadSettings() {
     else el.value = value;
   });
 
+  syncPlaybackSourceControl();
+  updateStreamSettings();
   renderHeartSourceOrder(currentSettings?.Subsonic?.HeartDownloadSources);
 
   // Meta references
@@ -319,6 +321,33 @@ function renderHeartSourceOrder(steps = heartSourceSteps) {
   }).join('');
   syncHeartSourceInput();
 }
+
+function updateStreamSettings() {
+  const waitForLossless = document.getElementById('f-wait-for-lossless-on-play')?.checked;
+  const activeSource = waitForLossless ? 'Lossless' : 'YouTube';
+  document.querySelectorAll('[data-stream-source]').forEach(section => {
+    section.hidden = section.dataset.streamSource !== activeSource;
+  });
+}
+
+function syncPlaybackSourceControl() {
+  const control = document.getElementById('f-playback-source');
+  const wait = document.getElementById('f-wait-for-lossless-on-play');
+  if (!control || !wait) return;
+  control.value = wait.checked ? 'Lossless' : 'YouTube';
+}
+
+document.getElementById('f-playback-source')?.addEventListener('change', event => {
+  const wait = document.getElementById('f-wait-for-lossless-on-play');
+  if (!wait) return;
+  wait.checked = event.target.value === 'Lossless';
+  wait.dispatchEvent(new Event('input', { bubbles: true }));
+  updateStreamSettings();
+});
+
+document.querySelectorAll('[data-open-tab]').forEach(button => {
+  button.addEventListener('click', () => activateTab(button.dataset.openTab));
+});
 
 function syncHeartSourceInput() {
   const input = document.getElementById('f-heart-download-sources');

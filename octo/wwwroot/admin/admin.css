@@ -1041,6 +1041,8 @@ section[data-pane].active { display: block; }
 .source-kind-switch .sw-thumb { top: 13px; }
 
 @media (max-width: 760px) {
+  .playback-source-row { flex-direction: column; align-items: stretch; }
+  .playback-source-row .set-ctrl { justify-content: flex-start; }
   .source-priority-row {
     grid-template-columns: 44px 28px minmax(0, 1fr);
     gap: 8px;

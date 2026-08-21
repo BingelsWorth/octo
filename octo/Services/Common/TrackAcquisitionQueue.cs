@@ -11,7 +11,7 @@ public sealed class AcquisitionRequest
     public required string ExternalId { get; init; }
 
     /// <summary>Carried per request rather than inferred from whoever won a race:
-    /// a star wants the album walk and a forced permanent copy, a play does not.</summary>
+    /// heart routing decides song-versus-album scope, while playback never expands to an album.</summary>
     public bool TriggerAlbumDownload { get; init; }
     public bool ForcePermanent { get; init; }
     public bool IsStar { get; init; }
