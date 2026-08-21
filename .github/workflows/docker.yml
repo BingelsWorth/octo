@@ -2,12 +2,6 @@ name: Docker Build & Push
 
 on:
   workflow_dispatch:
-    inputs:
-      publish_lidarr_test:
-        description: Build the pinned Lidarr-support commit with its immutable test tag
-        required: true
-        type: boolean
-        default: false
   push:
     # Dated releases (2026.07.29) as well as any future v-prefixed ones. Without the
     # second pattern a dated tag pushes silently and never builds an image.
@@ -33,16 +27,10 @@ concurrency:
   queue: max
   cancel-in-progress: false
 
-permissions:
-  contents: read
-
 env:
   DOTNET_VERSION: "9.0.x"
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
-  LIDARR_TEST_COMMIT: 2fc43af36ff761a421f1aadd8863e71648e0d62d
-  LIDARR_TEST_IMAGE: ghcr.io/bingelsworth/octo
-  LIDARR_TEST_TAG: lidarr-test-2fc43af36ff7
 
 jobs:
   build-and-test:
@@ -51,12 +39,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-        with:
-          ref: ${{ inputs.publish_lidarr_test && env.LIDARR_TEST_COMMIT || github.sha }}
-
-      - name: Verify pinned Lidarr source
-        if: inputs.publish_lidarr_test
-        run: test "$(git rev-parse HEAD)" = "$LIDARR_TEST_COMMIT"
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v6
@@ -86,12 +68,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-        with:
-          ref: ${{ inputs.publish_lidarr_test && env.LIDARR_TEST_COMMIT || github.sha }}
-
-      - name: Verify pinned Lidarr source
-        if: inputs.publish_lidarr_test
-        run: test "$(git rev-parse HEAD)" = "$LIDARR_TEST_COMMIT"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
@@ -106,36 +82,26 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Refuse to overwrite the immutable Lidarr tag
-        if: inputs.publish_lidarr_test
-        run: |
-          if docker buildx imagetools inspect "$LIDARR_TEST_IMAGE:$LIDARR_TEST_TAG" >/dev/null 2>&1; then
-            echo "::error::Image tag already exists: $LIDARR_TEST_IMAGE:$LIDARR_TEST_TAG"
-            exit 1
-          fi
-
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ${{ inputs.publish_lidarr_test && env.LIDARR_TEST_IMAGE || format('{0}/{1}', env.REGISTRY, env.IMAGE_NAME) }}
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=${{ env.LIDARR_TEST_TAG }},enable=${{ inputs.publish_lidarr_test }}
-            type=ref,event=branch,enable=${{ !inputs.publish_lidarr_test }}
+            type=ref,event=branch
             # Tags the image with the release name verbatim, e.g. 2026.07.29. The semver
             # patterns below cannot match a dated tag (07 is not valid semver), so this
             # is what actually labels a release build.
-            type=ref,event=tag,enable=${{ !inputs.publish_lidarr_test }}
-            type=sha,prefix=,enable=${{ !inputs.publish_lidarr_test }}
-            type=semver,pattern={{version}},enable=${{ !inputs.publish_lidarr_test }}
-            type=semver,pattern={{major}}.{{minor}},enable=${{ !inputs.publish_lidarr_test }}
-            type=semver,pattern={{major}},enable=${{ !inputs.publish_lidarr_test }}
+            type=ref,event=tag
+            type=sha,prefix=
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
             # Was gated on refs/heads/dev, a branch this repo does not have, so `latest`
             # was never published at all and `docker pull ...:latest` failed for everyone.
-            type=raw,value=latest,enable=${{ !inputs.publish_lidarr_test && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+            type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push
-        id: build
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -145,31 +111,3 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-      - name: Verify published Lidarr manifest
-        if: inputs.publish_lidarr_test
-        run: |
-          image="$LIDARR_TEST_IMAGE:$LIDARR_TEST_TAG"
-          published_digest=$(docker buildx imagetools inspect "$image" | awk '$1 == "Digest:" { print $2; exit }')
-          if [ "$published_digest" != "${{ steps.build.outputs.digest }}" ]; then
-            echo "::error::Published digest $published_digest does not match build digest ${{ steps.build.outputs.digest }}"
-            exit 1
-          fi
-
-          platforms=$(docker buildx imagetools inspect --raw "$image" |
-            jq -r '[.manifests[].platform | select(.os != "unknown") | "\(.os)/\(.architecture)"] | unique | sort | join(",")')
-          if [ "$platforms" != "linux/amd64,linux/arm64" ]; then
-            echo "::error::Unexpected published platforms: $platforms"
-            exit 1
-          fi
-
-      - name: Record immutable Lidarr image
-        if: inputs.publish_lidarr_test
-        run: |
-          {
-            echo '### Lidarr test image'
-            echo
-            echo "- Repository: \`$LIDARR_TEST_IMAGE\`"
-            echo "- Tag: \`$LIDARR_TEST_TAG\`"
-            echo "- Digest: \`${{ steps.build.outputs.digest }}\`"
-          } >> "$GITHUB_STEP_SUMMARY"
