@@ -348,11 +348,11 @@
             <div class="set-row stack">
               <div class="set-info">
                 <div class="set-info-t">Download source</div>
-                <div class="set-info-d">Soulseek gives lossless FLAC but depends on a peer having the file. YouTube always resolves but is lossy MP3, fetched through the yt-dlp shim. "Soulseek, then YouTube" tries FLAC first and falls back to MP3 only when no peer delivers. Same setting as <code>DOWNLOAD_SOURCE</code> in <code>.env</code> (<code>Soulseek</code> / <code>YouTube</code> / <code>SoulseekThenYouTube</code>); set it in either place, this one wins.</div>
+                <div class="set-info-d">Soulseek gives lossless FLAC when a peer has the file. YouTube saves a lossy MP3, and "Soulseek, then YouTube" falls back to it when needed. Lidarr applies only to hearts and fetches the track's full album; permanent playback and playlist downloads remain direct. Same setting as <code>DOWNLOAD_SOURCE</code> in <code>.env</code>; set it in either place, this one wins.</div>
               </div>
               <div class="set-ctrl">
                 <div class="seg" data-seg-for="f-download-source"><span class="seg-thumb"></span></div>
-                <select id="f-download-source" name="Subsonic.DownloadSource" class="seg-src" data-restart="true" hidden>
+                <select id="f-download-source" name="Subsonic.DownloadSource" class="seg-src" hidden>
                   <option value="Soulseek">Soulseek</option>
                   <option value="YouTube">YouTube</option>
                   <option value="SoulseekThenYouTube">Soulseek → YouTube</option>

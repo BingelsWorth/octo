@@ -178,9 +178,11 @@ Yes. Soulseek peers share full FLAC files with their existing ID3 tags intact. O
 
 ### What if I don't want to use Soulseek?
 
-You have two options, depending on whether you still want a file.
+You can use YouTube or an existing Lidarr server, or disable automatic acquisition entirely.
 
 To keep downloading but pull from YouTube instead, set `DOWNLOAD_SOURCE=YouTube` in `.env`, or pick it under **Downloads → Source** in the admin UI. Starring then saves a yt-dlp MP3 rather than a Soulseek FLAC. `SoulseekThenYouTube` is the middle setting: it tries for the FLAC first and only settles for the MP3 when no peer delivers.
+
+To hand hearts to Lidarr, set `DOWNLOAD_SOURCE=Lidarr`, then configure its URL, API key, root folder, and profiles on Octo's Lidarr admin page. Lidarr works at album level, so hearting one track fetches its full album.
 
 To stop downloading altogether, set `Subsonic__DownloadOnStar=false`. Hearting a song will still register the favorite, but won't trigger any download. You'll keep search and radio enrichment via YouTube preview, which is useful if you only want the discovery layer and prefer to acquire FLACs another way.
 
@@ -325,7 +327,7 @@ Yes — slskd downloads are full FLACs from peer libraries that already have ID3
 Octo throws an error and the star icon stays filled. Try again later or grab the file by hand. Real failures are rare.
 
 **Can it run without Soulseek?**
-Yes — select Lidarr for hearts, or set `DOWNLOAD_ON_STAR=false` to keep discovery without automatic acquisition.
+Yes. Select YouTube for MP3 downloads, Lidarr for album-level heart acquisition, or set `DOWNLOAD_ON_STAR=false` to keep discovery without automatic acquisition.
 
 **Can it run without Last.fm?**
 Yes, but search and radio fall back to local-only — no discovery layer. The free Last.fm key takes 30 seconds.
