@@ -178,7 +178,11 @@ Yes. Soulseek peers share full FLAC files with their existing ID3 tags intact. O
 
 ### What if I don't want to use Soulseek?
 
-Set `DOWNLOAD_SOURCE=Lidarr`, then configure the Lidarr URL, API key, root folder, and profiles on Octo's Lidarr admin page. Lidarr works at album level, so a single-track heart fetches the full release. To disable acquisition entirely, set `DOWNLOAD_ON_STAR=false`.
+You have two options, depending on whether you still want a file.
+
+To keep downloading but pull from YouTube instead, set `DOWNLOAD_SOURCE=YouTube` in `.env`, or pick it under **Downloads → Source** in the admin UI. Starring then saves a yt-dlp MP3 rather than a Soulseek FLAC. `SoulseekThenYouTube` is the middle setting: it tries for the FLAC first and only settles for the MP3 when no peer delivers.
+
+To stop downloading altogether, set `Subsonic__DownloadOnStar=false`. Hearting a song will still register the favorite, but won't trigger any download. You'll keep search and radio enrichment via YouTube preview, which is useful if you only want the discovery layer and prefer to acquire FLACs another way.
 
 ### Can it run on a Raspberry Pi?
 
@@ -281,7 +285,7 @@ Octo hijacks these endpoints; everything else proxies to Navidrome unchanged:
 | `stream` | YouTube proxy with Range support, mp4/m4a passthrough |
 | `getCoverArt` | Deezer → iTunes → Last.fm aggregator with Octo watermark |
 | `getAlbum` | external album tracklists, and fills in tracks you're missing from an album you own |
-| `star` | trigger the selected Soulseek/YouTube source, or submit the full album to Lidarr |
+| `star` | trigger a download of the track or a whole album, from whichever source `DOWNLOAD_SOURCE` selects (Soulseek multi-peer FLAC by default) |
 | `scrobble` | sliding-window prewarm of next 8 in queue |
 | `getTranscodeDecision` | OpenSubsonic — return direct-play for Octo IDs |
 

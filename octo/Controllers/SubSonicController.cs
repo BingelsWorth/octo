@@ -23,7 +23,13 @@ namespace Octo.Controllers;
 [Route("")]
 public class SubsonicController : ControllerBase
 {
-    private readonly SubsonicSettings _subsonicSettings;
+    // IOptionsMonitor, not IOptions: the admin UI writes settings.json and the
+    // config provider reloads it, but IOptions.Value is resolved once and this is a
+    // singleton, so a captured copy would serve startup values until a restart. The
+    // admin UI read through IOptionsMonitor and therefore SHOWED the new value while
+    // nothing acted on it.
+    private readonly IOptionsMonitor<SubsonicSettings> subsonicSettingsOptions;
+    private SubsonicSettings _subsonicSettings => subsonicSettingsOptions.CurrentValue;
     private readonly IMusicMetadataService _metadataService;
     private readonly ILocalLibraryService _localLibraryService;
     private readonly IDownloadService _downloadService;
@@ -45,7 +51,7 @@ public class SubsonicController : ControllerBase
     private readonly ILogger<SubsonicController> _logger;
 
     public SubsonicController(
-        IOptions<SubsonicSettings> subsonicSettings,
+        IOptionsMonitor<SubsonicSettings> subsonicSettings,
         IMusicMetadataService metadataService,
         ILocalLibraryService localLibraryService,
         IDownloadService downloadService,
@@ -66,7 +72,7 @@ public class SubsonicController : ControllerBase
         CoverArtService? coverArtService = null,
         CoverArtAggregator? coverArtAggregator = null)
     {
-        _subsonicSettings = subsonicSettings.Value;
+        subsonicSettingsOptions = subsonicSettings;
         _metadataService = metadataService;
         _localLibraryService = localLibraryService;
         _downloadService = downloadService;

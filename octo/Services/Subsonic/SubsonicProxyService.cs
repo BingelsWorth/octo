@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Options;
 using Microsoft.AspNetCore.Mvc;
 using Octo.Models.Settings;
 
@@ -9,16 +10,22 @@ namespace Octo.Services.Subsonic;
 public class SubsonicProxyService
 {
     private readonly HttpClient _httpClient;
-    private readonly SubsonicSettings _subsonicSettings;
+    // IOptionsMonitor, not IOptions: the admin UI writes settings.json and the
+    // config provider reloads it, but IOptions.Value is resolved once and this is a
+    // singleton, so a captured copy would serve startup values until a restart. The
+    // admin UI read through IOptionsMonitor and therefore SHOWED the new value while
+    // nothing acted on it.
+    private readonly IOptionsMonitor<SubsonicSettings> subsonicSettingsOptions;
+    private SubsonicSettings _subsonicSettings => subsonicSettingsOptions.CurrentValue;
     private readonly IHttpContextAccessor _httpContextAccessor;
 
     public SubsonicProxyService(
         IHttpClientFactory httpClientFactory,
-        Microsoft.Extensions.Options.IOptions<SubsonicSettings> subsonicSettings,
+        IOptionsMonitor<SubsonicSettings> subsonicSettings,
         IHttpContextAccessor httpContextAccessor)
     {
         _httpClient = httpClientFactory.CreateClient();
-        _subsonicSettings = subsonicSettings.Value;
+        subsonicSettingsOptions = subsonicSettings;
         _httpContextAccessor = httpContextAccessor;
     }
 
