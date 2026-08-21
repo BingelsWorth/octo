@@ -40,7 +40,13 @@ from flask import Flask, Response, abort, jsonify, request, stream_with_context
 
 from gate import TieredGate
 
-YTDLP = os.environ.get("YTDLP_PATH", "/usr/local/bin/yt-dlp")
+# The binary baked into the image. Never written to, so a rebuild is always a
+# clean floor to fall back to.
+YTDLP_DIST = os.environ.get("YTDLP_DIST_PATH", "/usr/local/bin/yt-dlp")
+# The binary actually executed. Compose points this at a volume so a self-update
+# survives `docker compose up -d` recreating the container; left at the dist path
+# the shim still works, it just re-updates after each recreate.
+YTDLP = os.environ.get("YTDLP_PATH", YTDLP_DIST)
 PORT = int(os.environ.get("PORT", "8080"))
 
 # Root the /download endpoint is allowed to write under (the shared music mount).
@@ -71,6 +77,17 @@ _UPSTREAM_UA = os.environ.get("UPSTREAM_USER_AGENT", "").strip()
 # Purging is the standard recovery, but doing it on every 403 would throw the
 # cache away during a burst and make things worse -- hence the interval.
 _CACHE_PURGE_MIN_INTERVAL_SEC = int(os.environ.get("CACHE_PURGE_MIN_INTERVAL_SEC", "900"))
+# A 403 that outlives both a re-resolve and a cache purge is usually a yt-dlp too
+# old for YouTube's current player. Updating is rate-limited hard: it is a
+# network fetch of a binary, and hammering it during an outage helps nobody.
+_SELF_UPDATE_ON_403 = os.environ.get("SELF_UPDATE_ON_403", "1").lower() not in ("0", "false", "no")
+_SELF_UPDATE_MIN_INTERVAL_SEC = int(os.environ.get("SELF_UPDATE_MIN_INTERVAL_SEC", "21600"))
+_SELF_UPDATE_LOCK = threading.Lock()
+# None means "never attempted". Not 0.0: time.monotonic() is time since boot on
+# Linux, so on a host up for less than the interval, `now - 0.0` is inside the
+# window and the very first self-update would be rate-limited away. That is
+# precisely the reboot-then-outage case this exists for.
+_last_self_update = None
 _CACHE_PURGE_LOCK = threading.Lock()
 _last_cache_purge = 0.0
 
@@ -183,8 +200,12 @@ log.info(
 
 
 def _run(args: list[str], timeout: int = 20, label: str = "ytdlp",
-         bg: bool = False) -> Optional[str]:
+         bg: bool = False, capture: bool = False):
     """Run yt-dlp with a hard timeout. Returns stdout or None on any failure.
+
+    With capture=True the CompletedProcess is returned instead, so a caller can
+    read stderr and tell a 403 apart from an unavailable video. Still None when
+    the gate is full or the run times out, since there is no process to report.
 
     Logs gate-wait and wall time so a real box can show whether interactive
     resolves are queuing behind background prewarm (grep `gate_wait_ms`), and
@@ -215,13 +236,21 @@ def _run(args: list[str], timeout: int = 20, label: str = "ytdlp",
         except subprocess.TimeoutExpired:
             log.warning("yt-dlp timed out (%s, gate_wait_ms=%.0f): %s", label, gate_ms, " ".join(args))
             return None
+        except OSError as e:
+            # Binary missing or not executable. Every caller already handles
+            # None, so degrade to "this run failed" rather than letting an
+            # exception escape: raised from the startup version probe it would
+            # abort module import and take the whole shim down, turning a bad
+            # YTDLP_PATH into total loss of playback instead of one log line.
+            log.warning("yt-dlp could not be executed at %s (%s): %s", YTDLP, label, e)
+            return None
         wall_ms = (time.monotonic() - t_run) * 1000.0
         log.info("ytdlp label=%s bg=%d gate_wait_ms=%.0f wall_ms=%.0f rc=%d",
                  label, int(bg), gate_ms, wall_ms, cp.returncode)
         if cp.returncode != 0:
             log.warning("yt-dlp exit %d (%s): %s", cp.returncode, label, cp.stderr.strip()[:300])
-            return None
-        return cp.stdout
+            return cp if capture else None
+        return cp if capture else cp.stdout
     finally:
         _GATE.release(bg)
 
@@ -591,6 +620,70 @@ def _purge_cache_contents() -> None:
     log.info("yt-dlp cache purged (%d entries)", removed)
 
 
+def _seed_writable_ytdlp() -> None:
+    """Copy the image's yt-dlp into the writable location when it is the newer one.
+
+    Runs only when YTDLP_PATH points somewhere other than the image copy. Seeds
+    on first boot, and re-seeds after an image rebuild so a freshly built version
+    wins over an older self-updated one on the volume. Any failure is logged and
+    ignored: falling back to whatever is already there beats refusing to start.
+    """
+    if YTDLP == YTDLP_DIST:
+        return
+    try:
+        if not os.path.isfile(YTDLP_DIST):
+            log.warning("no dist yt-dlp at %s to seed from", YTDLP_DIST)
+            return
+        os.makedirs(os.path.dirname(YTDLP) or ".", exist_ok=True)
+        if os.path.isfile(YTDLP) and os.path.getmtime(YTDLP) >= os.path.getmtime(YTDLP_DIST):
+            return
+        shutil.copy2(YTDLP_DIST, YTDLP)
+        os.chmod(YTDLP, 0o755)
+        log.info("seeded %s from %s", YTDLP, YTDLP_DIST)
+    except OSError as e:
+        log.warning("could not seed %s from %s: %s", YTDLP, YTDLP_DIST, e)
+
+
+def _ytdlp_version() -> str:
+    out = _run(["--version"], timeout=30, label="version", bg=False)
+    return (out or "").strip()
+
+
+def _maybe_self_update(reason: str) -> bool:
+    """Update yt-dlp in place. True only when the version actually changed.
+
+    This is the last rung of the 403 ladder. YouTube rotates its player on its
+    own schedule and the Dockerfile's YTDLP_VERSION=latest is resolved at build
+    time, so an image that is not rebuilt ships one frozen version forever. That
+    is exactly how the 2026-08-21 outage happened: previews and downloads were
+    refused for days on 2026.07.04 while the fix sat published in 2026.08.19.
+    """
+    if not _SELF_UPDATE_ON_403:
+        return False
+    global _last_self_update
+    with _SELF_UPDATE_LOCK:
+        now = time.monotonic()
+        if (_last_self_update is not None
+                and now - _last_self_update < _SELF_UPDATE_MIN_INTERVAL_SEC):
+            return False
+        _last_self_update = now
+
+    before = _ytdlp_version()
+    log.warning("%s: attempting yt-dlp self-update (current %s)", reason, before or "unknown")
+    _run(["-U"], timeout=180, label="self-update", bg=True)
+    after = _ytdlp_version()
+    if after and after != before:
+        # The old player cache belongs to the old binary; keep them together.
+        log.warning("yt-dlp self-updated %s -> %s, purging cache and retrying", before or "unknown", after)
+        _purge_cache_contents()
+        return True
+    log.warning(
+        "yt-dlp self-update left version at %s, so the refusal is not a stale binary",
+        after or before or "unknown",
+    )
+    return False
+
+
 def _open_upstream(url: str, headers: dict, video_id: str):
     try:
         return _SESSION.get(url, stream=True, timeout=(8, 30), headers=headers)
@@ -649,6 +742,14 @@ def stream():
         # most common remaining cause is a stale cached player.
         if upstream is not None and upstream.status_code in (403, 410):
             _purge_ytdlp_cache(video_id)
+            # Last rung: a refusal that outlives a fresh URL and a purged cache
+            # points at the binary, not at this play. Only retry when the update
+            # actually moved the version, so a healthy shim never pays for it.
+            if _maybe_self_update(f"stream {video_id}: 403 survived a cache purge"):
+                upstream.close()
+                _url_cache_evict_if(video_id, url)
+                url = _resolve_url(video_id)
+                upstream = _open_upstream(url, upstream_headers, video_id) if url else None
 
     if upstream is None or upstream.status_code not in (200, 206):
         code = upstream.status_code if upstream is not None else "n/a"
@@ -709,27 +810,20 @@ def download():
         abort(400, "dest outside download root")
     os.makedirs(os.path.dirname(full_dest) or ".", exist_ok=True)
 
-    out = _run(
-        [
-            "-x",
-            "-f", "141/140/bestaudio[ext=m4a]/bestaudio",
-            "--audio-format", "mp3",
-            "--audio-quality", "0",
-            "--embed-metadata",
-            "--embed-thumbnail",
-            "--convert-thumbnails", "jpg",
-            "-o", f"{full_dest}.%(ext)s",
-            f"https://www.youtube.com/watch?v={video_id}",
-        ],
-        timeout=300,
-        label="download",
-        # Background on purpose, regardless of what triggered it: this holds its
-        # slot for up to five minutes, and a single star-triggered download must
-        # never be able to sit in a slot a play is waiting for.
-        bg=True,
-    )
+    ytdlp_args = [
+        "-x",
+        "-f", "141/140/bestaudio[ext=m4a]/bestaudio",
+        "--audio-format", "mp3",
+        "--audio-quality", "0",
+        "--embed-metadata",
+        "--embed-thumbnail",
+        "--convert-thumbnails", "jpg",
+        "-o", f"{full_dest}.%(ext)s",
+        f"https://www.youtube.com/watch?v={video_id}",
+    ]
     path = f"{full_dest}.mp3"
-    if out is None or not os.path.exists(path):
+
+    def _sweep_partials() -> None:
         for ext in (".jpg", ".webp", ".png", ".mp3"):
             leftover = full_dest + ext
             if os.path.exists(leftover):
@@ -737,6 +831,27 @@ def download():
                     os.remove(leftover)
                 except OSError:
                     pass
+
+    def _attempt():
+        # Background on purpose, regardless of what triggered it: this holds its
+        # slot for up to five minutes, and a single star-triggered download must
+        # never be able to sit in a slot a play is waiting for.
+        return _run(ytdlp_args, timeout=300, label="download", bg=True, capture=True)
+
+    cp = _attempt()
+    if cp is None or cp.returncode != 0 or not os.path.exists(path):
+        # Downloads can be the only thing exercising YouTube on an instance with
+        # DownloadSource=YouTube, so this path needs its own rung of the ladder
+        # rather than waiting for a play to notice the binary went stale. Gated
+        # on a 403 in stderr so an unavailable or private video never triggers a
+        # binary fetch.
+        stderr = (cp.stderr if cp is not None else "") or ""
+        if "403" in stderr and _maybe_self_update("download: yt-dlp refused with 403"):
+            _sweep_partials()
+            cp = _attempt()
+
+    if cp is None or cp.returncode != 0 or not os.path.exists(path):
+        _sweep_partials()
         return jsonify(error="download_failed", expected=path), 502
 
     # Overwrite yt-dlp's video-derived title/artist with the clean values Octo
@@ -766,6 +881,14 @@ def download():
 
     log.info("downloaded %s -> %s", video_id, path)
     return jsonify(path=path)
+
+
+# Runs under gunicorn too, where __main__ never fires. Seeding must happen
+# before anything executes the binary. The version goes in the log because a
+# stale yt-dlp still answers /health with ok:true and still resolves metadata,
+# so "which version is this" needs to be answerable without docker exec.
+_seed_writable_ytdlp()
+log.info("yt-dlp %s at %s", _ytdlp_version() or "unknown", YTDLP)
 
 
 if __name__ == "__main__":
