@@ -114,7 +114,10 @@ public enum HeartDownloadSource
 public sealed class HeartDownloadStep
 {
     public HeartDownloadSource Source { get; set; }
-    public bool Enabled { get; set; }
+    /// <summary>Legacy single switch; used only when the per-heart switches are absent.</summary>
+    public bool? Enabled { get; set; }
+    public bool? SongEnabled { get; set; }
+    public bool? AlbumEnabled { get; set; }
 }
 
 public class SubsonicSettings
@@ -274,13 +277,27 @@ public class SubsonicSettings
         var configured = HeartDownloadSources
             .Where(step => Enum.IsDefined(step.Source))
             .GroupBy(step => step.Source)
-            .Select(group => group.First())
+            .Select(group =>
+            {
+                var step = group.First();
+                return new HeartDownloadStep
+                {
+                    Source = step.Source,
+                    SongEnabled = step.SongEnabled ?? step.Enabled ?? false,
+                    AlbumEnabled = step.AlbumEnabled ?? step.Enabled ?? false,
+                };
+            })
             .ToList();
         if (configured.Count > 0)
         {
             foreach (var source in Enum.GetValues<HeartDownloadSource>())
                 if (configured.All(step => step.Source != source))
-                    configured.Add(new HeartDownloadStep { Source = source, Enabled = false });
+                    configured.Add(new HeartDownloadStep
+                    {
+                        Source = source,
+                        SongEnabled = false,
+                        AlbumEnabled = false,
+                    });
             return configured;
         }
 
@@ -293,12 +310,12 @@ public class SubsonicSettings
         };
     }
 
-    private static IReadOnlyList<HeartDownloadStep> DefaultHeartSources(
+    private IReadOnlyList<HeartDownloadStep> DefaultHeartSources(
         bool soulseek, bool youtube, bool lidarr) =>
         [
-            new() { Source = HeartDownloadSource.Soulseek, Enabled = soulseek },
-            new() { Source = HeartDownloadSource.YouTube, Enabled = youtube },
-            new() { Source = HeartDownloadSource.Lidarr, Enabled = lidarr },
+            new() { Source = HeartDownloadSource.Soulseek, SongEnabled = soulseek && DownloadOnStar, AlbumEnabled = soulseek && DownloadAlbumOnStar },
+            new() { Source = HeartDownloadSource.YouTube, SongEnabled = youtube && DownloadOnStar, AlbumEnabled = youtube && DownloadAlbumOnStar },
+            new() { Source = HeartDownloadSource.Lidarr, SongEnabled = lidarr && DownloadOnStar, AlbumEnabled = lidarr && DownloadAlbumOnStar },
         ];
     
     /// <summary>

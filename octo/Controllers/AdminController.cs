@@ -320,7 +320,8 @@ public class AdminController : ControllerBase
                     .Select(step => new Dictionary<string, object>
                     {
                         ["Source"] = step.Source.ToString(),
-                        ["Enabled"] = step.Enabled,
+                        ["SongEnabled"] = step.SongEnabled == true,
+                        ["AlbumEnabled"] = step.AlbumEnabled == true,
                     }).ToList(),
                 ["AutoDetectDownloadPath"] = subsonic.AutoDetectDownloadPath,
                 ["LibraryPath"] = subsonic.LibraryPath,
@@ -471,7 +472,8 @@ public class AdminController : ControllerBase
                         .Select(step => (JsonNode)new JsonObject
                         {
                             ["Source"] = step.Source.ToString(),
-                            ["Enabled"] = step.Enabled,
+                            ["SongEnabled"] = step.SongEnabled == true,
+                            ["AlbumEnabled"] = step.AlbumEnabled == true,
                         }).ToArray()),
                 ["AutoDetectDownloadPath"] = subsonic.AutoDetectDownloadPath,
                 ["LibraryPath"] = subsonic.LibraryPath,
@@ -751,7 +753,8 @@ public class AdminController : ControllerBase
     {
         var settings = _lidarrOpts.CurrentValue;
         var lidarrEnabled = _subsonicOpts.CurrentValue.EffectiveHeartDownloadSources()
-            .Any(step => step.Enabled && step.Source == HeartDownloadSource.Lidarr);
+            .Any(step => step.Source == HeartDownloadSource.Lidarr
+                         && (step.SongEnabled == true || step.AlbumEnabled == true));
         if (string.IsNullOrWhiteSpace(settings.BaseUrl) || string.IsNullOrWhiteSpace(settings.ApiKey))
             return lidarrEnabled
                 ? new ServiceProbe(false, "selected but not configured")

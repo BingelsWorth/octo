@@ -1379,9 +1379,10 @@ public class SubsonicController : ControllerBase
         if (!string.IsNullOrEmpty(albumCandidate)
             && _idRegistry.Lookup(albumCandidate)?.Kind == RoutingKind.Album)
         {
-            if (!_subsonicSettings.DownloadAlbumOnStar)
+            if (!_subsonicSettings.EffectiveHeartDownloadSources()
+                    .Any(step => step.AlbumEnabled == true))
             {
-                _logger.LogInformation("Starred album {AlbumId} but DownloadAlbumOnStar is off; ignoring", albumCandidate);
+                _logger.LogInformation("Starred album {AlbumId} but no album-heart source is enabled; ignoring", albumCandidate);
                 return _responseBuilder.CreateResponse(format, "starred", new { });
             }
 
@@ -1421,7 +1422,8 @@ public class SubsonicController : ControllerBase
         // Check if this is an external song (enables download-on-star)
         var (isExternal, provider, externalId) = _localLibraryService.ParseSongId(itemId);
         
-        if (isExternal && _subsonicSettings.DownloadOnStar)
+        if (isExternal && _subsonicSettings.EffectiveHeartDownloadSources()
+                .Any(step => step.SongEnabled == true))
         {
             // No storage-mode gate any more. It used to exclude Permanent on the grounds
             // that playing a track there already downloads it, but that was only ever true

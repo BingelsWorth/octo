@@ -348,29 +348,15 @@
             <div class="set-row stack source-priority-setting">
               <div class="set-info">
                 <div class="set-info-t" id="heart-source-order-label">Heart download priority</div>
-                <div class="set-info-d">Octo tries enabled sources from top to bottom and stops at the first success. Lidarr fetches the track's full album. Permanent playback and playlist downloads keep their existing direct behavior.</div>
+                <div class="set-info-d">Choose which sources handle song and album hearts. Octo tries each enabled source from top to bottom and stops at the first success. Permanent playback and playlist downloads keep their existing direct behavior.</div>
               </div>
               <div class="source-priority-list" id="heart-source-order"
                    aria-labelledby="heart-source-order-label" aria-describedby="heart-source-order-help"></div>
               <input type="hidden" id="f-heart-download-sources"
                      name="Subsonic.HeartDownloadSources" data-json="true" />
               <div class="set-info-d" id="heart-source-order-help" role="status" aria-live="polite">
-                Drag a handle or use the arrow buttons to change priority. Disabled sources keep their position and are skipped.
+                Drag a row by its handle to change priority. With the handle focused, use the arrow keys to move it.
               </div>
-            </div>
-            <div class="set-row">
-              <div class="set-info">
-                <div class="set-info-t">Download a song when starred</div>
-                <div class="set-info-d">Works in every storage mode.</div>
-              </div>
-              <label class="switch"><input type="checkbox" id="f-download-on-star" name="Subsonic.DownloadOnStar" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
-            </div>
-            <div class="set-row">
-              <div class="set-info">
-                <div class="set-info-t">Download an album when starred</div>
-                <div class="set-info-d">Star a whole album to fetch every track. Downloads run one at a time, so a full album takes a while.</div>
-              </div>
-              <label class="switch"><input type="checkbox" id="f-download-album-on-star" name="Subsonic.DownloadAlbumOnStar" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
             </div>
             <div class="set-row">
               <div class="set-info">

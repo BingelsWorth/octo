@@ -37,7 +37,7 @@ Built for:
 - **Search finds music you don't own.** Tap a result to hear it instantly via YouTube preview.
 - **Radio works on every song.** Owned tracks play at full FLAC; missing ones preview from YouTube.
 - **Heart to keep.** Star a previewed song and Octo grabs the FLAC from Soulseek, adds it to your library, and tells Navidrome to rescan. Within a minute, the song is yours forever.
-- **Search and heart whole albums.** Albums you don't own show up in search with real cover art and tracklists. Star one and Octo fetches every track. Downloads run one at a time, so a full album takes a while — turn it off with `DOWNLOAD_ALBUM_ON_STAR=false`.
+- **Search and heart whole albums.** Albums you don't own show up in search with real cover art and tracklists. Star one and Octo fetches every track. Downloads run one at a time, so a full album takes a while — album-heart sources can be disabled independently in the admin UI.
 
 Plug Octo in front of your Navidrome. Point your Subsonic apps (Feishin, Arpeggi, Narjo, etc.) at Octo instead. Nothing else changes.
 
@@ -180,11 +180,11 @@ Yes. Soulseek peers share full FLAC files with their existing ID3 tags intact. O
 
 You can use YouTube or an existing Lidarr server, or disable automatic acquisition entirely.
 
-Use **Downloads → Heart download priority** in the admin UI to enable and order Soulseek, YouTube, and Lidarr. Octo tries each enabled source from top to bottom and stops at the first success. Disabled sources keep their position. `DOWNLOAD_SOURCE` remains the initial fallback for existing and env-only installations.
+Use **Downloads → Heart download priority** in the admin UI to order Soulseek, YouTube, and Lidarr and independently choose whether each handles song hearts, album hearts, or both. Octo tries eligible sources from top to bottom and stops at the first success. `DOWNLOAD_SOURCE`, `DOWNLOAD_ON_STAR`, and `DOWNLOAD_ALBUM_ON_STAR` remain migration defaults for existing and env-only installations.
 
-Lidarr works at album level, so hearting one track fetches its full album. It is last and disabled by default; configure its URL, API key, root folder, and profiles on the Lidarr page, then enable it in the priority list.
+Lidarr works at album level, so enabling it for song hearts still fetches the song's full album. It is last and disabled by default; configure its URL, API key, root folder, and profiles on the Lidarr page, then enable the heart types you want in the priority list.
 
-To stop downloading altogether, set `Subsonic__DownloadOnStar=false`. Hearting a song will still register the favorite, but won't trigger any download. You'll keep search and radio enrichment via YouTube preview, which is useful if you only want the discovery layer and prefer to acquire FLACs another way.
+To stop downloading altogether, turn off both heart types for every source. On an env-only installation, set `Subsonic__DownloadOnStar=false` and `Subsonic__DownloadAlbumOnStar=false`. Hearts still register as favorites without acquiring files.
 
 ### Can it run on a Raspberry Pi?
 
@@ -327,7 +327,7 @@ Yes — slskd downloads are full FLACs from peer libraries that already have ID3
 Octo throws an error and the star icon stays filled. Try again later or grab the file by hand. Real failures are rare.
 
 **Can it run without Soulseek?**
-Yes. Select YouTube for MP3 downloads, Lidarr for album-level heart acquisition, or set `DOWNLOAD_ON_STAR=false` to keep discovery without automatic acquisition.
+Yes. Enable YouTube for MP3 downloads, Lidarr for album-level heart acquisition, or disable every song-heart source to keep discovery without automatic acquisition.
 
 **Can it run without Last.fm?**
 Yes, but search and radio fall back to local-only — no discovery layer. The free Last.fm key takes 30 seconds.
@@ -339,6 +339,14 @@ dotnet restore
 dotnet build
 dotnet test
 ```
+
+To build and preview the admin UI locally in an isolated Docker container:
+
+```bash
+./scripts/preview-admin.sh
+```
+
+The script opens `http://localhost:5277/admin/index.html` and uses temporary in-container settings and music directories. Run `./scripts/preview-admin.sh stop` when finished. Pass a different port as the first argument if needed.
 
 Project layout:
 

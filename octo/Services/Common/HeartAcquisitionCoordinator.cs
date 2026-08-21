@@ -34,7 +34,7 @@ public sealed class HeartAcquisitionCoordinator
 
     internal async Task AcquireTrackAsync(string provider, string externalId)
     {
-        var steps = EnabledSteps();
+        var steps = EnabledSteps(albumHeart: false);
         for (var index = 0; index < steps.Count; index++)
         {
             var isLast = index == steps.Count - 1;
@@ -61,7 +61,7 @@ public sealed class HeartAcquisitionCoordinator
 
     internal async Task AcquireAlbumAsync(string provider, string albumExternalId)
     {
-        var steps = EnabledSteps();
+        var steps = EnabledSteps(albumHeart: true);
         for (var index = 0; index < steps.Count; index++)
         {
             var isLast = index == steps.Count - 1;
@@ -86,9 +86,9 @@ public sealed class HeartAcquisitionCoordinator
         }
     }
 
-    private List<HeartDownloadSource> EnabledSteps() =>
+    private List<HeartDownloadSource> EnabledSteps(bool albumHeart) =>
         _settings.CurrentValue.EffectiveHeartDownloadSources()
-            .Where(step => step.Enabled)
+            .Where(step => albumHeart ? step.AlbumEnabled == true : step.SongEnabled == true)
             .Select(step => step.Source)
             .ToList();
 

@@ -179,9 +179,9 @@ public class HeartAcquisitionCoordinatorTests
         var steps = settings.EffectiveHeartDownloadSources();
 
         Assert.Collection(steps,
-            step => { Assert.Equal(HeartDownloadSource.Soulseek, step.Source); Assert.True(step.Enabled); },
-            step => { Assert.Equal(HeartDownloadSource.YouTube, step.Source); Assert.True(step.Enabled); },
-            step => { Assert.Equal(HeartDownloadSource.Lidarr, step.Source); Assert.False(step.Enabled); });
+            step => { Assert.Equal(HeartDownloadSource.Soulseek, step.Source); Assert.True(step.SongEnabled); Assert.True(step.AlbumEnabled); },
+            step => { Assert.Equal(HeartDownloadSource.YouTube, step.Source); Assert.True(step.SongEnabled); Assert.True(step.AlbumEnabled); },
+            step => { Assert.Equal(HeartDownloadSource.Lidarr, step.Source); Assert.False(step.SongEnabled); Assert.False(step.AlbumEnabled); });
     }
 
     [Fact]
@@ -232,6 +232,39 @@ public class HeartAcquisitionCoordinatorTests
         Assert.Collection(steps,
             step => Assert.Equal(HeartDownloadSource.Lidarr, step.Source),
             step => Assert.Equal(HeartDownloadSource.YouTube, step.Source),
-            step => { Assert.Equal(HeartDownloadSource.Soulseek, step.Source); Assert.False(step.Enabled); });
+            step => { Assert.Equal(HeartDownloadSource.Soulseek, step.Source); Assert.False(step.SongEnabled); Assert.False(step.AlbumEnabled); });
+    }
+
+    [Fact]
+    public async Task SongAndAlbumHeartsUseTheirOwnPerSourceSwitches()
+    {
+        var lidarr = new Mock<ILidarrHeartAcquisitionService>();
+        lidarr.Setup(x => x.TryAcquireAlbumAsync("soulseek", "album-id", true))
+            .ReturnsAsync(true);
+        var direct = new Mock<IDownloadService>();
+        var queue = new TrackAcquisitionQueue(new Mock<ILogger<TrackAcquisitionQueue>>().Object);
+        var settings = TestOptions.Monitor(new SubsonicSettings
+        {
+            HeartDownloadSources =
+            [
+                new() { Source = HeartDownloadSource.Soulseek, SongEnabled = true, AlbumEnabled = false },
+                new() { Source = HeartDownloadSource.Lidarr, SongEnabled = false, AlbumEnabled = true },
+                new() { Source = HeartDownloadSource.YouTube, SongEnabled = false, AlbumEnabled = false },
+            ],
+        });
+        var coordinator = new HeartAcquisitionCoordinator(settings, queue, direct.Object, lidarr.Object);
+
+        var trackAcquisition = coordinator.AcquireTrackAsync("soulseek", "track-id");
+        var request = await queue.DequeueAsync(CancellationToken.None);
+        Assert.NotNull(request);
+        Assert.Equal(DownloadSource.Soulseek, request.SourceOverride);
+        request.Completion.TrySetResult("/music/track.flac");
+        queue.Release(request);
+        await trackAcquisition;
+        await coordinator.AcquireAlbumAsync("soulseek", "album-id");
+
+        lidarr.Verify(x => x.TryAcquireTrackAsync(
+            It.IsAny<string>(), It.IsAny<string>(), It.IsAny<bool>()), Times.Never);
+        lidarr.Verify(x => x.TryAcquireAlbumAsync("soulseek", "album-id", true), Times.Once);
     }
 }

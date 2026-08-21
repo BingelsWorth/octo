@@ -242,9 +242,12 @@ document.querySelectorAll('form[data-section]').forEach(form => {
 const heartSourceMeta = {
   Soulseek: { title: 'Soulseek', detail: 'Lossless FLAC from slskd peers' },
   YouTube: { title: 'YouTube', detail: 'Lossy MP3 from the yt-dlp shim' },
-  Lidarr: { title: 'Lidarr', detail: 'Album-level handoff to your Lidarr server' },
+  Lidarr: { title: 'Lidarr', detail: 'Album automation through your Lidarr server' },
 };
 let heartSourceSteps = [];
+let draggedHeartSourceRow = null;
+let draggedHeartSourcePointer = null;
+let heartSourceDragGhost = null;
 
 function normalizeHeartSourceSteps(steps) {
   const seen = new Set();
@@ -253,10 +256,19 @@ function normalizeHeartSourceSteps(steps) {
     const source = step?.Source ?? step?.source;
     if (!heartSourceMeta[source] || seen.has(source)) return;
     seen.add(source);
-    normalized.push({ Source: source, Enabled: Boolean(step?.Enabled ?? step?.enabled) });
+    const legacyEnabled = step?.Enabled ?? step?.enabled ?? false;
+    normalized.push({
+      Source: source,
+      SongEnabled: Boolean(step?.SongEnabled ?? step?.songEnabled ?? legacyEnabled),
+      AlbumEnabled: Boolean(step?.AlbumEnabled ?? step?.albumEnabled ?? legacyEnabled),
+    });
   });
   ['Soulseek', 'YouTube', 'Lidarr'].forEach(source => {
-    if (!seen.has(source)) normalized.push({ Source: source, Enabled: source === 'Soulseek' });
+    if (!seen.has(source)) normalized.push({
+      Source: source,
+      SongEnabled: source === 'Soulseek',
+      AlbumEnabled: source === 'Soulseek',
+    });
   });
   return normalized;
 }
@@ -268,10 +280,11 @@ function renderHeartSourceOrder(steps = heartSourceSteps) {
   list.innerHTML = heartSourceSteps.map((step, index) => {
     const meta = heartSourceMeta[step.Source];
     return `
-      <div class="source-priority-row${step.Enabled ? '' : ' is-disabled'}"
+      <div class="source-priority-row${step.SongEnabled || step.AlbumEnabled ? '' : ' is-disabled'}"
            data-source="${step.Source}" data-index="${index}">
         <button type="button" class="source-drag" draggable="true"
-                aria-label="Drag ${meta.title} to reorder" title="Drag to reorder">
+                aria-label="Drag ${meta.title} to reorder. Use arrow keys to move it."
+                title="Drag to reorder; arrow keys also work">
           <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3h1M10 3h1M5 8h1M10 8h1M5 13h1M10 13h1"/></svg>
         </button>
         <span class="source-step" aria-hidden="true">${index + 1}</span>
@@ -279,18 +292,29 @@ function renderHeartSourceOrder(steps = heartSourceSteps) {
           <span class="source-title">${meta.title}</span>
           <span class="source-detail">${meta.detail}</span>
         </span>
-        <span class="source-move">
-          <button type="button" data-move="up" aria-label="Move ${meta.title} up" ${index === 0 ? 'disabled' : ''}>
-            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 10 4-4 4 4"/></svg>
-          </button>
-          <button type="button" data-move="down" aria-label="Move ${meta.title} down" ${index === heartSourceSteps.length - 1 ? 'disabled' : ''}>
-            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg>
-          </button>
+        <span class="source-heart-controls" role="group" aria-label="${meta.title} heart types">
+          <span class="source-heart-choice">
+            <span class="source-heart-label">Song hearts
+              ${step.Source === 'Lidarr' ? `
+                <span class="source-info" tabindex="0" role="img"
+                      aria-label="A song heart asks Lidarr to acquire the entire album. Enable this if you want Lidarr to handle single-song requests anyway."
+                      data-tooltip="A song heart asks Lidarr to acquire the entire album. Enable this if you want Lidarr to handle single-song requests anyway.">
+                  <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6"/><path d="M8 7v4M8 4.8v.1"/></svg>
+                </span>` : ''}
+            </span>
+            <label class="switch source-kind-switch">
+              <input type="checkbox" data-heart-kind="SongEnabled" aria-label="Use ${meta.title} for song hearts" ${step.SongEnabled ? 'checked' : ''} />
+              <span class="sw-track"></span><span class="sw-thumb"></span>
+            </label>
+          </span>
+          <span class="source-heart-choice">
+            <span class="source-heart-label">Album hearts</span>
+            <label class="switch source-kind-switch">
+              <input type="checkbox" data-heart-kind="AlbumEnabled" aria-label="Use ${meta.title} for album hearts" ${step.AlbumEnabled ? 'checked' : ''} />
+              <span class="sw-track"></span><span class="sw-thumb"></span>
+            </label>
+          </span>
         </span>
-        <label class="switch source-enabled">
-          <input type="checkbox" aria-label="Enable ${meta.title}" ${step.Enabled ? 'checked' : ''} />
-          <span class="sw-track"></span><span class="sw-thumb"></span>
-        </label>
       </div>`;
   }).join('');
   syncHeartSourceInput();
@@ -303,8 +327,8 @@ function syncHeartSourceInput() {
     input.value = JSON.stringify(heartSourceSteps);
     input.dispatchEvent(new Event('input', { bubbles: true }));
   }
-  if (help) help.textContent = heartSourceSteps.some(step => step.Enabled)
-    ? 'Drag a handle or use the arrow buttons to change priority. Disabled sources keep their position and are skipped.'
+  if (help) help.textContent = heartSourceSteps.some(step => step.SongEnabled || step.AlbumEnabled)
+    ? 'Drag a row by its handle to change priority. With the handle focused, use the arrow keys to move it.'
     : 'No heart download sources are enabled. Hearts will not acquire files.';
 }
 
@@ -318,41 +342,106 @@ function moveHeartSource(from, to) {
 }
 
 const heartSourceList = document.getElementById('heart-source-order');
-heartSourceList?.addEventListener('click', event => {
-  const button = event.target.closest('[data-move]');
-  if (!button) return;
-  const row = button.closest('.source-priority-row');
-  const from = Number(row.dataset.index);
-  moveHeartSource(from, from + (button.dataset.move === 'up' ? -1 : 1));
-});
 heartSourceList?.addEventListener('change', event => {
-  if (!event.target.matches('.source-enabled input')) return;
+  if (!event.target.matches('[data-heart-kind]')) return;
   const row = event.target.closest('.source-priority-row');
-  const source = row.dataset.source;
-  heartSourceSteps[Number(row.dataset.index)].Enabled = event.target.checked;
-  renderHeartSourceOrder();
-  document.querySelector(`.source-priority-row[data-source="${source}"] .source-enabled input`)?.focus();
+  heartSourceSteps[Number(row.dataset.index)][event.target.dataset.heartKind] = event.target.checked;
+  const step = heartSourceSteps[Number(row.dataset.index)];
+  row.classList.toggle('is-disabled', !step.SongEnabled && !step.AlbumEnabled);
+  syncHeartSourceInput();
+});
+heartSourceList?.addEventListener('keydown', event => {
+  const handle = event.target.closest('.source-drag');
+  if (!handle || !['ArrowUp', 'ArrowDown'].includes(event.key)) return;
+  event.preventDefault();
+  const from = Number(handle.closest('.source-priority-row').dataset.index);
+  moveHeartSource(from, from + (event.key === 'ArrowUp' ? -1 : 1));
 });
 heartSourceList?.addEventListener('dragstart', event => {
   const handle = event.target.closest('.source-drag');
   if (!handle) return;
   const row = handle.closest('.source-priority-row');
   event.dataTransfer.effectAllowed = 'move';
-  event.dataTransfer.setData('text/plain', row.dataset.index);
+  event.dataTransfer.setData('text/plain', row.dataset.source);
+  const bounds = row.getBoundingClientRect();
+  heartSourceDragGhost = row.cloneNode(true);
+  heartSourceDragGhost.classList.add('source-drag-ghost');
+  heartSourceDragGhost.setAttribute('aria-hidden', 'true');
+  heartSourceDragGhost.style.width = `${bounds.width}px`;
+  document.body.appendChild(heartSourceDragGhost);
+  event.dataTransfer.setDragImage(
+    heartSourceDragGhost,
+    Math.max(0, Math.min(bounds.width, event.clientX - bounds.left)),
+    Math.max(0, Math.min(bounds.height, event.clientY - bounds.top)));
+  draggedHeartSourceRow = row;
   row.classList.add('is-dragging');
 });
 heartSourceList?.addEventListener('dragend', event => {
   event.target.closest('.source-priority-row')?.classList.remove('is-dragging');
+  syncHeartSourceOrderFromDom();
+  draggedHeartSourceRow = null;
+  heartSourceDragGhost?.remove();
+  heartSourceDragGhost = null;
 });
 heartSourceList?.addEventListener('dragover', event => {
-  if (event.target.closest('.source-priority-row')) event.preventDefault();
+  const target = event.target.closest('.source-priority-row');
+  if (!target || !draggedHeartSourceRow || target === draggedHeartSourceRow) return;
+  event.preventDefault();
+  previewHeartSourceRowMove(target, event.clientY);
 });
 heartSourceList?.addEventListener('drop', event => {
-  const row = event.target.closest('.source-priority-row');
-  if (!row) return;
   event.preventDefault();
-  moveHeartSource(Number(event.dataTransfer.getData('text/plain')), Number(row.dataset.index));
 });
+heartSourceList?.addEventListener('pointerdown', event => {
+  const handle = event.target.closest('.source-drag');
+  if (!handle || event.pointerType === 'mouse') return;
+  event.preventDefault();
+  draggedHeartSourcePointer = event.pointerId;
+  draggedHeartSourceRow = handle.closest('.source-priority-row');
+  draggedHeartSourceRow.classList.add('is-dragging');
+  handle.setPointerCapture(event.pointerId);
+});
+heartSourceList?.addEventListener('pointermove', event => {
+  if (event.pointerId !== draggedHeartSourcePointer || !draggedHeartSourceRow) return;
+  const target = document.elementFromPoint(event.clientX, event.clientY)
+    ?.closest('.source-priority-row');
+  if (target) previewHeartSourceRowMove(target, event.clientY);
+});
+heartSourceList?.addEventListener('pointerup', finishHeartSourcePointerDrag);
+heartSourceList?.addEventListener('pointercancel', finishHeartSourcePointerDrag);
+
+function finishHeartSourcePointerDrag(event) {
+  if (event.pointerId !== draggedHeartSourcePointer) return;
+  draggedHeartSourceRow?.classList.remove('is-dragging');
+  syncHeartSourceOrderFromDom();
+  draggedHeartSourceRow = null;
+  draggedHeartSourcePointer = null;
+}
+
+function previewHeartSourceRowMove(target, clientY) {
+  if (!heartSourceList || !draggedHeartSourceRow || target === draggedHeartSourceRow) return;
+  const afterTarget = clientY > target.getBoundingClientRect().top + target.offsetHeight / 2;
+  heartSourceList.insertBefore(draggedHeartSourceRow, afterTarget ? target.nextSibling : target);
+  refreshHeartSourceRowNumbers();
+}
+
+function refreshHeartSourceRowNumbers() {
+  heartSourceList?.querySelectorAll('.source-priority-row').forEach((row, index) => {
+    row.dataset.index = index;
+    const number = row.querySelector('.source-step');
+    if (number) number.textContent = String(index + 1);
+  });
+}
+
+function syncHeartSourceOrderFromDom() {
+  if (!heartSourceList) return;
+  const bySource = new Map(heartSourceSteps.map(step => [step.Source, step]));
+  heartSourceSteps = [...heartSourceList.querySelectorAll('.source-priority-row')]
+    .map(row => bySource.get(row.dataset.source))
+    .filter(Boolean);
+  refreshHeartSourceRowNumbers();
+  syncHeartSourceInput();
+}
 
 document.getElementById('lidarr-test-connection')?.addEventListener('click', async (event) => {
   const button = event.currentTarget;
