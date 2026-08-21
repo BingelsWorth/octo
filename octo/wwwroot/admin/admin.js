@@ -327,9 +327,13 @@ function syncHeartSourceInput() {
     input.value = JSON.stringify(heartSourceSteps);
     input.dispatchEvent(new Event('input', { bubbles: true }));
   }
-  if (help) help.textContent = heartSourceSteps.some(step => step.SongEnabled || step.AlbumEnabled)
-    ? 'Drag a row by its handle to change priority. With the handle focused, use the arrow keys to move it.'
-    : 'No heart download sources are enabled. Hearts will not acquire files.';
+  if (help) {
+    const noneEnabled = !heartSourceSteps.some(step => step.SongEnabled || step.AlbumEnabled);
+    help.hidden = !noneEnabled;
+    help.textContent = noneEnabled
+      ? 'No heart download sources are enabled. Hearts will not acquire files.'
+      : '';
+  }
 }
 
 function moveHeartSource(from, to) {
