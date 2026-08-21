@@ -334,7 +334,7 @@
             <div class="set-row stack">
               <div class="set-info">
                 <div class="set-info-t">Download source</div>
-                <div class="set-info-d">Soulseek gives lossless FLAC but depends on a peer having the file. YouTube always resolves but is lossy MP3. "Soulseek, then YouTube" tries FLAC first and falls back to MP3 only when no peer delivers.</div>
+                <div class="set-info-d">Soulseek gives lossless FLAC but depends on a peer having the file. YouTube always resolves but is lossy MP3, fetched through the yt-dlp shim. "Soulseek, then YouTube" tries FLAC first and falls back to MP3 only when no peer delivers. Same setting as <code>DOWNLOAD_SOURCE</code> in <code>.env</code> (<code>Soulseek</code> / <code>YouTube</code> / <code>SoulseekThenYouTube</code>); set it in either place, this one wins.</div>
               </div>
               <div class="set-ctrl">
                 <div class="seg" data-seg-for="f-download-source"><span class="seg-thumb"></span></div>
@@ -357,7 +357,7 @@
                 <div class="set-info-t">Download an album when starred</div>
                 <div class="set-info-d">Star a whole album to fetch every track. Downloads run one at a time, so a full album takes a while.</div>
               </div>
-              <label class="switch"><input type="checkbox" id="f-download-album-on-star" name="Subsonic.DownloadAlbumOnStar" data-restart="true" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+              <label class="switch"><input type="checkbox" id="f-download-album-on-star" name="Subsonic.DownloadAlbumOnStar" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
             </div>
             <div class="set-row">
               <div class="set-info">
@@ -371,7 +371,7 @@
                 <div class="set-info-t">Lossless wait timeout <span class="set-opt">seconds</span></div>
                 <div class="set-info-d">Only with the wait on. 0 waits as long as the fetch needs. Above 0, playback falls back to the streaming preview after this many seconds while the download finishes in the background; some players refuse the preview on a track advertised lossless.</div>
               </div>
-              <input class="set-input" id="f-lossless-wait-timeout" name="Subsonic.LosslessWaitTimeoutSeconds" type="number" min="0" data-restart="true" />
+              <input class="set-input" id="f-lossless-wait-timeout" name="Subsonic.LosslessWaitTimeoutSeconds" type="number" min="0" />
             </div>
           </form>
         </div>
@@ -722,7 +722,7 @@
         <header class="page-header">
           <div>
             <h1>Config sources</h1>
-            <p>What value the app actually sees for each setting, after merging env vars and the settings file. Useful for figuring out why a UI change isn't taking effect — usually because something downstream captured the value at startup and needs a restart.</p>
+            <p>What value the app actually sees for each setting, after merging env vars and the settings file. Most settings now apply the moment you save. The few that cannot are marked <em>restart required</em> where you change them: the download path, the slskd connection, and the shim URL are all read once while the app starts.</p>
           </div>
         </header>
 
