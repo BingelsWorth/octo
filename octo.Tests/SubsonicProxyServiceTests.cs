@@ -23,7 +23,7 @@ public class SubsonicProxyServiceTests
         _mockHttpClientFactory = new Mock<IHttpClientFactory>();
         _mockHttpClientFactory.Setup(x => x.CreateClient(It.IsAny<string>())).Returns(httpClient);
 
-        var settings = Options.Create(new SubsonicSettings 
+        var settings = TestOptions.Monitor(new SubsonicSettings 
         { 
             Url = "http://localhost:4533" 
         });
@@ -100,6 +100,42 @@ public class SubsonicProxyServiceTests
         Assert.Contains("http://localhost:4533/rest/ping", capturedRequest!.RequestUri!.ToString());
         Assert.Contains("u=admin", capturedRequest.RequestUri.ToString());
         Assert.Contains("p=secret", capturedRequest.RequestUri.ToString());
+    }
+
+    [Fact]
+    public async Task RelayAsync_PicksUpASettingsChangeWithoutBeingRebuilt()
+    {
+        // Regression for the admin UI applying nothing until a restart. These
+        // services are singletons, so capturing IOptions.Value in the constructor
+        // froze settings at startup while the admin UI, reading through
+        // IOptionsMonitor, happily showed the new value as if it had taken effect.
+        HttpRequestMessage? capturedRequest = null;
+        var responseMessage = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(Array.Empty<byte>())
+        };
+
+        _mockHttpMessageHandler.Protected()
+            .Setup<Task<HttpResponseMessage>>("SendAsync",
+                ItExpr.IsAny<HttpRequestMessage>(),
+                ItExpr.IsAny<CancellationToken>())
+            .Callback<HttpRequestMessage, CancellationToken>((req, ct) => capturedRequest = req)
+            .ReturnsAsync(responseMessage);
+
+        var settings = TestOptions.Monitor(new SubsonicSettings { Url = "http://localhost:4533" });
+        var service = new SubsonicProxyService(
+            _mockHttpClientFactory.Object,
+            settings,
+            new HttpContextAccessor { HttpContext = new DefaultHttpContext() });
+
+        // Stand in for settings.json being rewritten by the admin UI and reloaded.
+        settings.Set(new SubsonicSettings { Url = "http://navidrome-moved:9999" });
+
+        await service.RelayAsync("rest/ping", new Dictionary<string, string> { { "u", "admin" } });
+
+        // The host is the point: the relay followed the new value with no rebuild.
+        Assert.Contains("http://navidrome-moved:9999/rest/ping", capturedRequest!.RequestUri!.ToString());
+        Assert.DoesNotContain("localhost:4533", capturedRequest.RequestUri.ToString());
     }
 
     [Fact]
@@ -353,7 +389,7 @@ public class SubsonicProxyServiceTests
         httpContext.Request.Headers["Range"] = "bytes=0-1023";
         var httpContextAccessor = new HttpContextAccessor { HttpContext = httpContext };
         var service = new SubsonicProxyService(_mockHttpClientFactory.Object, 
-            Options.Create(new SubsonicSettings { Url = "http://localhost:4533" }), 
+            TestOptions.Monitor(new SubsonicSettings { Url = "http://localhost:4533" }), 
             httpContextAccessor);
 
         var parameters = new Dictionary<string, string> { { "id", "song123" } };
@@ -389,7 +425,7 @@ public class SubsonicProxyServiceTests
         httpContext.Request.Headers["If-Range"] = "\"etag123\"";
         var httpContextAccessor = new HttpContextAccessor { HttpContext = httpContext };
         var service = new SubsonicProxyService(_mockHttpClientFactory.Object,
-            Options.Create(new SubsonicSettings { Url = "http://localhost:4533" }),
+            TestOptions.Monitor(new SubsonicSettings { Url = "http://localhost:4533" }),
             httpContextAccessor);
 
         var parameters = new Dictionary<string, string> { { "id", "song123" } };
@@ -408,7 +444,7 @@ public class SubsonicProxyServiceTests
         // Arrange
         var httpContextAccessor = new HttpContextAccessor { HttpContext = null };
         var service = new SubsonicProxyService(_mockHttpClientFactory.Object,
-            Options.Create(new SubsonicSettings { Url = "http://localhost:4533" }),
+            TestOptions.Monitor(new SubsonicSettings { Url = "http://localhost:4533" }),
             httpContextAccessor);
 
         var parameters = new Dictionary<string, string> { { "id", "song123" } };

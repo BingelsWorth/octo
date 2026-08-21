@@ -20,7 +20,13 @@ public class LocalLibraryService : ILocalLibraryService
     private readonly string _mappingFilePath;
     private readonly string _downloadDirectory;
     private readonly HttpClient _httpClient;
-    private readonly SubsonicSettings _subsonicSettings;
+    // IOptionsMonitor, not IOptions: the admin UI writes settings.json and the
+    // config provider reloads it, but IOptions.Value is resolved once and this is a
+    // singleton, so a captured copy would serve startup values until a restart. The
+    // admin UI read through IOptionsMonitor and therefore SHOWED the new value while
+    // nothing acted on it.
+    private readonly IOptionsMonitor<SubsonicSettings> subsonicSettingsOptions;
+    private SubsonicSettings _subsonicSettings => subsonicSettingsOptions.CurrentValue;
     private readonly ExternalIdRegistry _idRegistry;
     private readonly NavidromeIdentityService _navIdentity;
     private readonly ILogger<LocalLibraryService> _logger;
@@ -34,7 +40,7 @@ public class LocalLibraryService : ILocalLibraryService
     public LocalLibraryService(
         IConfiguration configuration,
         IHttpClientFactory httpClientFactory,
-        IOptions<SubsonicSettings> subsonicSettings,
+        IOptionsMonitor<SubsonicSettings> subsonicSettings,
         ExternalIdRegistry idRegistry,
         NavidromeIdentityService navIdentity,
         ILogger<LocalLibraryService> logger)
@@ -42,7 +48,7 @@ public class LocalLibraryService : ILocalLibraryService
         _downloadDirectory = configuration["Library:DownloadPath"] ?? Path.Combine(Directory.GetCurrentDirectory(), "downloads");
         _mappingFilePath = Path.Combine(_downloadDirectory, ".mappings.json");
         _httpClient = httpClientFactory.CreateClient();
-        _subsonicSettings = subsonicSettings.Value;
+        subsonicSettingsOptions = subsonicSettings;
         _idRegistry = idRegistry;
         _navIdentity = navIdentity;
         _logger = logger;
