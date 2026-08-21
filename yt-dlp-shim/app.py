@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import sqlite3
 import subprocess
 import threading
@@ -559,7 +560,35 @@ def _purge_ytdlp_cache(video_id: str) -> None:
         "stream %s: 403 survived a re-resolve, purging yt-dlp cache "
         "(rotated player is the usual cause)", video_id,
     )
-    _run(["--rm-cache-dir"], timeout=30, label="rm-cache", bg=True)
+    _purge_cache_contents()
+
+
+def _purge_cache_contents() -> None:
+    """Empty yt-dlp's cache without removing the directory itself.
+
+    yt-dlp --rm-cache-dir rmtree's the cache root, and compose mounts a named
+    volume at exactly that path. Removing a mount point from inside the
+    container is EBUSY, so the flag deletes the contents and then dies on the
+    final rmdir with exit 1. The purge looked like it failed and the log filled
+    with a traceback, when the part that mattered had already happened. Clearing
+    the contents directly does the same job and reports honestly.
+    """
+    root = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
+    cache_dir = os.path.join(root, "yt-dlp")
+    if not os.path.isdir(cache_dir):
+        return
+    removed = 0
+    for name in os.listdir(cache_dir):
+        target = os.path.join(cache_dir, name)
+        try:
+            if os.path.isdir(target) and not os.path.islink(target):
+                shutil.rmtree(target)
+            else:
+                os.remove(target)
+            removed += 1
+        except OSError as e:
+            log.warning("cache purge could not remove %s: %s", target, e)
+    log.info("yt-dlp cache purged (%d entries)", removed)
 
 
 def _open_upstream(url: str, headers: dict, video_id: str):
