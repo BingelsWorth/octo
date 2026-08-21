@@ -32,7 +32,7 @@ public class SoulseekDownloadService : BaseDownloadService
         IConfiguration configuration,
         ILocalLibraryService localLibraryService,
         IMusicMetadataService metadataService,
-        IOptions<SubsonicSettings> subsonicSettings,
+        IOptionsMonitor<SubsonicSettings> subsonicSettings,
         IOptions<SoulseekSettings> soulseekSettings,
         SoulseekClient slskd,
         YouTubeResolver youtube,
@@ -43,7 +43,7 @@ public class SoulseekDownloadService : BaseDownloadService
         Octo.Services.Notifications.NotificationService notifications,
         IServiceProvider serviceProvider,
         ILogger<SoulseekDownloadService> logger)
-        : base(configuration, localLibraryService, metadataService, subsonicSettings.Value, navIdentity, history, notifications, serviceProvider, logger)
+        : base(configuration, localLibraryService, metadataService, subsonicSettings, navIdentity, history, notifications, serviceProvider, logger)
     {
         _slskd = slskd;
         _settings = soulseekSettings.Value;

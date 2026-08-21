@@ -27,7 +27,13 @@ public record NavidromeLibrary(string? Id, string? Name, string Folder);
 /// </summary>
 public class NavidromeIdentityService
 {
-    private readonly SubsonicSettings _settings;
+    // IOptionsMonitor, not IOptions: the admin UI writes settings.json and the
+    // config provider reloads it, but IOptions.Value is resolved once and this is a
+    // singleton, so a captured copy would serve startup values until a restart. The
+    // admin UI read through IOptionsMonitor and therefore SHOWED the new value while
+    // nothing acted on it.
+    private readonly IOptionsMonitor<SubsonicSettings> settingsOptions;
+    private SubsonicSettings _settings => settingsOptions.CurrentValue;
     private readonly IHttpClientFactory _httpFactory;
     private readonly ILogger<NavidromeIdentityService> _logger;
 
@@ -44,11 +50,11 @@ public class NavidromeIdentityService
     private readonly SemaphoreSlim _detectGate = new(1, 1);
 
     public NavidromeIdentityService(
-        IOptions<SubsonicSettings> settings,
+        IOptionsMonitor<SubsonicSettings> settings,
         IHttpClientFactory httpFactory,
         ILogger<NavidromeIdentityService> logger)
     {
-        _settings = settings.Value;
+        settingsOptions = settings;
         _httpFactory = httpFactory;
         _logger = logger;
     }

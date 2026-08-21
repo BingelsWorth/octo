@@ -94,6 +94,10 @@ services:
       URL_CACHE_TTL: ${YTDLP_URL_CACHE_TTL:-3600}
       # Root the /download endpoint may write under (matches the /music mount).
       DOWNLOAD_ROOT: /music
+      # Run yt-dlp from the volume below rather than the copy baked into the
+      # image, so a self-update survives the container being recreated. The
+      # image copy is still the floor: a rebuild re-seeds this on next start.
+      YTDLP_PATH: /opt/ytdlp/yt-dlp
       # Persistent duration cache (SQLite). On the named volume below so resolved
       # "artist - title -> {video_id, duration}" mappings survive container recreate.
       META_DB_PATH: /var/lib/ytshim/meta.db
@@ -110,6 +114,12 @@ services:
       # where Navidrome scans; same host dir Octo and slskd mount, so dest paths
       # line up across containers.
       - ${DOWNLOAD_PATH:-./downloads}:/music
+      # Writable home for the yt-dlp binary. YouTube rotates its player on its
+      # own schedule and YTDLP_VERSION=latest is resolved at BUILD time, so an
+      # image that is not rebuilt ships one frozen version forever. The shim
+      # self-updates when a 403 outlives a cache purge; this is what makes that
+      # update outlive the next `docker compose up -d`.
+      - ytdlp-bin:/opt/ytdlp
 
   # Soulseek client (slskd). Web UI on 5030, peer port 50300.
   # State (config, db, downloads-in-progress) persisted to ./slskd-state so the
@@ -144,3 +154,4 @@ services:
 volumes:
   ytdlp-cache:
   ytshim-cache:
+  ytdlp-bin:

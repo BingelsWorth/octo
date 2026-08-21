@@ -18,7 +18,13 @@ public class PlaylistSyncService
     private readonly IMusicMetadataService _qobuzMetadataService;
     private readonly IEnumerable<IDownloadService> _downloadServices;
     private readonly IConfiguration _configuration;
-    private readonly SubsonicSettings _subsonicSettings;
+    // IOptionsMonitor, not IOptions: the admin UI writes settings.json and the
+    // config provider reloads it, but IOptions.Value is resolved once and this is a
+    // singleton, so a captured copy would serve startup values until a restart. The
+    // admin UI read through IOptionsMonitor and therefore SHOWED the new value while
+    // nothing acted on it.
+    private readonly IOptionsMonitor<SubsonicSettings> subsonicSettingsOptions;
+    private SubsonicSettings _subsonicSettings => subsonicSettingsOptions.CurrentValue;
     private readonly ILogger<PlaylistSyncService> _logger;
     
     // In-memory cache to track which playlist a track belongs to
@@ -38,7 +44,7 @@ public class PlaylistSyncService
         IEnumerable<IMusicMetadataService> metadataServices,
         IEnumerable<IDownloadService> downloadServices,
         IConfiguration configuration,
-        IOptions<SubsonicSettings> subsonicSettings,
+        IOptionsMonitor<SubsonicSettings> subsonicSettings,
         ILogger<PlaylistSyncService> logger)
     {
         // Get Deezer and Qobuz metadata services
@@ -49,7 +55,7 @@ public class PlaylistSyncService
         
         _downloadServices = downloadServices;
         _configuration = configuration;
-        _subsonicSettings = subsonicSettings.Value;
+        subsonicSettingsOptions = subsonicSettings;
         _logger = logger;
         
         _musicDirectory = configuration["Library:DownloadPath"] ?? "./downloads";

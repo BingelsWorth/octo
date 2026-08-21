@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Options;
 using System.Collections.Concurrent;
 using Octo.Models.Domain;
 using Octo.Models.Settings;
@@ -21,7 +22,12 @@ public abstract class BaseDownloadService : IDownloadService
     protected readonly IConfiguration Configuration;
     protected readonly ILocalLibraryService LocalLibraryService;
     protected readonly IMusicMetadataService MetadataService;
-    protected readonly SubsonicSettings SubsonicSettings;
+    // IOptionsMonitor, not a captured copy: this is a singleton, so the admin UI's
+    // Download source / storage mode / folder structure changes would otherwise not
+    // reach the download path until octorr restarted, while the admin UI itself
+    // (which already reads through IOptionsMonitor) showed them as applied.
+    private readonly IOptionsMonitor<SubsonicSettings> _subsonicOptions;
+    protected SubsonicSettings SubsonicSettings => _subsonicOptions.CurrentValue;
     protected readonly ILogger Logger;
     private readonly IServiceProvider _serviceProvider;
     private readonly NavidromeIdentityService _navIdentity;
@@ -71,7 +77,7 @@ public abstract class BaseDownloadService : IDownloadService
         IConfiguration configuration,
         ILocalLibraryService localLibraryService,
         IMusicMetadataService metadataService,
-        SubsonicSettings subsonicSettings,
+        IOptionsMonitor<SubsonicSettings> subsonicSettings,
         NavidromeIdentityService navIdentity,
         DownloadHistoryService history,
         Octo.Services.Notifications.NotificationService notifications,
@@ -81,7 +87,7 @@ public abstract class BaseDownloadService : IDownloadService
         Configuration = configuration;
         LocalLibraryService = localLibraryService;
         MetadataService = metadataService;
-        SubsonicSettings = subsonicSettings;
+        _subsonicOptions = subsonicSettings;
         _navIdentity = navIdentity;
         _history = history;
         Notifications = notifications;
