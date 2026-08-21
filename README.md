@@ -63,6 +63,7 @@ So setup is two steps: **tell Octo where Navidrome is**, and **point your app at
 
 - A free [Last.fm API key](https://www.last.fm/api/account/create) — enables radio / discovery.
 - A free [Soulseek account](https://www.slsknet.org/news/node/1) — enables lossless FLAC downloads when you star a song.
+- An existing Lidarr server — an alternative heart source when it already has indexers and a download client configured.
 
 Then:
 
@@ -177,7 +178,7 @@ Yes. Soulseek peers share full FLAC files with their existing ID3 tags intact. O
 
 ### What if I don't want to use Soulseek?
 
-Set `Subsonic__DownloadOnStar=false` in `.env`. Hearting a song will still register the favorite, but won't trigger any download. You'll keep search and radio enrichment via YouTube preview — useful if you only want the discovery layer and prefer to acquire FLACs another way.
+Set `DOWNLOAD_SOURCE=Lidarr`, then configure the Lidarr URL, API key, root folder, and profiles on Octo's Lidarr admin page. Lidarr works at album level, so a single-track heart fetches the full release. To disable acquisition entirely, set `DOWNLOAD_ON_STAR=false`.
 
 ### Can it run on a Raspberry Pi?
 
@@ -246,6 +247,14 @@ The admin UI's "Config sources" tab shows the merged effective value for every k
 - **Windows (Docker Desktop)**: use forward slashes, e.g. `DOWNLOAD_PATH=E:/Media/Music`. Do not put a drive-letter path in the admin UI's download path field; that field is a path inside the container.
 - **Manual installs** (not using the bundled compose file): slskd's `directories.downloads` must resolve to the same directory Octo's `Library:DownloadPath` points at, or Octo will never see finished downloads. Set it with the `SLSKD_DOWNLOADS_DIR` environment variable, and note that a value set in `slskd.yml` overrides that env var (slskd precedence: env vars < yaml).
 
+### Existing Lidarr setup
+
+Set `DOWNLOAD_SOURCE=Lidarr`, `LIDARR_URL`, and `LIDARR_API_KEY`, restart Octo, then open the **Lidarr** admin tab and load its root-folder and profile choices. Octo does not install or configure Lidarr's indexers or download client.
+
+The selected Lidarr root and Octo's effective Navidrome library root must expose the same underlying files. Their container paths may differ: Octo translates the imported path relative to the selected Lidarr root. For example, Lidarr `/data/music/Artist/Album/file.flac` can map to Octo `/music/Artist/Album/file.flac` when both mounts point at the same host directory.
+
+`LIDARR_COMPLETION_MODE=Accepted` (default) returns control after Lidarr accepts the album search. `Imported` makes completion/failure notifications reflect the actual import, bounded by `LIDARR_IMPORT_TIMEOUT_SECONDS` (default 1800). Neither mode blocks playback or later hearts; imported files are reconciled into download history and trigger a Navidrome scan in the background.
+
 ### Storage modes
 
 - `Stream` *(default)* — preview-only. Heart a song to download.
@@ -272,7 +281,7 @@ Octo hijacks these endpoints; everything else proxies to Navidrome unchanged:
 | `stream` | YouTube proxy with Range support, mp4/m4a passthrough |
 | `getCoverArt` | Deezer → iTunes → Last.fm aggregator with Octo watermark |
 | `getAlbum` | external album tracklists, and fills in tracks you're missing from an album you own |
-| `star` | trigger Soulseek download (multi-peer retry, FLAC), or a whole album |
+| `star` | trigger the selected Soulseek/YouTube source, or submit the full album to Lidarr |
 | `scrobble` | sliding-window prewarm of next 8 in queue |
 | `getTranscodeDecision` | OpenSubsonic — return direct-play for Octo IDs |
 
@@ -312,7 +321,7 @@ Yes — slskd downloads are full FLACs from peer libraries that already have ID3
 Octo throws an error and the star icon stays filled. Try again later or grab the file by hand. Real failures are rare.
 
 **Can it run without Soulseek?**
-Yes — set `Subsonic__DownloadOnStar=false`. Star fills the heart but won't trigger a download. Search and radio enrichment still work.
+Yes — select Lidarr for hearts, or set `DOWNLOAD_ON_STAR=false` to keep discovery without automatic acquisition.
 
 **Can it run without Last.fm?**
 Yes, but search and radio fall back to local-only — no discovery layer. The free Last.fm key takes 30 seconds.
@@ -331,6 +340,7 @@ Project layout:
 |---|---|
 | `octo/Controllers/` | Subsonic API surface, admin API |
 | `octo/Services/Soulseek/` | slskd client, multi-peer download logic |
+| `octo/Services/Lidarr/` | Lidarr API, album submission, import reconciliation |
 | `octo/Services/YouTube/` | shim HTTP client |
 | `octo/Services/CoverArt/` | Deezer / iTunes / Last.fm aggregator |
 | `octo/Services/Subsonic/` | request parsing, response building |
@@ -350,6 +360,7 @@ Project layout:
 
 - [**Navidrome**](https://www.navidrome.org/) — the music server Octo proxies.
 - [**slskd**](https://github.com/slskd/slskd) — Soulseek with a REST API.
+- [**Lidarr**](https://github.com/Lidarr/Lidarr) — optional album acquisition and import manager.
 - [**yt-dlp**](https://github.com/yt-dlp/yt-dlp) — makes YouTube preview feasible.
 - [**Last.fm**](https://www.last.fm/api) — similar-tracks API.
 - [**V1ck3s/octo-fiesta**](https://github.com/V1ck3s/octo-fiesta) — the upstream root of this lineage. The Qobuz/Deezer/Yandex Subsonic-proxy concept that Octo eventually rebuilt around YouTube + Soulseek started here.

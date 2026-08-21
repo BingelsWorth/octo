@@ -93,7 +93,14 @@ public enum DownloadSource
     YouTube,
 
     /// <summary>Try Soulseek FLAC first; fall back to YouTube MP3 if it fails.</summary>
-    SoulseekThenYouTube
+    SoulseekThenYouTube,
+
+    /// <summary>
+    /// Submit external track/album hearts to an existing Lidarr instance. Lidarr is
+    /// album-oriented, so a track heart acquires the track's full album. Non-heart
+    /// permanent downloads continue to use Soulseek.
+    /// </summary>
+    Lidarr
 }
 
 public class SubsonicSettings
@@ -235,9 +242,10 @@ public class SubsonicSettings
     public FolderStructure FolderStructure { get; set; } = FolderStructure.Flat;
 
     /// <summary>
-    /// Source for permanent downloads (default: Soulseek).
+    /// Download source (default: Soulseek). Lidarr applies to hearts only.
     /// Environment variable: DOWNLOAD_SOURCE
-    /// Values: "Soulseek" (FLAC), "YouTube" (MP3), "SoulseekThenYouTube" (FLAC with MP3 fallback)
+    /// Values: "Soulseek" (FLAC), "YouTube" (MP3), "SoulseekThenYouTube"
+    /// (FLAC with MP3 fallback), or "Lidarr" (heart-only, full album).
     /// </summary>
     public DownloadSource DownloadSource { get; set; } = DownloadSource.Soulseek;
     

@@ -38,6 +38,7 @@ public class SubsonicController : ControllerBase
     private readonly CoverArtAggregator? _coverArtAggregator;
     private readonly ExternalIdRegistry _idRegistry;
     private readonly Octo.Services.Common.TrackAcquisitionQueue _acquisitions;
+    private readonly HeartAcquisitionCoordinator _heartAcquisitions;
     private readonly Octo.Services.Common.ExternalSearchService _externalSearch;
     private readonly RadioQueueStore _radioQueueStore;
     private readonly NavidromeIdentityService _navIdentity;
@@ -54,6 +55,7 @@ public class SubsonicController : ControllerBase
         SubsonicProxyService proxyService,
         ExternalIdRegistry idRegistry,
         Octo.Services.Common.TrackAcquisitionQueue acquisitions,
+        HeartAcquisitionCoordinator heartAcquisitions,
         Octo.Services.Common.ExternalSearchService externalSearch,
         RadioQueueStore radioQueueStore,
         NavidromeIdentityService navIdentity,
@@ -74,6 +76,7 @@ public class SubsonicController : ControllerBase
         _proxyService = proxyService;
         _idRegistry = idRegistry;
         _acquisitions = acquisitions;
+        _heartAcquisitions = heartAcquisitions;
         _externalSearch = externalSearch;
         _radioQueueStore = radioQueueStore;
         _navIdentity = navIdentity;
@@ -1403,7 +1406,7 @@ public class SubsonicController : ControllerBase
 
             // An empty exclude means "download every track". The engine already skips
             // tracks that are downloaded or in flight and isolates per-track failures.
-            _downloadService.DownloadRemainingAlbumTracksInBackground(albumProviderName, albumCandidate, "");
+            _heartAcquisitions.QueueAlbum(albumProviderName, albumCandidate);
 
             // Navidrome has never seen this id, so relaying the star would just error.
             return _responseBuilder.CreateResponse(format, "starred", new { });
@@ -1424,8 +1427,7 @@ public class SubsonicController : ControllerBase
             // than inheriting whatever a concurrent play happened to ask for.
             _logger.LogInformation("Starring external song {SongId}, queueing permanent download", itemId);
 
-            _ = _acquisitions.Enqueue(provider!, externalId!, isStar: true,
-                triggerAlbumDownload: true, forcePermanent: true);
+            _heartAcquisitions.QueueTrack(provider!, externalId!);
 
             // Return success response immediately
             return _responseBuilder.CreateResponse(format, "starred", new { });

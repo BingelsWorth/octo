@@ -81,6 +81,12 @@
             </svg>
             <span>Soulseek</span>
           </button>
+          <button class="sidebar-nav-item" data-tab="lidarr">
+            <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M3 3.5h10v9H3z"/><path d="M5.5 6h5M5.5 8.5h5M5.5 11h3"/>
+            </svg>
+            <span>Lidarr</span>
+          </button>
           <button class="sidebar-nav-item" data-tab="youtube">
             <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
               <rect x="2" y="3.5" width="12" height="9" rx="1.5"/><path d="m6.5 6.5 3 1.5-3 1.5z" fill="currentColor"/>
@@ -182,6 +188,14 @@
             </div>
             <div class="status-card-body">probing…</div>
             <div class="status-card-foot">slskd · downloads on star</div>
+          </article>
+          <article class="status-card" data-svc="lidarr">
+            <div class="status-card-head">
+              <span class="status-dot pending"></span>
+              <span class="status-card-title">Lidarr</span>
+            </div>
+            <div class="status-card-body">probing…</div>
+            <div class="status-card-foot">optional album acquisition</div>
           </article>
           <article class="status-card" data-svc="ytDlpShim">
             <div class="status-card-head">
@@ -334,14 +348,15 @@
             <div class="set-row stack">
               <div class="set-info">
                 <div class="set-info-t">Download source</div>
-                <div class="set-info-d">Soulseek gives lossless FLAC but depends on a peer having the file. YouTube always resolves but is lossy MP3. "Soulseek, then YouTube" tries FLAC first and falls back to MP3 only when no peer delivers.</div>
+                <div class="set-info-d">Soulseek and YouTube keep their existing behavior. Lidarr applies to hearts only, always fetching the track's full album; permanent playback and playlist downloads remain direct.</div>
               </div>
               <div class="set-ctrl">
                 <div class="seg" data-seg-for="f-download-source"><span class="seg-thumb"></span></div>
-                <select id="f-download-source" name="Subsonic.DownloadSource" class="seg-src" hidden>
+                <select id="f-download-source" name="Subsonic.DownloadSource" class="seg-src" data-restart="true" hidden>
                   <option value="Soulseek">Soulseek</option>
                   <option value="YouTube">YouTube</option>
                   <option value="SoulseekThenYouTube">Soulseek → YouTube</option>
+                  <option value="Lidarr">Lidarr</option>
                 </select>
               </div>
             </div>
@@ -656,6 +671,86 @@
         </div>
       </section>
 
+      <!-- ─── LIDARR ─────────────────────────────────────────── -->
+      <section data-pane="lidarr">
+        <header class="page-header">
+          <div>
+            <h1>Lidarr</h1>
+            <p>Use an existing Lidarr server for track and album hearts. Lidarr must already have working indexers and a download client.</p>
+          </div>
+        </header>
+
+        <div class="info-card">
+          <h3 class="info-card-title">Album-level acquisition</h3>
+          <p>Lidarr cannot search for one track. Hearting a single external song resolves its release and imports the full album. Octo never deletes, renames, or retags Lidarr-managed files.</p>
+        </div>
+
+        <div class="set-section">
+          <div class="set-head"><h3 class="set-title">Connection</h3></div>
+          <form data-section="lidarr-connection" class="set-card" id="lidarr-connection-form">
+            <div class="set-row stack">
+              <div class="set-info">
+                <label class="set-info-t" for="f-lidarr-url">Base URL</label>
+                <div class="set-info-d">Reachable from the Octo container, for example <code>http://host.docker.internal:8686</code>.</div>
+              </div>
+              <input class="set-input" id="f-lidarr-url" name="Lidarr.BaseUrl" type="url" placeholder="http://lidarr:8686" autocomplete="url" />
+            </div>
+            <div class="set-row stack">
+              <div class="set-info">
+                <label class="set-info-t" for="f-lidarr-key">API key</label>
+                <div class="set-info-d">Found in Lidarr under Settings → General → Security.</div>
+              </div>
+              <input class="set-input" id="f-lidarr-key" name="Lidarr.ApiKey" type="password" autocomplete="off" />
+            </div>
+          </form>
+        </div>
+
+        <div class="set-section">
+          <div class="set-head"><h3 class="set-title">Album defaults</h3></div>
+          <form data-section="lidarr-defaults" class="set-card" id="lidarr-defaults-form">
+            <div class="set-row stack">
+              <div class="set-info">
+                <label class="set-info-t" for="f-lidarr-root">Root folder</label>
+                <div class="set-info-d">Save the connection first, then load choices from Lidarr. The same files must be mounted into Octo's Navidrome library root.</div>
+              </div>
+              <select class="set-input" id="f-lidarr-root" name="Lidarr.RootFolderPath" disabled><option value="">Connect to Lidarr first</option></select>
+            </div>
+            <div class="set-row stack">
+              <div class="set-info">
+                <label class="set-info-t" for="f-lidarr-quality">Quality profile</label>
+              </div>
+              <select class="set-input" id="f-lidarr-quality" name="Lidarr.QualityProfileId" data-number="true" disabled><option value="0">Connect to Lidarr first</option></select>
+            </div>
+            <div class="set-row stack">
+              <div class="set-info">
+                <label class="set-info-t" for="f-lidarr-metadata">Metadata profile</label>
+              </div>
+              <select class="set-input" id="f-lidarr-metadata" name="Lidarr.MetadataProfileId" data-number="true" disabled><option value="0">Connect to Lidarr first</option></select>
+            </div>
+            <div class="set-row stack">
+              <div class="set-info">
+                <label class="set-info-t" for="f-lidarr-completion">Completion notifications</label>
+                <div class="set-info-d">Accepted stops at a successful Lidarr handoff. Imported reports completion or failure only after files appear or the timeout expires. Neither option blocks later hearts.</div>
+              </div>
+              <select class="set-input" id="f-lidarr-completion" name="Lidarr.CompletionMode">
+                <option value="Accepted">Continue on acceptance</option>
+                <option value="Imported">Wait for import notifications</option>
+              </select>
+            </div>
+            <div class="set-row stack">
+              <div class="set-info">
+                <label class="set-info-t" for="f-lidarr-timeout">Import timeout <span class="set-opt">seconds</span></label>
+              </div>
+              <input class="set-input" id="f-lidarr-timeout" name="Lidarr.ImportTimeoutSeconds" type="number" min="60" step="60" />
+            </div>
+            <div class="set-row stack">
+              <button type="button" class="btn btn-ghost" id="lidarr-load-options">Load choices from Lidarr</button>
+              <div class="set-info-d" id="lidarr-options-status" role="status" aria-live="polite"></div>
+            </div>
+          </form>
+        </div>
+      </section>
+
       <!-- ─── YOUTUBE ────────────────────────────────────────── -->
       <section data-pane="youtube">
         <header class="page-header">
@@ -704,7 +799,7 @@
             <label for="raw-editor">JSON content</label>
             <textarea id="raw-editor" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" placeholder="{}"></textarea>
             <div class="field-help">
-              Top-level keys: <code>Subsonic</code>, <code>Library</code>, <code>Soulseek</code>, <code>YouTube</code>, <code>LastFm</code>.
+              Top-level keys: <code>Subsonic</code>, <code>Library</code>, <code>Soulseek</code>, <code>Lidarr</code>, <code>YouTube</code>, <code>LastFm</code>.
               Anything you set here overrides the corresponding env var until removed.
             </div>
           </div>
@@ -757,7 +852,7 @@
         </header>
 
         <div class="info-card">
-          <p>Octo is a Subsonic API proxy that augments your existing Navidrome library with discovery and on-demand downloading. Search includes external recommendations alongside your local songs; "Radio" on any song fans out via Last.fm and previews via YouTube; star a song you don't own and Octo grabs it via Soulseek.</p>
+          <p>Octo is a Subsonic API proxy that augments your existing Navidrome library with discovery and on-demand downloading. Search includes external recommendations alongside your local songs; "Radio" on any song fans out via Last.fm and previews via YouTube; star music you don't own and Octo acquires it through Soulseek or your existing Lidarr server.</p>
         </div>
 
         <div class="info-card">

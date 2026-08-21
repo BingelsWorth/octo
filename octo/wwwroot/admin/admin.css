@@ -941,6 +941,13 @@ section[data-pane].active { display: block; }
 .seg button:hover { color: var(--fg-soft); }
 .seg button.active { color: var(--fg); }
 
+@media (max-width: 760px) {
+  /* Four heart-source choices no longer fit comfortably in the segmented row.
+     Use the underlying native select on small screens for readable, keyboard-safe UI. */
+  .seg[data-seg-for="f-download-source"] { display: none; }
+  #f-download-source.seg-src { display: block !important; width: 100%; }
+}
+
 /* Save bar as a proper footer inside the slab card (rows have no padding of
    their own, so the injected .form-actions needs its own to line up). */
 .set-card .form-actions {

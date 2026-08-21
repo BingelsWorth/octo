@@ -132,6 +132,9 @@ async function loadSettings() {
   updateDiscoveryBanner();
   buildSegments();
   syncSegments(false);
+  if (currentSettings?.Lidarr?.BaseUrl && currentSettings?.Lidarr?.ApiKey) {
+    loadLidarrOptions();
+  }
 
   // Initial dirty-check pass: all forms start clean.
   document.querySelectorAll('form[data-section]').forEach(form => {
@@ -176,11 +179,12 @@ document.querySelectorAll('form[data-section]').forEach(form => {
 
     form.querySelectorAll('[name]').forEach(el => {
       if (!el.name?.includes('.')) return;
+      if (el.disabled) return;
       const [section, key] = el.name.split('.');
       patch[section] = patch[section] || {};
       let value;
       if (el.type === 'checkbox') value = el.checked;
-      else if (el.type === 'number') {
+      else if (el.type === 'number' || el.dataset.number === 'true') {
         value = el.value === '' ? null : Number(el.value);
         if (Number.isNaN(value)) value = null;
       } else value = el.value;
@@ -205,7 +209,11 @@ document.querySelectorAll('form[data-section]').forEach(form => {
       const result = await r.json();
       if (!r.ok) throw new Error(result.error || `HTTP ${r.status}`);
 
+      // The JSON configuration provider reloads asynchronously after the atomic
+      // write. Give it one watcher tick before testing a newly saved connection.
+      if (form.id === 'lidarr-connection-form') await new Promise(resolve => setTimeout(resolve, 600));
       currentSettings = await (await fetch('/api/admin/settings')).json();
+      if (form.id === 'lidarr-connection-form') await loadLidarrOptions();
       status.textContent = `Saved · ${new Date().toLocaleTimeString()}`;
       form.querySelector('.form-actions')?.classList.remove('dirty');
       toast(needsRestart
@@ -232,6 +240,53 @@ function isFieldDirty(el) {
       (live === null || live === undefined || live === '')) return false;
   return saved != live;
 }
+
+// Lidarr owns these choices. Keep them disabled until a saved connection can
+// supply real values; this avoids persisting a made-up profile id.
+async function loadLidarrOptions() {
+  const button = document.getElementById('lidarr-load-options');
+  const status = document.getElementById('lidarr-options-status');
+  const root = document.getElementById('f-lidarr-root');
+  const quality = document.getElementById('f-lidarr-quality');
+  const metadata = document.getElementById('f-lidarr-metadata');
+  if (!root || !quality || !metadata) return;
+
+  if (button) button.disabled = true;
+  if (status) status.textContent = 'Loading choices…';
+  [root, quality, metadata].forEach(el => { el.disabled = true; });
+  try {
+    const r = await fetch('/api/admin/lidarr/options', { cache: 'no-store' });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+
+    const selectedRoot = currentSettings?.Lidarr?.RootFolderPath ?? '';
+    const selectedQuality = String(currentSettings?.Lidarr?.QualityProfileId ?? 0);
+    const selectedMetadata = String(currentSettings?.Lidarr?.MetadataProfileId ?? 0);
+    root.innerHTML = '<option value="">Choose a root folder</option>' +
+      (data.rootFolders || []).map(x => `<option value="${esc(x.path)}">${esc(x.path)}</option>`).join('');
+    quality.innerHTML = '<option value="0">Choose a quality profile</option>' +
+      (data.qualityProfiles || []).map(x => `<option value="${x.id}">${esc(x.name)}</option>`).join('');
+    metadata.innerHTML = '<option value="0">Choose a metadata profile</option>' +
+      (data.metadataProfiles || []).map(x => `<option value="${x.id}">${esc(x.name)}</option>`).join('');
+    root.value = selectedRoot;
+    quality.value = selectedQuality;
+    metadata.value = selectedMetadata;
+    [root, quality, metadata].forEach(el => { el.disabled = false; });
+    const empty = [];
+    if (!(data.rootFolders || []).length) empty.push('root folders');
+    if (!(data.qualityProfiles || []).length) empty.push('quality profiles');
+    if (!(data.metadataProfiles || []).length) empty.push('metadata profiles');
+    if (status) status.textContent = empty.length
+      ? `Connected, but Lidarr returned no ${empty.join(', ')}.`
+      : 'Connected. Choices loaded from Lidarr.';
+  } catch (err) {
+    if (status) status.textContent = `Could not load choices: ${err.message}`;
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+document.getElementById('lidarr-load-options')?.addEventListener('click', loadLidarrOptions);
 
 // ────────────────────────────────────────────────────────────────
 // Raw config editor
