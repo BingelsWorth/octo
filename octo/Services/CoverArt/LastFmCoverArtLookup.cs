@@ -26,10 +26,12 @@ public class LastFmCoverArtLookup : ICoverArtSource
 
     private const string BaseUrl = "https://ws.audioscrobbler.com/2.0/";
 
-    public LastFmCoverArtLookup(IHttpClientFactory httpClientFactory, IOptions<LastFmSettings> settings, ILogger<LastFmCoverArtLookup> logger)
+    public LastFmCoverArtLookup(IHttpClientFactory httpClientFactory, IOptions<LastFmSettings> settings,
+        IOptions<MetadataSettings> metadataSettings, ILogger<LastFmCoverArtLookup> logger)
     {
         _http = httpClientFactory.CreateClient();
         _http.Timeout = TimeSpan.FromSeconds(8);
+        Octo.Services.Metadata.AcceptLanguageHeader.Apply(_http, metadataSettings.Value);
         _settings = settings.Value;
         _logger = logger;
     }

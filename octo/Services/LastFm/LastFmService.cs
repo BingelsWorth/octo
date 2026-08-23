@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
 using Octo.Models.Settings;
+using Octo.Services.Metadata;
 
 namespace Octo.Services.LastFm;
 
@@ -21,9 +22,11 @@ public class LastFmService
     public LastFmService(
         HttpClient httpClient,
         IOptions<LastFmSettings> settings,
+        IOptions<MetadataSettings> metadataSettings,
         ILogger<LastFmService> logger)
     {
         _httpClient = httpClient;
+        AcceptLanguageHeader.Apply(_httpClient, metadataSettings.Value);
         _settings = settings.Value;
         _logger = logger;
     }

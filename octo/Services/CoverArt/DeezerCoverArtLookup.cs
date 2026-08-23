@@ -1,4 +1,6 @@
 using System.Text.Json;
+using Microsoft.Extensions.Options;
+using Octo.Models.Settings;
 using Octo.Services.Soulseek;
 
 namespace Octo.Services.CoverArt;
@@ -23,12 +25,14 @@ public class DeezerCoverArtLookup : ICoverArtSource
 
     public string Name => "deezer";
 
-    public DeezerCoverArtLookup(IHttpClientFactory httpClientFactory, ILogger<DeezerCoverArtLookup> logger)
+    public DeezerCoverArtLookup(IHttpClientFactory httpClientFactory,
+        IOptions<MetadataSettings> metadataSettings, ILogger<DeezerCoverArtLookup> logger)
     {
         // Named so API calls go through the shared Deezer rate limiter. This same client
         // also fetches the image bytes from the CDN, which the handler leaves unmetered.
         _http = httpClientFactory.CreateClient(Octo.Services.Metadata.DeezerRateLimiter.ClientName);
         _http.Timeout = TimeSpan.FromSeconds(8);
+        Octo.Services.Metadata.AcceptLanguageHeader.Apply(_http, metadataSettings.Value);
         _logger = logger;
     }
 

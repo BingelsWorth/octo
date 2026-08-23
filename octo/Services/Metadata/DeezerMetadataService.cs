@@ -1,6 +1,8 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Options;
+using Octo.Models.Settings;
 
 namespace Octo.Services.Metadata;
 
@@ -77,6 +79,7 @@ public class DeezerMetadataService : IDisposable
     private static readonly TimeSpan PartialTtl = TimeSpan.FromMinutes(10);
 
     private readonly IHttpClientFactory _httpFactory;
+    private readonly IOptionsMonitor<MetadataSettings> _metadataOptions;
     private readonly ILogger<DeezerMetadataService> _logger;
 
     // Owned rather than injected from DI: metadata records are tens of bytes and
@@ -116,9 +119,12 @@ public class DeezerMetadataService : IDisposable
 
     public void Dispose() => _cache.Dispose();
 
-    public DeezerMetadataService(IHttpClientFactory httpFactory, ILogger<DeezerMetadataService> logger)
+    public DeezerMetadataService(IHttpClientFactory httpFactory,
+        IOptionsMonitor<MetadataSettings> metadataOptions,
+        ILogger<DeezerMetadataService> logger)
     {
         _httpFactory = httpFactory;
+        _metadataOptions = metadataOptions;
         _logger = logger;
     }
 
@@ -128,6 +134,10 @@ public class DeezerMetadataService : IDisposable
         // client here would silently bypass Deezer's budget.
         var c = _httpFactory.CreateClient(DeezerRateLimiter.ClientName);
         c.Timeout = TimeSpan.FromSeconds(8);
+        // Genre names in album payloads localize to the caller's IP country
+        // unless this header pins them. Applied per creation, so a settings
+        // change reaches the next lookup without a restart.
+        AcceptLanguageHeader.Apply(c, _metadataOptions.CurrentValue);
         return c;
     }
 
