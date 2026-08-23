@@ -9,6 +9,9 @@ namespace Octo.Tests;
 
 public class HeartAcquisitionCoordinatorTests
 {
+    private static ILogger<HeartAcquisitionCoordinator> CoordinatorLogger =>
+        new Mock<ILogger<HeartAcquisitionCoordinator>>().Object;
+
     [Fact]
     public async Task LidarrSourceRoutesTrackAndAlbumWithoutCallingDirectDownloader()
     {
@@ -21,7 +24,7 @@ public class HeartAcquisitionCoordinatorTests
         var queue = new TrackAcquisitionQueue(new Mock<ILogger<TrackAcquisitionQueue>>().Object);
         var coordinator = new HeartAcquisitionCoordinator(
             TestOptions.Monitor(new SubsonicSettings { DownloadSource = DownloadSource.Lidarr }),
-            queue, direct.Object, lidarr.Object);
+            queue, direct.Object, lidarr.Object, CoordinatorLogger);
 
         await coordinator.AcquireTrackAsync("soulseek", "track-id");
         await coordinator.AcquireAlbumAsync("soulseek", "album-id");
@@ -43,7 +46,7 @@ public class HeartAcquisitionCoordinatorTests
         var queue = new TrackAcquisitionQueue(new Mock<ILogger<TrackAcquisitionQueue>>().Object);
         var coordinator = new HeartAcquisitionCoordinator(
             TestOptions.Monitor(new SubsonicSettings { DownloadSource = DownloadSource.Soulseek }),
-            queue, direct.Object, lidarr.Object);
+            queue, direct.Object, lidarr.Object, CoordinatorLogger);
 
         await coordinator.AcquireAlbumAsync("soulseek", "album-id");
 
@@ -67,7 +70,7 @@ public class HeartAcquisitionCoordinatorTests
         var queue = new TrackAcquisitionQueue(new Mock<ILogger<TrackAcquisitionQueue>>().Object);
         var settings = TestOptions.Monitor(
             new SubsonicSettings { DownloadSource = DownloadSource.Soulseek });
-        var coordinator = new HeartAcquisitionCoordinator(settings, queue, direct.Object, lidarr.Object);
+        var coordinator = new HeartAcquisitionCoordinator(settings, queue, direct.Object, lidarr.Object, CoordinatorLogger);
 
         await coordinator.AcquireAlbumAsync("soulseek", "first-album");
         settings.Set(new SubsonicSettings { DownloadSource = DownloadSource.Lidarr });
@@ -99,7 +102,7 @@ public class HeartAcquisitionCoordinatorTests
         });
         var coordinator = new HeartAcquisitionCoordinator(settings,
             new TrackAcquisitionQueue(new Mock<ILogger<TrackAcquisitionQueue>>().Object),
-            direct.Object, lidarr.Object);
+            direct.Object, lidarr.Object, CoordinatorLogger);
 
         await coordinator.AcquireAlbumAsync("soulseek", "album-id");
 
@@ -128,7 +131,7 @@ public class HeartAcquisitionCoordinatorTests
         });
         var coordinator = new HeartAcquisitionCoordinator(settings,
             new TrackAcquisitionQueue(new Mock<ILogger<TrackAcquisitionQueue>>().Object),
-            direct.Object, lidarr.Object);
+            direct.Object, lidarr.Object, CoordinatorLogger);
 
         await coordinator.AcquireAlbumAsync("soulseek", "album-id");
 
@@ -163,7 +166,7 @@ public class HeartAcquisitionCoordinatorTests
         });
         var coordinator = new HeartAcquisitionCoordinator(settings,
             new TrackAcquisitionQueue(new Mock<ILogger<TrackAcquisitionQueue>>().Object),
-            direct.Object, lidarr.Object);
+            direct.Object, lidarr.Object, CoordinatorLogger);
 
         await coordinator.AcquireAlbumAsync("soulseek", "album-id");
 
@@ -201,7 +204,7 @@ public class HeartAcquisitionCoordinatorTests
             ],
         });
         var coordinator = new HeartAcquisitionCoordinator(
-            settings, queue, new Mock<IDownloadService>().Object, lidarr.Object);
+            settings, queue, new Mock<IDownloadService>().Object, lidarr.Object, CoordinatorLogger);
 
         var acquisition = coordinator.AcquireTrackAsync("soulseek", "track-id");
         var request = await queue.DequeueAsync(CancellationToken.None);
@@ -252,7 +255,7 @@ public class HeartAcquisitionCoordinatorTests
                 new() { Source = HeartDownloadSource.YouTube, SongEnabled = false, AlbumEnabled = false },
             ],
         });
-        var coordinator = new HeartAcquisitionCoordinator(settings, queue, direct.Object, lidarr.Object);
+        var coordinator = new HeartAcquisitionCoordinator(settings, queue, direct.Object, lidarr.Object, CoordinatorLogger);
 
         var trackAcquisition = coordinator.AcquireTrackAsync("soulseek", "track-id");
         var request = await queue.DequeueAsync(CancellationToken.None);

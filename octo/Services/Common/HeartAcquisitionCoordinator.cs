@@ -11,15 +11,17 @@ public sealed class HeartAcquisitionCoordinator
     private readonly TrackAcquisitionQueue _directQueue;
     private readonly IDownloadService _directDownloads;
     private readonly ILidarrHeartAcquisitionService _lidarr;
+    private readonly ILogger<HeartAcquisitionCoordinator> _logger;
 
     public HeartAcquisitionCoordinator(IOptionsMonitor<SubsonicSettings> settings,
         TrackAcquisitionQueue directQueue, IDownloadService directDownloads,
-        ILidarrHeartAcquisitionService lidarr)
+        ILidarrHeartAcquisitionService lidarr, ILogger<HeartAcquisitionCoordinator> logger)
     {
         _settings = settings;
         _directQueue = directQueue;
         _directDownloads = directDownloads;
         _lidarr = lidarr;
+        _logger = logger;
     }
 
     public void QueueTrack(string provider, string externalId)
@@ -51,8 +53,12 @@ public sealed class HeartAcquisitionCoordinator
                     sourceOverride: ToDirectSource(steps[index]), notifyOnFailure: isLast);
                 return;
             }
-            catch
+            catch (Exception ex)
             {
+                // A muted mid-chain failure must still leave a trace, or a track that
+                // silently fell through every source is undiagnosable from the logs.
+                _logger.LogWarning("Heart source {Source} failed for track {Provider}:{Id}: {Message}",
+                    steps[index], provider, externalId, ex.Message);
                 if (isLast) return;
                 // The next enabled source owns the fallback.
             }
@@ -78,8 +84,10 @@ public sealed class HeartAcquisitionCoordinator
                         suppressSummary: !isLast))
                     return;
             }
-            catch
+            catch (Exception ex)
             {
+                _logger.LogWarning("Heart source {Source} failed for album {Provider}:{Id}: {Message}",
+                    steps[index], provider, albumExternalId, ex.Message);
                 if (isLast) return;
                 // Continue down the configured priority list.
             }

@@ -755,14 +755,18 @@ public class AdminController : ControllerBase
         var lidarrEnabled = _subsonicOpts.CurrentValue.EffectiveHeartDownloadSources()
             .Any(step => step.Source == HeartDownloadSource.Lidarr
                          && (step.SongEnabled == true || step.AlbumEnabled == true));
+        // An absent optional service is a calm state, not a warning: most installs
+        // never configure Lidarr and their dashboard should not carry a permanent
+        // yellow dot for it. Yellow means "you enabled it but haven't finished
+        // setting it up" — incomplete config, as opposed to an outage.
         if (string.IsNullOrWhiteSpace(settings.BaseUrl) || string.IsNullOrWhiteSpace(settings.ApiKey))
             return lidarrEnabled
-                ? new ServiceProbe(false, "selected but not configured")
-                : new ServiceProbe(true, "not configured (optional)", Warning: true);
+                ? new ServiceProbe(true, "selected but not configured", Warning: true)
+                : new ServiceProbe(true, "not configured (optional)");
         if (lidarrEnabled
             && (string.IsNullOrWhiteSpace(settings.RootFolderPath)
                 || settings.QualityProfileId <= 0 || settings.MetadataProfileId <= 0))
-            return new ServiceProbe(false, "select a root folder and profiles");
+            return new ServiceProbe(true, "select a root folder and profiles", Warning: true);
         try
         {
             var ok = await _lidarr.IsReachableAsync(ct);
