@@ -39,7 +39,9 @@ public class SoulseekMetadataServiceTests
 
         var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>()).Build();
         var youtube = new YouTubeResolver(factory.Object, config, new Mock<ILogger<YouTubeResolver>>().Object);
-        var deezer = new DeezerMetadataService(factory.Object, new Mock<ILogger<DeezerMetadataService>>().Object);
+        var deezer = new DeezerMetadataService(factory.Object,
+            TestOptions.Monitor(new Octo.Models.Settings.MetadataSettings()),
+            new Mock<ILogger<DeezerMetadataService>>().Object);
 
         return new SoulseekMetadataService(
             youtube, _registry, deezer, new Mock<ILogger<SoulseekMetadataService>>().Object);

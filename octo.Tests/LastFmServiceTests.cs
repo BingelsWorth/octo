@@ -13,9 +13,10 @@ namespace Octo.Tests;
 /// </summary>
 public class LastFmServiceTests
 {
-    private static LastFmService With(string apiKey, bool enableRadio) =>
+    private static LastFmService With(string apiKey, bool enableRadio, string language = "en") =>
         new(new HttpClient(),
             Options.Create(new LastFmSettings { ApiKey = apiKey, EnableRadio = enableRadio }),
+            Options.Create(new MetadataSettings { Language = language }),
             new Mock<ILogger<LastFmService>>().Object);
 
     [Theory]
@@ -46,5 +47,17 @@ public class LastFmServiceTests
 
         Assert.True(svc.HasApiKey);
         Assert.False(svc.IsRadioEnabled);
+    }
+
+    [Fact]
+    public void Construction_AppliesMetadataLanguageToTheClient()
+    {
+        var client = new HttpClient();
+        _ = new LastFmService(client,
+            Options.Create(new LastFmSettings { ApiKey = "abc123" }),
+            Options.Create(new MetadataSettings { Language = "en" }),
+            new Mock<ILogger<LastFmService>>().Object);
+
+        Assert.Contains(client.DefaultRequestHeaders.AcceptLanguage, v => v.Value == "en");
     }
 }

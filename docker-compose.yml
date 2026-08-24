@@ -65,6 +65,9 @@ services:
       LastFm__RadioTrackCount: ${LASTFM_RADIO_TRACK_COUNT:-50}
       LastFm__RadioCacheDurationHours: ${LASTFM_RADIO_CACHE_HOURS:-24}
 
+      # ----- Metadata language (genre tags etc. from Deezer / Last.fm) -----
+      Metadata__Language: ${METADATA_LANGUAGE:-en}
+
       # ----- Notifications (ntfy / Discord webhook) — both optional -----
       Notifications__NtfyUrl: ${NTFY_URL:-}
       Notifications__NtfyToken: ${NTFY_TOKEN:-}

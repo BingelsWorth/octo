@@ -374,6 +374,19 @@
             </div>
           </form>
         </div>
+
+        <div class="set-section">
+          <div class="set-head"><h3 class="set-title">Metadata</h3></div>
+          <form data-section="metadata" class="set-card">
+            <div class="set-row stack">
+              <div class="set-info">
+                <div class="set-info-t">Tag language</div>
+                <div class="set-info-d">Language for genre and other text fetched from metadata providers (Deezer, Last.fm) and written into a download's tags. Without it, providers pick a language from the server's IP address. Two-letter code like <code>en</code>, <code>de</code>, <code>fr</code>; empty lets the provider decide. New lookups use it right away; results cached in the last 12 hours keep their old language until they expire.</div>
+              </div>
+              <input class="set-input" id="f-metadata-language" name="Metadata.Language" placeholder="en" maxlength="16" />
+            </div>
+          </form>
+        </div>
       </section>
 
       <!-- ─── SUBSONIC ───────────────────────────────────────── -->
@@ -741,7 +754,7 @@
             <label for="raw-editor">JSON content</label>
             <textarea id="raw-editor" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" placeholder="{}"></textarea>
             <div class="field-help">
-              Top-level keys: <code>Subsonic</code>, <code>Library</code>, <code>Soulseek</code>, <code>Lidarr</code>, <code>YouTube</code>, <code>LastFm</code>.
+              Top-level keys: <code>Subsonic</code>, <code>Library</code>, <code>Soulseek</code>, <code>Lidarr</code>, <code>YouTube</code>, <code>LastFm</code>, <code>Metadata</code>.
               Anything you set here overrides the corresponding env var until removed.
             </div>
           </div>

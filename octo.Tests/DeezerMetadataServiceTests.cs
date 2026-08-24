@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Logging;
 using Moq;
 using Moq.Protected;
+using Octo.Models.Settings;
 using Octo.Services.Metadata;
 using System.Net;
 
@@ -10,7 +11,8 @@ public class DeezerMetadataServiceTests
 {
     /// <summary>Builds a service whose HTTP layer answers from a url-substring to body map.
     /// Any url with no match returns 404, which exercises the best-effort paths.</summary>
-    private static DeezerMetadataService BuildService(Dictionary<string, string> routes)
+    private static DeezerMetadataService BuildService(Dictionary<string, string> routes,
+        string language = "en", List<HttpRequestMessage>? capture = null)
     {
         var handler = new Mock<HttpMessageHandler>();
         handler.Protected()
@@ -19,6 +21,7 @@ public class DeezerMetadataServiceTests
                 ItExpr.IsAny<CancellationToken>())
             .ReturnsAsync((HttpRequestMessage req, CancellationToken _) =>
             {
+                capture?.Add(req);
                 var url = req.RequestUri!.ToString();
                 foreach (var (needle, body) in routes)
                 {
@@ -35,7 +38,9 @@ public class DeezerMetadataServiceTests
         factory.Setup(f => f.CreateClient(It.IsAny<string>()))
             .Returns(() => new HttpClient(handler.Object));
 
-        return new DeezerMetadataService(factory.Object, new Mock<ILogger<DeezerMetadataService>>().Object);
+        return new DeezerMetadataService(factory.Object,
+            TestOptions.Monitor(new MetadataSettings { Language = language }),
+            new Mock<ILogger<DeezerMetadataService>>().Object);
     }
 
     /// <summary>Deezer reports throttling as HTTP 200 with this body, which is the whole
@@ -86,7 +91,9 @@ public class DeezerMetadataServiceTests
             .Returns(() => new HttpClient(handler.Object));
 
         callCount = needle => { lock (gate) { return counts.TryGetValue(needle, out var n) ? n : 0; } };
-        return new DeezerMetadataService(factory.Object, new Mock<ILogger<DeezerMetadataService>>().Object);
+        return new DeezerMetadataService(factory.Object,
+            TestOptions.Monitor(new MetadataSettings()),
+            new Mock<ILogger<DeezerMetadataService>>().Object);
     }
 
     private const string AlbumDetailJson =
@@ -382,6 +389,34 @@ public class DeezerMetadataServiceTests
 
         Assert.NotNull(await svc.GetAlbumDetailAsync("999"));
         Assert.Equal(2, calls("/album/999"));
+    }
+
+    // ---- Metadata language (issue #24) ---------------------------------------
+    // Deezer localizes genre names to the caller's IP country, so the request
+    // must pin the language or a non-English host writes localized genre tags.
+
+    [Fact]
+    public async Task Requests_CarryConfiguredAcceptLanguage()
+    {
+        var seen = new List<HttpRequestMessage>();
+        var svc = BuildService(new(), language: "en", capture: seen);
+
+        await svc.GetAlbumDetailAsync("1");
+
+        Assert.NotEmpty(seen);
+        Assert.All(seen, r => Assert.Contains(r.Headers.AcceptLanguage, v => v.Value == "en"));
+    }
+
+    [Fact]
+    public async Task Requests_OmitAcceptLanguage_WhenLanguageEmpty()
+    {
+        var seen = new List<HttpRequestMessage>();
+        var svc = BuildService(new(), language: "", capture: seen);
+
+        await svc.GetAlbumDetailAsync("1");
+
+        Assert.NotEmpty(seen);
+        Assert.All(seen, r => Assert.Empty(r.Headers.AcceptLanguage));
     }
 
     /// <summary>A throttled track search must not be cached as "this track has no metadata".</summary>

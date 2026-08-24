@@ -32,6 +32,7 @@ public class AdminController : ControllerBase
     private readonly IOptionsMonitor<LidarrSettings> _lidarrOpts;
     private readonly IOptionsMonitor<LastFmSettings> _lastFmOpts;
     private readonly IOptionsMonitor<NotificationSettings> _notificationOpts;
+    private readonly IOptionsMonitor<MetadataSettings> _metadataOpts;
     private readonly Octo.Services.Notifications.NotificationService _notifications;
     private readonly IConfiguration _config;
     private readonly SoulseekClient _slskd;
@@ -55,6 +56,7 @@ public class AdminController : ControllerBase
         IOptionsMonitor<LidarrSettings> lidarrOpts,
         IOptionsMonitor<LastFmSettings> lastFmOpts,
         IOptionsMonitor<NotificationSettings> notificationOpts,
+        IOptionsMonitor<MetadataSettings> metadataOpts,
         Octo.Services.Notifications.NotificationService notifications,
         IConfiguration config,
         SoulseekClient slskd,
@@ -79,6 +81,7 @@ public class AdminController : ControllerBase
         _lidarrOpts = lidarrOpts;
         _lastFmOpts = lastFmOpts;
         _notificationOpts = notificationOpts;
+        _metadataOpts = metadataOpts;
         _notifications = notifications;
         _config = config;
         _slskd = slskd;
@@ -367,6 +370,10 @@ public class AdminController : ControllerBase
                 ["RadioTrackCount"] = lastfm.RadioTrackCount,
                 ["RadioCacheDurationHours"] = lastfm.RadioCacheDurationHours,
             },
+            ["Metadata"] = new Dictionary<string, object>
+            {
+                ["Language"] = _metadataOpts.CurrentValue.Language ?? "",
+            },
             ["Notifications"] = new Dictionary<string, object>
             {
                 ["NtfyUrl"] = notif.NtfyUrl ?? "",
@@ -519,6 +526,10 @@ public class AdminController : ControllerBase
                 ["RadioTrackCount"] = lastfm.RadioTrackCount,
                 ["RadioCacheDurationHours"] = lastfm.RadioCacheDurationHours,
             },
+            ["Metadata"] = new JsonObject
+            {
+                ["Language"] = _metadataOpts.CurrentValue.Language ?? "",
+            },
             ["Notifications"] = new JsonObject
             {
                 ["NtfyUrl"] = notif.NtfyUrl ?? "",
@@ -614,6 +625,7 @@ public class AdminController : ControllerBase
             "YouTube:ShimUrl",
             "LastFm:ApiKey", "LastFm:EnableRadio", "LastFm:RadioTrackCount",
             "LastFm:RadioCacheDurationHours",
+            "Metadata:Language",
             "Notifications:NtfyUrl", "Notifications:NtfyToken",
             "Notifications:DiscordWebhookUrl",
             "Notifications:NotifyDownloadStarted", "Notifications:NotifyDownloadCompleted",
