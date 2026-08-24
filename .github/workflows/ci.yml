@@ -37,6 +37,15 @@ jobs:
 
       - name: Test
         run: dotnet test --configuration Release --no-build --verbosity normal
+        env:
+          # The WebApplicationFactory tests boot the real Program, and on this
+          # runner that first host build has ranged from 1m32s to over 5m
+          # across runs of the same commit's code (2m08s on the PR run, timeout
+          # on the merge run, 1m32s on the release run). The resolver kills the
+          # build at 5m by default, which turned that variance into a flaky
+          # red on main. Locally the same build takes about a second, so this
+          # only widens the CI cliff; a genuine hang still fails the job.
+          DOTNET_HOST_FACTORY_RESOLVER_DEFAULT_TIMEOUT_IN_SECONDS: "600"
 
   # The shim is Python and its image is only ever built on the deploy host, so
   # before this job a syntax error in app.py passed CI and was discovered when
