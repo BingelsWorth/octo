@@ -82,6 +82,77 @@ public class SoulseekCandidateMatchingTests
             "anything at all.flac", "M.I.A."));
     }
 
+    // ---- title-only fallback strictness ---------------------------------------
+
+    /// <summary>
+    /// The real file that answered a star for Jason Aldean's "The Truth" once the
+    /// artist dropped out of the query: every token of the title sits somewhere in the
+    /// name, so scattered-token matching passed a 136 MB dungeon-synth track. The
+    /// phrase rule is what rejects it, and the loose assertion documents why the phrase
+    /// rule exists rather than being a bug in the token rule.
+    /// </summary>
+    [Fact]
+    public void ScatteredTitleTokensDoNotSatisfyTheTitleOnlyFallback()
+    {
+        const string wrong = "UNSHEATHED GLORY - Finale - The Greataxe of Shining Truth.flac";
+
+        Assert.True(SoulseekDownloadService.FilenamePlausiblyMatchesTitle(wrong, "The Truth"));
+        Assert.False(SoulseekDownloadService.FilenamePlausiblyMatchesTitle(wrong, "The Truth", requirePhrase: true));
+    }
+
+    [Fact]
+    public void RealFilenameShapesStillPassThePhraseRule()
+    {
+        Assert.True(SoulseekDownloadService.FilenamePlausiblyMatchesTitle(
+            "Jason Aldean - The Truth.flac", "The Truth", requirePhrase: true));
+        Assert.True(SoulseekDownloadService.FilenamePlausiblyMatchesTitle(
+            "03 - The Truth.flac", "The Truth", requirePhrase: true));
+        Assert.True(SoulseekDownloadService.FilenamePlausiblyMatchesTitle(
+            @"music\Massive Attack\Mezzanine (1998)\09 - Mezzanine.flac", "Mezzanine", requirePhrase: true));
+        Assert.True(SoulseekDownloadService.FilenamePlausiblyMatchesTitle(
+            "Massive-Attack-Mezzanine-06-Dissolved-Girl.flac", "Dissolved Girl", requirePhrase: true));
+    }
+
+    /// <summary>Filenames routinely drop a leading article, and that is not a mismatch.</summary>
+    [Fact]
+    public void ALeadingArticleMayDropFromTheFilename()
+    {
+        Assert.True(SoulseekDownloadService.FilenamePlausiblyMatchesTitle(
+            "Jason Aldean - Truth.flac", "The Truth", requirePhrase: true));
+    }
+
+    /// <summary>
+    /// Dotted acronyms space-normalize into single letters no filename spells out, so
+    /// the compact form is accepted — but the anything-goes pass that zero significant
+    /// tokens used to grant is exactly what the fallback cannot afford.
+    /// </summary>
+    [Fact]
+    public void DottedAcronymsMatchCompactButNoLongerMatchAnything()
+    {
+        Assert.True(SoulseekDownloadService.FilenamePlausiblyMatchesTitle(
+            "MIA.flac", "M.I.A.", requirePhrase: true));
+        Assert.False(SoulseekDownloadService.FilenamePlausiblyMatchesTitle(
+            "anything at all.flac", "M.I.A.", requirePhrase: true));
+    }
+
+    /// <summary>
+    /// The incident's second gate: the wrong file advertised no length, and unknown
+    /// used to pass unconditionally. On the fallback, a known catalog length makes an
+    /// unadvertised one disqualifying — rejection after the download still costs the
+    /// full transfer, and this candidate class is where the 136 MB one came from.
+    /// </summary>
+    [Fact]
+    public void UnknownLengthLosesItsFreePassOnTheTitleOnlyFallback()
+    {
+        Assert.False(SoulseekDownloadService.DurationPlausible(null, 245, requireKnownLength: true));
+        Assert.False(SoulseekDownloadService.DurationPlausible(0, 245, requireKnownLength: true));
+
+        Assert.True(SoulseekDownloadService.DurationPlausible(null, 245));
+        Assert.True(SoulseekDownloadService.DurationPlausible(243, 245, requireKnownLength: true));
+        Assert.True(SoulseekDownloadService.DurationPlausible(null, null, requireKnownLength: true));
+        Assert.True(SoulseekDownloadService.DurationPlausible(245, null, requireKnownLength: true));
+    }
+
     // ---- duration -------------------------------------------------------------
 
     [Fact]

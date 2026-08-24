@@ -283,8 +283,8 @@ public class SoulseekDownloadService : BaseDownloadService
                 cleanTitle,
                 _settings.MinFileSizeBytes > 0 ? 30 : 10,
                 cancellationToken,
-                enough: h => RankCandidates(h.ToList(), routing.Title!, routing.Duration).Count >= 3);
-            ranked = RankCandidates(hits, routing.Title!, routing.Duration);
+                enough: h => RankCandidates(h.ToList(), routing.Title!, routing.Duration, titleOnlySearch: true).Count >= 3);
+            ranked = RankCandidates(hits, routing.Title!, routing.Duration, titleOnlySearch: true);
         }
 
         if (ranked.Count == 0)
@@ -611,14 +611,15 @@ public class SoulseekDownloadService : BaseDownloadService
         "version", "demo", "session", "karaoke", "cover", "reprise",
     };
 
-    private List<SoulseekFileHit> RankCandidates(List<SoulseekFileHit> hits, string title, int? expectedDuration)
+    private List<SoulseekFileHit> RankCandidates(List<SoulseekFileHit> hits, string title, int? expectedDuration,
+        bool titleOnlySearch = false)
     {
         var wanted = SoulseekClient.NormalizeExtension(_settings.PreferredExtension, "");
         return hits
             .Where(h => string.Equals(h.Extension, wanted, StringComparison.OrdinalIgnoreCase))
             .Where(h => h.Size >= _settings.MinFileSizeBytes)
-            .Where(h => FilenamePlausiblyMatchesTitle(h.Filename, title))
-            .Where(h => DurationPlausible(h.Length, expectedDuration))
+            .Where(h => FilenamePlausiblyMatchesTitle(h.Filename, title, requirePhrase: titleOnlySearch))
+            .Where(h => DurationPlausible(h.Length, expectedDuration, requireKnownLength: titleOnlySearch))
             // Variant mixes sort last rather than being dropped: sometimes a remix really
             // is what was asked for, and sometimes it is all a peer has.
             .OrderBy(h => VariantPenalty(h.Filename, title))
@@ -732,8 +733,16 @@ public class SoulseekDownloadService : BaseDownloadService
     /// Seasons". Now every significant token must appear in the leaf name. Tokens are
     /// >=3 chars so short titles like "DNA." or "M.I.A." are not over-filtered, with a
     /// trailing roman numeral handled separately since that rule would erase it.
+    ///
+    /// requirePhrase is the title-only fallback's stricter contract. Scattered tokens
+    /// are enough when the artist was in the query, but with the artist gone they are
+    /// the whole defense, and "The Truth" scattered across "The Greataxe of Shining
+    /// Truth" is how a 136 MB dungeon-synth track answered a country-song star. The
+    /// title must then appear as a contiguous phrase in the leaf, with a leading
+    /// article allowed to drop ("Truth.flac" still answers "The Truth") and dotted
+    /// acronyms allowed their compact form ("MIA.flac" still answers "M.I.A.").
     /// </summary>
-    internal static bool FilenamePlausiblyMatchesTitle(string filename, string title)
+    internal static bool FilenamePlausiblyMatchesTitle(string filename, string title, bool requirePhrase = false)
     {
         if (string.IsNullOrEmpty(filename) || string.IsNullOrEmpty(title)) return true;
         var leaf = LeafOf(filename).ToLowerInvariant();
@@ -745,17 +754,71 @@ public class SoulseekDownloadService : BaseDownloadService
             return false;
         }
 
+        // Phrase evidence supersedes token scattering rather than adding to it: the
+        // token rule would demand a "the" from a filename that legitimately dropped
+        // the article, and its scattered matches are exactly what this mode distrusts.
+        if (requirePhrase) return LeafContainsTitlePhrase(leaf, title);
+
         var tokens = TitleTokens(title);
         if (tokens.Count == 0) return true;
         return tokens.All(t => leaf.Contains(t));
     }
 
-    /// <summary>Reject a candidate whose advertised length is nowhere near the known one.</summary>
-    internal static bool DurationPlausible(int? candidateSeconds, int? expectedSeconds)
+    private static readonly string[] LeadingArticles = { "the ", "a ", "an " };
+
+    private static bool LeafContainsTitlePhrase(string leaf, string title)
     {
-        // Unknown either side is not evidence of a bad match, so let it through and let
-        // the post-download check have the final say.
-        if (candidateSeconds is not int c || expectedSeconds is not int e || c <= 0 || e <= 0) return true;
+        var leafNorm = $" {SpaceNormalize(leaf)} ";
+        var phrase = SpaceNormalize(title.ToLowerInvariant());
+        if (phrase.Length == 0) return true;
+
+        if (leafNorm.Contains($" {phrase} ", StringComparison.Ordinal)) return true;
+
+        var compact = phrase.Replace(" ", "");
+        if (compact != phrase && compact.Length >= 3
+            && leafNorm.Contains($" {compact} ", StringComparison.Ordinal)) return true;
+
+        // A dropped leading article is tolerated only when what remains names a whole
+        // separator-delimited SEGMENT of the filename. As a bare word it proves
+        // nothing: "Truth" is the track in "Jason Aldean - Truth" but a fragment in
+        // "The Greataxe of Shining Truth", and word-level tolerance here is precisely
+        // the hole the phrase rule exists to close.
+        foreach (var article in LeadingArticles)
+        {
+            if (!phrase.StartsWith(article, StringComparison.Ordinal)
+                || phrase.Length <= article.Length) continue;
+            if (LeafSegments(leaf).Contains(phrase[article.Length..])) return true;
+        }
+        return false;
+    }
+
+    private static List<string> LeafSegments(string leaf)
+    {
+        var dot = leaf.LastIndexOf('.');
+        var withoutExtension = dot > 0 ? leaf[..dot] : leaf;
+        return withoutExtension
+            .Split(new[] { '-', '_' }, StringSplitOptions.RemoveEmptyEntries)
+            .Select(SpaceNormalize)
+            .Where(segment => segment.Length > 0)
+            .ToList();
+    }
+
+    private static string SpaceNormalize(string value) =>
+        Regex.Replace(Regex.Replace(value, @"[^a-z0-9]+", " "), @"\s+", " ").Trim();
+
+    /// <summary>Reject a candidate whose advertised length is nowhere near the known one.</summary>
+    internal static bool DurationPlausible(int? candidateSeconds, int? expectedSeconds,
+        bool requireKnownLength = false)
+    {
+        // Unknown either side is normally not evidence of a bad match, so it passes and
+        // the post-download check has the final say. The title-only fallback revokes
+        // that benefit of the doubt: when the catalog length is known and the artist is
+        // no longer in the query, a candidate that will not say how long it is has
+        // already used up its plausibility, and the post-download check rejecting it
+        // later still costs the full transfer.
+        if (candidateSeconds is not int c || c <= 0)
+            return !(requireKnownLength && expectedSeconds is > 0);
+        if (expectedSeconds is not int e || e <= 0) return true;
         return Math.Abs(c - e) <= DurationToleranceSeconds;
     }
 
