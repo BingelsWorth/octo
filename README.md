@@ -37,7 +37,8 @@ Built for:
 - **Search finds music you don't own.** Tap a result to hear it instantly via YouTube preview.
 - **Radio works on every song.** Owned tracks play at full FLAC; missing ones preview from YouTube.
 - **Heart to keep.** Star a previewed song and Octo grabs the FLAC from Soulseek, adds it to your library, and tells Navidrome to rescan. Within a minute, the song is yours forever.
-- **Search and heart whole albums.** Albums you don't own show up in search with real cover art and tracklists. Star one and Octo fetches every track. Downloads run one at a time, so a full album takes a while — album-heart sources can be disabled independently in the admin UI.
+- **Search and heart whole albums.** Albums you don't own show up in search with real cover art and tracklists. Star one and Octo fetches every track. Downloads run one at a time, so a full album takes a while; album-heart sources can be disabled independently in the admin UI.
+- **Bring your own Lidarr.** Already running [Lidarr](https://github.com/Lidarr/Lidarr)? Add it as a heart source and order it against Soulseek and YouTube in the admin UI. Hearts hand off to Lidarr at album level, and finished imports land back in your library with a rescan.
 
 Plug Octo in front of your Navidrome. Point your Subsonic apps (Feishin, Arpeggi, Narjo, etc.) at Octo instead. Nothing else changes.
 
@@ -49,7 +50,8 @@ Octo sits **in front of** your existing Navidrome. Your Subsonic app talks to Oc
    Subsonic app          Octo               Navidrome
   (Feishin, Arpeggi) ──▶  :5274  ──────────▶  (your library)
                            ├─▶ yt-dlp shim   (instant previews)
-                           └─▶ slskd         (downloads on star)
+                           ├─▶ slskd         (downloads on star)
+                           └─▶ your Lidarr   (optional heart source)
 ```
 
 So setup is two steps: **tell Octo where Navidrome is**, and **point your app at Octo**.
@@ -63,7 +65,7 @@ So setup is two steps: **tell Octo where Navidrome is**, and **point your app at
 
 - A free [Last.fm API key](https://www.last.fm/api/account/create) — enables radio / discovery.
 - A free [Soulseek account](https://www.slsknet.org/news/node/1) — enables lossless FLAC downloads when you star a song.
-- An existing Lidarr server — an alternative heart source when it already has indexers and a download client configured.
+- An existing [Lidarr](https://github.com/Lidarr/Lidarr) server: an alternative heart source once it has working indexers and a download client.
 
 Then:
 
