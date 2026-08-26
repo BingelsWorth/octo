@@ -2,6 +2,12 @@ name: Docker Build & Push
 
 on:
   workflow_dispatch:
+    inputs:
+      image_tag:
+        description: Deployable GHCR tag (for example, radio-test)
+        required: true
+        default: manual
+        type: string
   push:
     # Dated releases (2026.07.29) as well as any future v-prefixed ones. Without the
     # second pattern a dated tag pushes silently and never builds an image.
@@ -97,6 +103,10 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
+            # Manual builds get a caller-chosen stable tag in addition to the
+            # immutable commit SHA, so a deployment host has one predictable
+            # image reference to pull while testing an unmerged branch.
+            type=raw,value=${{ inputs.image_tag }},enable=${{ github.event_name == 'workflow_dispatch' }}
             # Was gated on refs/heads/dev, a branch this repo does not have, so `latest`
             # was never published at all and `docker pull ...:latest` failed for everyone.
             type=raw,value=latest,enable={{is_default_branch}}
