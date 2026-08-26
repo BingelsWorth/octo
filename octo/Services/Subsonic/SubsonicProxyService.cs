@@ -35,6 +35,12 @@ public class SubsonicProxyService
     public async Task<(byte[] Body, string? ContentType)> RelayAsync(
         string endpoint, 
         Dictionary<string, string> parameters)
+        => await RelayAsync(endpoint, parameters.AsEnumerable());
+
+    /// <summary>Relay overload for batch endpoints whose repeated keys cannot be
+    /// represented by the legacy request dictionary.</summary>
+    public async Task<(byte[] Body, string? ContentType)> RelayAsync(
+        string endpoint, IEnumerable<KeyValuePair<string, string>> parameters)
     {
         if (string.IsNullOrWhiteSpace(_subsonicSettings.Url)
             || !Uri.TryCreate(_subsonicSettings.Url, UriKind.Absolute, out _))

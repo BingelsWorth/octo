@@ -488,7 +488,7 @@
         </div>
 
         <div class="set-section">
-          <div class="set-head"><h3 class="set-title">Radio</h3></div>
+          <div class="set-head"><h3 class="set-title">Song radio</h3></div>
           <form data-section="lastfm-radio" class="set-card">
             <div class="set-row">
               <div class="set-info">
@@ -512,6 +512,66 @@
               <input class="set-input" id="f-lastfm-cache" name="LastFm.RadioCacheDurationHours" type="number" min="0" />
             </div>
           </form>
+        </div>
+
+        <div class="set-section">
+          <div class="set-head">
+            <h3 class="set-title">Personalized radio</h3>
+            <p class="set-desc">Automatically offers read-only stations in each listener's playlist list. Completed plays stay private in Octo.</p>
+          </div>
+          <form data-section="lastfm-personalized" class="set-card">
+            <div class="set-row">
+              <div class="set-info"><div class="set-info-t">Learn personalized stations</div><div class="set-info-d">Starts with Starter Radio, then grows into Your Mix, discovery, artist, and genre stations.</div></div>
+              <label class="switch"><input type="checkbox" name="LastFm.EnablePersonalizedStations" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
+            <div class="set-row stack">
+              <div class="set-info"><div class="set-info-t">Discovery balance</div><div class="set-info-d">Percentage of Your Mix reserved for less-familiar recommendations.</div></div>
+              <input class="set-input" name="LastFm.DiscoveryPercent" type="number" min="0" max="100" />
+            </div>
+            <div class="set-row stack">
+              <div class="set-info"><div class="set-info-t">Tracks per station</div><div class="set-info-d">Applies to generated personalized and pinned queues.</div></div>
+              <input class="set-input" name="LastFm.StationTrackCount" type="number" min="10" max="100" />
+            </div>
+            <details class="radio-advanced">
+              <summary>Learning and refresh tuning</summary>
+              <div class="set-row stack"><div class="set-info"><div class="set-info-t">Minimum completed plays</div><div class="set-info-d">Starter Radio becomes Your Mix after this many signals.</div></div><input class="set-input" name="LastFm.MinimumPlays" type="number" min="3" max="100" /></div>
+              <div class="set-row stack"><div class="set-info"><div class="set-info-t">Refresh interval (hours)</div><div class="set-info-d">Stale stations remain playable while a background refresh runs.</div></div><input class="set-input" name="LastFm.RefreshIntervalHours" type="number" min="1" max="168" /></div>
+              <div class="set-row stack"><div class="set-info"><div class="set-info-t">History retention (days)</div><div class="set-info-d">Bounded per-user listening history stored in <code>/app/config</code>.</div></div><input class="set-input" name="LastFm.HistoryRetentionDays" type="number" min="7" max="365" /></div>
+            </details>
+          </form>
+        </div>
+
+        <div class="set-section">
+          <div class="set-head"><h3 class="set-title">Pinned discovery</h3><p class="set-desc">Static categories whose track queues refresh automatically. Add up to 12; each can combine five Last.fm tags.</p></div>
+          <form data-section="lastfm-discovery" class="set-card" id="radio-discovery-form">
+            <div class="set-row">
+              <div class="set-info"><div class="set-info-t">Show pinned stations</div><div class="set-info-d">Hiding these stations preserves their definitions and snapshots.</div></div>
+              <label class="switch"><input type="checkbox" name="LastFm.EnableDiscoveryStations" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
+            <div class="set-row stack">
+              <div class="radio-preset-actions" aria-label="Add a discovery station">
+                <button class="btn btn-ghost" type="button" data-radio-preset="rock">+ Rock</button>
+                <button class="btn btn-ghost" type="button" data-radio-preset="jazz">+ Jazz</button>
+                <button class="btn btn-ghost" type="button" data-radio-preset="electronic">+ Electronic</button>
+                <button class="btn btn-ghost" type="button" id="radio-add-custom">+ Custom</button>
+              </div>
+              <div id="radio-discovery-list" class="radio-discovery-list" aria-live="polite"></div>
+              <input type="hidden" id="radio-discovery-json" name="LastFm.DiscoveryStations" data-json="true" />
+              <div id="radio-discovery-error" class="field-error" role="alert" hidden></div>
+            </div>
+          </form>
+        </div>
+
+        <div class="set-section">
+          <div class="set-head"><h3 class="set-title">Station status</h3><p class="set-desc">Last good snapshots stay available during refreshes and provider outages.</p></div>
+          <div class="set-card radio-status-card">
+            <div class="set-row radio-status-toolbar">
+              <label class="set-info" for="radio-user"><span class="set-info-t">Listener</span><span class="set-info-d" id="radio-listener-summary">Appears after a Subsonic client signs in through Octo.</span></label>
+              <div class="set-ctrl"><select class="set-input" id="radio-user" aria-label="Radio listener" hidden></select><button class="btn btn-primary" id="radio-refresh" type="button" disabled>Refresh now</button></div>
+            </div>
+            <div id="radio-status" class="radio-status" aria-live="polite">Loading radio status…</div>
+            <div class="set-row radio-reset-row"><div class="set-info"><div class="set-info-t">Reset this listener's Radio history</div><div class="set-info-d">Removes learned signals and generated snapshots only. Downloaded music is untouched.</div></div><button class="btn btn-ghost" id="radio-reset" type="button" disabled>Reset history</button></div>
+          </div>
         </div>
       </section>
 
@@ -755,6 +815,7 @@
             <textarea id="raw-editor" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" placeholder="{}"></textarea>
             <div class="field-help">
               Top-level keys: <code>Subsonic</code>, <code>Library</code>, <code>Soulseek</code>, <code>Lidarr</code>, <code>YouTube</code>, <code>LastFm</code>, <code>Metadata</code>.
+              Radio remains inside <code>LastFm</code>; pinned rows are the ordered <code>LastFm.DiscoveryStations</code> array and should be edited as complete objects with stable <code>Id</code>, <code>Name</code>, <code>Enabled</code>, and <code>Tags</code> fields.
               Anything you set here overrides the corresponding env var until removed.
             </div>
           </div>

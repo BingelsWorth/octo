@@ -36,6 +36,7 @@ Built for:
 
 - **Search finds music you don't own.** Tap a result to hear it instantly via YouTube preview.
 - **Radio works on every song.** Owned tracks play at full FLAC; missing ones preview from YouTube.
+- **Personal stations appear automatically.** Completed plays create Starter Radio, then Your Mix, discovery, artist, and genre stations in the client's normal playlist list. Admin-pinned tag categories stay fixed while their queues refresh.
 - **Heart to keep.** Star a previewed song and Octo grabs the FLAC from Soulseek, adds it to your library, and tells Navidrome to rescan. Within a minute, the song is yours forever.
 - **Search and heart whole albums.** Albums you don't own show up in search with real cover art and tracklists. Star one and Octo fetches every track. Downloads run one at a time, so a full album takes a while; album-heart sources can be disabled independently in the admin UI.
 - **Bring your own Lidarr.** Already running [Lidarr](https://github.com/Lidarr/Lidarr)? Add it as a heart source and order it against Soulseek and YouTube in the admin UI. Hearts hand off to Lidarr at album level, and finished imports land back in your library with a rescan.
@@ -133,6 +134,14 @@ git checkout 2026.07.29 && ./install.sh
 
 Prebuilt multi-arch images are also published to `ghcr.io/winters27/octo`, tagged `latest`, the release date, and the commit sha.
 
+### 2026.08.25 release notes
+
+- Adds automatic per-user Last.fm Radio stations as read-only Subsonic and native Navidrome playlists.
+- Adds Starter Radio, Your Mix, discovery, artist-neighborhood, genre, and administrator-pinned tag stations.
+- Adds the in-process Radio refresh worker and bounded `/app/config/lastfm-radio-state.json` store; no Radio service or container was added.
+- Expands the existing Last.fm admin pane with personalized settings, ordered pinned categories, station status, refresh, and per-user reset.
+- Preserves local-first playback, external previews, heart acquisition, queue prewarming, and ordinary Navidrome playlist behavior.
+
 ## Admin dashboard
 
 `http://<your-host>:5274/admin`
@@ -172,7 +181,7 @@ Navidrome's radio plays songs from your existing library. Octo's radio reaches *
 
 ### Is my data going anywhere?
 
-No. Octo runs entirely on your hardware. It calls Last.fm (for similar-tracks data), YouTube via yt-dlp (for audio previews), and Soulseek peers (for downloads). Those are outbound queries — nothing about your library or listening history is shipped anywhere.
+Octo's per-user play ledger and generated snapshots stay in `/app/config/lastfm-radio-state.json`. It sends Last.fm only the artist, title, and tag lookups needed to build recommendations; it does not send the ledger, Navidrome credentials, usernames, or stream URLs. YouTube and Soulseek receive the ordinary outbound lookups needed for preview/acquisition.
 
 ### Do downloaded songs get tagged correctly?
 
@@ -232,7 +241,7 @@ Three Docker containers in one `docker compose` stack:
                               └────────────┘    └─────────┘
 ```
 
-- **`octo`** (port 5274) — the proxy + admin UI. Hijacks the Subsonic endpoints that need enrichment (`search3`, `getSimilarSongs2`, `stream`, `getCoverArt`, `star`, `scrobble`, `getTranscodeDecision`); passes everything else through to Navidrome unchanged.
+- **`octo`** (port 5274) — the proxy + admin UI. Personalized Radio, its state store, recommendation queue, and refresh worker all run in this process. Octo hijacks the Subsonic endpoints that need enrichment and passes everything else through to Navidrome.
 - **`yt-dlp-shim`** (internal) — wraps `yt-dlp` behind two HTTP endpoints. Process-isolation keeps yt-dlp's frequent extractor breakage from affecting the rest of the stack.
 - **`slskd`** (port 5030) — Soulseek client with REST API. Octo authenticates and queues downloads.
 
@@ -247,6 +256,10 @@ Octo reads from three sources, highest priority first:
 3. `appsettings.json` shipped with the image.
 
 The admin UI's "Config sources" tab shows the merged effective value for every key.
+
+Last.fm Radio is enabled by default. Scalar deployment defaults use `LASTFM_ENABLE_PERSONALIZED_STATIONS`, `LASTFM_ENABLE_DISCOVERY_STATIONS`, `LASTFM_HISTORY_RETENTION_DAYS`, `LASTFM_DISCOVERY_PERCENT`, `LASTFM_STATION_TRACK_COUNT`, `LASTFM_REFRESH_INTERVAL_HOURS`, and `LASTFM_MINIMUM_PLAYS`. Ordered pinned categories are managed as `LastFm.DiscoveryStations` in the existing Last.fm admin tab or settings JSON because encoding structured rows in `.env` is brittle.
+
+Radio state is a bounded, versioned, single-writer JSON file. Do not mount the same `/app/config/lastfm-radio-state.json` into multiple Octo instances; cross-process locking is not part of this release.
 
 ### Download path on Windows and manual installs
 
@@ -282,11 +295,13 @@ Octo hijacks these endpoints; everything else proxies to Navidrome unchanged:
 |---|---|
 | `search3` | merge local + Last.fm-driven external songs and Deezer-driven external albums |
 | `getSimilarSongs2` | radio queue with local-first preference |
+| `getPlaylists`, `getPlaylist` | append authenticated per-user read-only Radio snapshots and materialize tracks local-first |
+| `createPlaylist`, `updatePlaylist`, `deletePlaylist` | protect reserved Radio IDs while relaying ordinary mutations |
 | `stream` | YouTube proxy with Range support, mp4/m4a passthrough |
 | `getCoverArt` | Deezer → iTunes → Last.fm aggregator with Octo watermark |
 | `getAlbum` | external album tracklists, and fills in tracks you're missing from an album you own |
 | `star` | try enabled heart sources in priority order and stop after the first successful track/album acquisition |
-| `scrobble` | sliding-window prewarm of next 8 in queue |
+| `scrobble` | preserve Navidrome scrobbling, prewarm the next 8, and learn deduplicated completed plays for the authenticated user |
 | `getTranscodeDecision` | OpenSubsonic — return direct-play for Octo IDs |
 
 ### Soulseek download details
@@ -328,7 +343,7 @@ Octo throws an error and the star icon stays filled. Try again later or grab the
 Yes. Enable YouTube for MP3 downloads, Lidarr for album-level heart acquisition, or disable every song-heart source to keep discovery without automatic acquisition.
 
 **Can it run without Last.fm?**
-Yes, but search and radio fall back to local-only — no discovery layer. The free Last.fm key takes 30 seconds.
+Yes. Existing snapshots are served first; Starter and pinned stations can fall back to accessible local seeds/genres, but fresh external discovery is degraded. The Last.fm pane reports that state explicitly.
 
 ### Development
 
@@ -355,6 +370,7 @@ Project layout:
 | `octo/Services/Lidarr/` | Lidarr API, album submission, import reconciliation |
 | `octo/Services/YouTube/` | shim HTTP client |
 | `octo/Services/CoverArt/` | Deezer / iTunes / Last.fm aggregator |
+| `octo/Services/LastFm/` | Last.fm client, Radio state/recommendations, in-process refresh queue and worker |
 | `octo/Services/Subsonic/` | request parsing, response building |
 | `octo/Services/Admin/` | settings file writer (atomic, deep-merge) |
 | `octo/wwwroot/admin/` | the admin UI (vanilla JS, hand-rolled CSS, no build step) |

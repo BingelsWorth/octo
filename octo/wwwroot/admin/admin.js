@@ -119,6 +119,8 @@ async function loadSettings() {
   syncPlaybackSourceControl();
   updateStreamSettings();
   renderHeartSourceOrder(currentSettings?.Subsonic?.HeartDownloadSources);
+  renderRadioDiscovery(currentSettings?.LastFm?.DiscoveryStations);
+  loadRadioStatus();
 
   // Meta references
   const cfgPath = document.getElementById('meta-config-path');
@@ -182,6 +184,7 @@ document.querySelectorAll('form[data-section]').forEach(form => {
 
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
+    if (form.id === 'radio-discovery-form' && !syncRadioDiscoveryInput()) return;
     const patch = {};
     let needsRestart = false;
 
@@ -689,6 +692,7 @@ function escapeHtml(s) {
 navItems.forEach(btn => btn.addEventListener('click', () => {
   if (btn.dataset.tab === 'raw') loadRawConfig();
   if (btn.dataset.tab === 'sources') loadConfigSources();
+  if (btn.dataset.tab === 'lastfm') loadRadioStatus();
 }));
 // If the page boots straight into one of these tabs (#raw / #sources), prime it.
 if (location.hash === '#raw') loadRawConfig();
@@ -738,6 +742,171 @@ function updateDiscoveryBanner() {
   banner.hidden = !!keyInput.value.trim();
 }
 document.getElementById('f-lastfm-key')?.addEventListener('input', updateDiscoveryBanner);
+
+// Personalized + pinned Radio remains part of the Last.fm pane. The editor keeps
+// each original object intact so fields introduced by a newer Octo are not erased
+// when an older browser session renames or reorders a row.
+let radioDiscoveryStations = [];
+const radioPresets = {
+  rock: { Name: 'Rock Discovery', Tags: ['rock', 'alternative rock'] },
+  jazz: { Name: 'Jazz Discovery', Tags: ['jazz', 'contemporary jazz'] },
+  electronic: { Name: 'Electronic Discovery', Tags: ['electronic', 'electronica', 'idm'] },
+};
+
+function radioId() {
+  return (crypto.randomUUID?.() || `${Date.now()}${Math.random()}`).replace(/[^a-z0-9]/gi, '').slice(0, 24).toLowerCase();
+}
+
+function normalizeRadioStation(item = {}) {
+  return { ...item, Id: String(item.Id ?? item.id ?? radioId()), Name: String(item.Name ?? item.name ?? ''),
+    Enabled: Boolean(item.Enabled ?? item.enabled ?? true),
+    Tags: Array.isArray(item.Tags ?? item.tags) ? [...(item.Tags ?? item.tags)] : [] };
+}
+
+function renderRadioDiscovery(stations = radioDiscoveryStations) {
+  const list = document.getElementById('radio-discovery-list');
+  if (!list) return;
+  radioDiscoveryStations = (Array.isArray(stations) ? stations : []).map(normalizeRadioStation);
+  list.innerHTML = radioDiscoveryStations.length ? radioDiscoveryStations.map((station, index) => `
+    <div class="radio-discovery-row" data-index="${index}">
+      <button type="button" class="source-drag" draggable="true" data-radio-drag aria-label="Drag ${escapeHtml(station.Name || 'station')} to reorder"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3h1M10 3h1M5 8h1M10 8h1M5 13h1M10 13h1"/></svg></button>
+      <span class="source-step" aria-hidden="true">${index + 1}</span>
+      <div class="radio-discovery-fields">
+        <label><span>Station name</span><input class="set-input" data-radio-field="Name" value="${escapeHtml(station.Name)}" maxlength="100" /></label>
+        <label><span>Last.fm tags</span><input class="set-input" data-radio-field="Tags" value="${escapeHtml(station.Tags.join(', '))}" placeholder="electronic, electronica, idm" /></label>
+      </div>
+      <label class="switch" title="Show this station"><input type="checkbox" data-radio-field="Enabled" ${station.Enabled ? 'checked' : ''} aria-label="Enable ${escapeHtml(station.Name || 'station')}" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+      <div class="radio-row-actions" role="group" aria-label="Actions for ${escapeHtml(station.Name || 'station')}">
+        <button class="btn btn-ghost" type="button" data-radio-action="up">Up</button><button class="btn btn-ghost" type="button" data-radio-action="down">Down</button>
+        <button class="btn btn-ghost" type="button" data-radio-action="refresh">Refresh</button><button class="btn btn-ghost" type="button" data-radio-action="remove">Remove</button>
+      </div>
+    </div>`).join('') : '<div class="radio-empty">No pinned categories yet. Add a preset or create a custom tag station.</div>';
+  syncRadioDiscoveryInput(false);
+}
+
+function readRadioDiscoveryRows() {
+  document.querySelectorAll('.radio-discovery-row').forEach((row, index) => {
+    const station = radioDiscoveryStations[index]; if (!station) return;
+    station.Name = row.querySelector('[data-radio-field="Name"]')?.value.trim() || '';
+    station.Enabled = Boolean(row.querySelector('[data-radio-field="Enabled"]')?.checked);
+    station.Tags = (row.querySelector('[data-radio-field="Tags"]')?.value || '').split(',')
+      .map(tag => tag.trim().toLowerCase().replace(/\s+/g, ' ')).filter(Boolean).filter((tag, i, all) => all.indexOf(tag) === i);
+  });
+}
+
+function syncRadioDiscoveryInput(showErrors = true) {
+  readRadioDiscoveryRows(); const errors = []; const names = new Set();
+  if (radioDiscoveryStations.length > 12) errors.push('Use no more than 12 pinned stations.');
+  radioDiscoveryStations.forEach((station, index) => {
+    const label = `Station ${index + 1}`; const nameKey = station.Name.toLowerCase();
+    if (!station.Name) errors.push(`${label} needs a name.`);
+    else if (names.has(nameKey)) errors.push(`Station names must be unique (${station.Name}).`);
+    names.add(nameKey);
+    if (!station.Tags.length) errors.push(`${station.Name || label} needs at least one tag.`);
+    if (station.Tags.length > 5) errors.push(`${station.Name || label} has more than five tags.`);
+  });
+  const error = document.getElementById('radio-discovery-error');
+  if (error) { error.hidden = !showErrors || errors.length === 0; error.textContent = errors.join(' '); }
+  if (errors.length && showErrors) { document.querySelector('.radio-discovery-row .set-input')?.focus(); return false; }
+  const input = document.getElementById('radio-discovery-json'); if (input) input.value = JSON.stringify(radioDiscoveryStations);
+  return true;
+}
+
+document.querySelectorAll('[data-radio-preset]').forEach(button => button.addEventListener('click', () => {
+  readRadioDiscoveryRows();
+  if (radioDiscoveryStations.length >= 12) return toast('Pinned discovery supports up to 12 stations.', 'error');
+  radioDiscoveryStations.push(normalizeRadioStation({ Id: radioId(), Enabled: true, ...radioPresets[button.dataset.radioPreset] })); renderRadioDiscovery();
+}));
+document.getElementById('radio-add-custom')?.addEventListener('click', () => {
+  readRadioDiscoveryRows();
+  if (radioDiscoveryStations.length >= 12) return toast('Pinned discovery supports up to 12 stations.', 'error');
+  radioDiscoveryStations.push(normalizeRadioStation({ Id: radioId(), Name: 'Custom Discovery', Enabled: true, Tags: [] })); renderRadioDiscovery();
+  document.querySelector('.radio-discovery-row:last-child [data-radio-field="Name"]')?.focus();
+});
+document.getElementById('radio-discovery-list')?.addEventListener('input', () => syncRadioDiscoveryInput(false));
+let radioDraggedIndex = null;
+document.getElementById('radio-discovery-list')?.addEventListener('dragstart', event => {
+  const handle = event.target.closest('[data-radio-drag]'); if (!handle) return;
+  readRadioDiscoveryRows(); radioDraggedIndex = Number(handle.closest('.radio-discovery-row').dataset.index);
+  event.dataTransfer.effectAllowed = 'move'; handle.closest('.radio-discovery-row').classList.add('is-dragging');
+});
+document.getElementById('radio-discovery-list')?.addEventListener('dragover', event => {
+  if (radioDraggedIndex !== null) { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; }
+});
+document.getElementById('radio-discovery-list')?.addEventListener('drop', event => {
+  event.preventDefault(); const target = event.target.closest('.radio-discovery-row');
+  if (radioDraggedIndex === null || !target) return;
+  const [moved] = radioDiscoveryStations.splice(radioDraggedIndex, 1);
+  radioDiscoveryStations.splice(Number(target.dataset.index), 0, moved); radioDraggedIndex = null; renderRadioDiscovery();
+});
+document.getElementById('radio-discovery-list')?.addEventListener('dragend', () => {
+  radioDraggedIndex = null; document.querySelectorAll('.radio-discovery-row').forEach(row => row.classList.remove('is-dragging'));
+});
+document.getElementById('radio-discovery-list')?.addEventListener('click', async event => {
+  const button = event.target.closest('[data-radio-action]'); const row = button?.closest('.radio-discovery-row');
+  if (!button || !row) return; readRadioDiscoveryRows(); const index = Number(row.dataset.index);
+  if (button.dataset.radioAction === 'up' && index > 0) [radioDiscoveryStations[index - 1], radioDiscoveryStations[index]] = [radioDiscoveryStations[index], radioDiscoveryStations[index - 1]];
+  if (button.dataset.radioAction === 'down' && index < radioDiscoveryStations.length - 1) [radioDiscoveryStations[index + 1], radioDiscoveryStations[index]] = [radioDiscoveryStations[index], radioDiscoveryStations[index + 1]];
+  if (button.dataset.radioAction === 'remove') { if (!confirm(`Remove “${radioDiscoveryStations[index].Name}”? Listening history and downloaded music are untouched.`)) return; radioDiscoveryStations.splice(index, 1); }
+  if (button.dataset.radioAction === 'refresh') { await requestRadioRefresh(radioDiscoveryStations[index].Id, button); return; }
+  renderRadioDiscovery();
+});
+
+async function loadRadioStatus() {
+  const output = document.getElementById('radio-status'); const select = document.getElementById('radio-user');
+  if (!output || !select) return; output.textContent = 'Loading radio status…';
+  try {
+    const query = select.value ? `?user=${encodeURIComponent(select.value)}` : '';
+    const response = await fetch(`/api/admin/lastfm/radio${query}`); if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json(); const previous = select.value; const users = data.users || [];
+    select.innerHTML = users.map(user => `<option value="${escapeHtml(user.username)}">${escapeHtml(user.username)}</option>`).join('');
+    select.value = users.some(user => user.username === previous) ? previous : (data.selectedUser || '');
+    // Most Octo installs have one Navidrome account. Keep the profile selector out
+    // of that path, but reveal it when the proxy has genuinely observed multiple
+    // authenticated listeners whose histories must remain isolated.
+    select.hidden = users.length < 2;
+    select.disabled = users.length === 0;
+    const listenerSummary = document.getElementById('radio-listener-summary');
+    if (listenerSummary) listenerSummary.textContent = users.length === 0
+      ? 'Appears after a Subsonic client signs in through Octo.'
+      : users.length === 1
+        ? `${users[0].username} · Radio follows this authenticated Navidrome account.`
+        : 'Choose which authenticated Navidrome account to inspect.';
+    const refreshButton = document.getElementById('radio-refresh');
+    const resetButton = document.getElementById('radio-reset');
+    if (refreshButton) refreshButton.disabled = users.length === 0;
+    if (resetButton) resetButton.disabled = users.length === 0;
+    const learning = data.learning;
+    const stateMessage = !data.enabled ? 'Radio is disabled. Existing history and snapshots are preserved.'
+      : !data.hasApiKey ? 'Last.fm key missing. Starter/local fallback remains available; recommendation refresh is degraded.'
+      : !learning ? 'Waiting for the first authenticated completed scrobble.'
+      : learning.needed > 0 ? `${learning.plays} completed plays learned · ${learning.needed} more before Your Mix.`
+      : learning.refreshing ? 'Refreshing now. The last good snapshots remain playable.'
+      : learning.lastRefreshError ? `Last refresh failed: ${learning.lastRefreshError}` : `${learning.plays} completed plays learned.`;
+    output.innerHTML = `<p class="radio-state-copy">${escapeHtml(stateMessage)}</p>` + ((data.stations || []).length
+      ? `<div class="radio-station-grid">${data.stations.map(station => `<article class="radio-station-item"><div><strong>${escapeHtml(station.name)}</strong><span>${escapeHtml(station.kind)} · ${station.trackCount} tracks</span></div><p>${(station.preview || []).map(track => `${escapeHtml(track.artist)} — ${escapeHtml(track.title)}`).join(' · ') || 'Snapshot has no preview yet.'}</p></article>`).join('')}</div>`
+      : '<div class="radio-empty">No ready snapshots yet. Stations are offered automatically as listening signals arrive.</div>');
+  } catch (error) { output.textContent = `Radio status unavailable: ${error.message}`; }
+}
+document.getElementById('radio-user')?.addEventListener('change', loadRadioStatus);
+async function requestRadioRefresh(stationId, button = document.getElementById('radio-refresh')) {
+  const user = document.getElementById('radio-user')?.value; if (!user) return toast('Radio has not seen an authenticated listener yet.', 'error');
+  button.disabled = true; button.setAttribute('aria-busy', 'true');
+  try {
+    const response = await fetch('/api/admin/lastfm/radio/refresh', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ user, stationId }) });
+    const data = await response.json(); if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    toast(data.queued ? 'Radio refresh queued.' : 'That refresh is already queued.'); setTimeout(loadRadioStatus, 800);
+  } catch (error) { toast(`Refresh failed: ${error.message}`, 'error'); }
+  finally { button.disabled = false; button.removeAttribute('aria-busy'); }
+}
+document.getElementById('radio-refresh')?.addEventListener('click', event => requestRadioRefresh(null, event.currentTarget));
+document.getElementById('radio-reset')?.addEventListener('click', async event => {
+  const user = document.getElementById('radio-user')?.value; if (!user || !confirm(`Reset Radio history for “${user}”? Downloaded music will not be removed.`)) return;
+  event.currentTarget.disabled = true;
+  try { const response = await fetch(`/api/admin/lastfm/radio/history?user=${encodeURIComponent(user)}`, { method: 'DELETE' }); const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`); toast(data.message || 'Radio history reset.'); await loadRadioStatus();
+  } catch (error) { toast(`Reset failed: ${error.message}`, 'error'); } finally { event.currentTarget.disabled = false; }
+});
 
 // ────────────────────────────────────────────────────────────────
 // Notifications: send a test through every configured transport

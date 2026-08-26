@@ -33,6 +33,11 @@ builder.Services.AddSingleton<Octo.Services.Admin.SettingsFileWriter>(
 builder.Services.AddSingleton(sp => new Octo.Services.Local.DownloadHistoryService(
     System.IO.Path.Combine(System.IO.Path.GetDirectoryName(SettingsFilePath)!, "downloads-history.json"),
     sp.GetRequiredService<ILogger<Octo.Services.Local.DownloadHistoryService>>()));
+builder.Services.AddSingleton(sp => new LastFmRadioStateStore(
+    System.IO.Path.Combine(System.IO.Path.GetDirectoryName(SettingsFilePath)!, "lastfm-radio-state.json"),
+    sp.GetRequiredService<Microsoft.Extensions.Options.IOptionsMonitor<LastFmSettings>>(),
+    sp.GetRequiredService<ExternalIdRegistry>(),
+    sp.GetRequiredService<ILogger<LastFmRadioStateStore>>()));
 
 builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 builder.Services.AddProblemDetails();
@@ -56,6 +61,10 @@ builder.Services.AddSingleton<SubsonicRequestParser>();
 builder.Services.AddSingleton<SubsonicResponseBuilder>();
 builder.Services.AddSingleton<SubsonicModelMapper>();
 builder.Services.AddScoped<SubsonicProxyService>();
+builder.Services.AddScoped<LastFmRadioTrackResolver>();
+builder.Services.AddScoped<LastFmRadioRecommendationService>();
+builder.Services.AddSingleton<LastFmRadioRefreshQueue>();
+builder.Services.AddHostedService<LastFmRadioRefreshWorker>();
 
 // Soulseek (FLAC source) + YouTube (instant-preview stream source).
 builder.Services.AddSingleton<SoulseekClient>();
