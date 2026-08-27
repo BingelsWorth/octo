@@ -42,6 +42,12 @@ public sealed class LastFmRadioRecommendationService
         if (!settings.EnableRadio) return [];
         var user = _state.GetUser(username);
         var plays = user.Plays.OrderByDescending(play => play.PlayedAtUtc).ToList();
+        var unavailable = user.UnavailableTracks
+            .Where(track => track.RetryAfterUtc > DateTime.UtcNow)
+            .Select(track => track.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var refillHeadroom = Math.Min(unavailable.Count, settings.EffectiveRadioTrackCount);
+        var candidateTarget = Math.Min(100,
+            settings.EffectiveRadioTrackCount + refillHeadroom + 10);
         var artistScores = ScoreArtists(plays);
         var trackSeeds = plays.GroupBy(play => LastFmRadioSeedNormalizer.TrackKey(play.Artist, play.Title))
             .Select(group => group.First()).Take(8).ToList();
@@ -67,11 +73,14 @@ public sealed class LastFmRadioRecommendationService
             var mixCandidates = await TracksFromSeeds(trackSeeds.Take(6), 12, ct);
             if (mixCandidates.Count == 0) mixCandidates.AddRange(plays.Select(ToCandidate));
             var blendedMix = Blend(plays.Select(ToCandidate), mixCandidates,
-                settings.EffectiveDiscoveryPercent, settings.EffectiveRadioTrackCount);
+                settings.EffectiveDiscoveryPercent,
+                Math.Min(settings.EffectiveRadioTrackCount * 2,
+                    settings.EffectiveRadioTrackCount + refillHeadroom));
             stations.Add(Create(username, learned ? "your-mix" : "starter",
                 learned ? "Your Mix" : "Starter Radio",
                 learned ? LastFmRadioStationKind.YourMix : LastFmRadioStationKind.Starter,
-                true, trackSeeds.Select(seed => seed.Artist), Shape(blendedMix, plays, settings)));
+                true, trackSeeds.Select(seed => seed.Artist),
+                Shape(blendedMix, plays, settings, unavailable)));
 
             if (learned)
             {
@@ -79,29 +88,29 @@ public sealed class LastFmRadioRecommendationService
                     .Select(pair => pair.Key).Take(3).ToList();
                 if (topTags.Count > 0)
                 {
-                    var discovery = await TracksFromTags(topTags, 30, ct);
+                    var discovery = await TracksFromTags(topTags, candidateTarget, ct);
                     if (discovery.Count >= 5)
                         stations.Add(Create(username, "discovery", "Discovery Mix",
                             LastFmRadioStationKind.Discovery, true, topTags,
-                            Shape(discovery, plays, settings, excludeRecent: true)));
+                            Shape(discovery, plays, settings, unavailable, excludeRecent: true)));
                 }
 
                 foreach (var artist in artistScores.Take(2).Select(pair => pair.Key))
                 {
-                    var candidates = await TracksFromArtist(artist, ct);
+                    var candidates = await TracksFromArtist(artist, candidateTarget, ct);
                     if (candidates.Count >= 5)
                         stations.Add(Create(username, "artist-" + Key(artist), $"{artist} Radio",
                             LastFmRadioStationKind.Artist, true, [artist],
-                            Shape(candidates, plays, settings)));
+                            Shape(candidates, plays, settings, unavailable)));
                 }
 
                 foreach (var tag in tags.OrderByDescending(pair => pair.Value).Select(pair => pair.Key).Take(3))
                 {
-                    var candidates = await TracksFromTags([tag], 30, ct);
+                    var candidates = await TracksFromTags([tag], candidateTarget, ct);
                     if (candidates.Select(item => item.Artist).Distinct(StringComparer.OrdinalIgnoreCase).Count() >= 4)
                         stations.Add(Create(username, "genre-" + Key(tag), Title(tag) + " Radio",
                             LastFmRadioStationKind.Genre, true, [tag],
-                            Shape(candidates, plays, settings)));
+                            Shape(candidates, plays, settings, unavailable)));
                 }
             }
         }
@@ -110,7 +119,7 @@ public sealed class LastFmRadioRecommendationService
         {
             foreach (var definition in settings.EffectiveDiscoveryStations().Where(item => item.Enabled))
             {
-                var candidates = await TracksFromTags(definition.Tags, 35, ct);
+                var candidates = await TracksFromTags(definition.Tags, candidateTarget, ct);
                 if (candidates.Count == 0)
                     candidates.AddRange(plays.Where(play => definition.Tags.Any(tag =>
                             (play.Genre ?? "").Contains(tag, StringComparison.OrdinalIgnoreCase)))
@@ -118,7 +127,8 @@ public sealed class LastFmRadioRecommendationService
                 if (candidates.Count > 0)
                     stations.Add(Create(username, "pinned-" + definition.Id, definition.Name,
                         LastFmRadioStationKind.Pinned, false, definition.Tags,
-                        Shape(candidates, plays, settings), DefinitionVersion(definition)));
+                        Shape(candidates, plays, settings, unavailable),
+                        DefinitionVersion(definition)));
             }
         }
 
@@ -154,16 +164,19 @@ public sealed class LastFmRadioRecommendationService
     }
 
     private async Task<List<LastFmService.SimilarTrack>> TracksFromArtist(string artist,
-        CancellationToken ct)
+        int candidateTarget, CancellationToken ct)
     {
-        var result = await _lastFm.GetArtistTopTracksAsync(artist, 12, ct);
+        var result = await _lastFm.GetArtistTopTracksAsync(artist,
+            Math.Min(50, candidateTarget), ct);
         foreach (var similar in (await _lastFm.GetSimilarArtistsAsync(artist, 6, ct)).Take(5))
-            result.AddRange(await _lastFm.GetArtistTopTracksAsync(similar.Name, 6, ct));
+            result.AddRange(await _lastFm.GetArtistTopTracksAsync(similar.Name,
+                Math.Min(20, Math.Max(6, candidateTarget / 5)), ct));
         return result;
     }
 
     private static List<LastFmRadioTrack> Shape(IEnumerable<LastFmService.SimilarTrack> candidates,
-        IReadOnlyCollection<LastFmRadioPlay> plays, LastFmSettings settings, bool excludeRecent = false)
+        IReadOnlyCollection<LastFmRadioPlay> plays, LastFmSettings settings,
+        IReadOnlySet<string> unavailable, bool excludeRecent = false)
     {
         var recent = plays.Take(30).Select(play => LastFmRadioSeedNormalizer.TrackKey(play.Artist, play.Title))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -177,6 +190,7 @@ public sealed class LastFmRadioRecommendationService
                      .ThenBy(item => StableOrder(item.Artist, item.Title)))
         {
             var key = LastFmRadioSeedNormalizer.TrackKey(candidate.Artist, candidate.Title);
+            if (unavailable.Contains(key)) continue;
             if (excludeRecent && recent.Contains(key)) continue;
             if (string.Equals(lastArtist, candidate.Artist, StringComparison.OrdinalIgnoreCase)) continue;
             output.Add(new LastFmRadioTrack

@@ -336,6 +336,10 @@ its acceptance criteria, not a separate micro-task.
   cache before publishing each continuous station. Share concurrent preparation, try
   fallback tracks, publish only ready stations, and never turn preparation into a
   permanent library acquisition.
+- [x] Treat an unresolvable or untranscodable song as unavailable: remove it from every
+  current station, retain a bounded 24-hour negative-availability cooldown so a
+  deterministic rebuild cannot immediately restore it, and queue the existing core
+  refresh worker with candidate headroom to refill toward `RadioTrackCount`.
 - [x] Record qualified track completions from continuous streams for Radio learning and
   relay their scrobbles to Navidrome, because the client sees one station URL rather
   than individual Subsonic track requests.

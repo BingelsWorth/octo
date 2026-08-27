@@ -377,9 +377,13 @@ public class SubsonicController : ControllerBase
         {
             var token = _radioStreamSessions.Issue(username, station.Id, parameters);
             var session = _radioStreamSessions.Get(token)!;
-            return await _radioStreams.PrepareAsync(session, HttpContext.RequestAborted) is null
-                ? null
-                : (station, token);
+            var starter = await _radioStreams.PrepareAsync(session, HttpContext.RequestAborted);
+            if (starter is null || !_radioStreamSessions.AttachStarter(token, starter))
+            {
+                _radioStreamSessions.Remove(token);
+                return null;
+            }
+            return (station, token);
         }
 
         try

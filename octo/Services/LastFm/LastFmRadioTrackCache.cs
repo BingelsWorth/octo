@@ -24,11 +24,10 @@ public sealed class LastFmRadioTrackCache
 
     internal LastFmRadioTrackCache(string root) => _root = root;
 
-    public string Key(string username, string stationId, string trackIdentity,
-        DateTime stationChangedUtc, int bitrateKbps)
+    public string Key(string username, string stationId, string trackIdentity, int bitrateKbps)
     {
         var material = string.Join('\n', username.Trim().ToUpperInvariant(), stationId,
-            trackIdentity, stationChangedUtc.ToUniversalTime().Ticks, bitrateKbps);
+            trackIdentity, bitrateKbps);
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(material)))
             .ToLowerInvariant();
     }
@@ -78,6 +77,8 @@ public sealed class LastFmRadioTrackCache
         return new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 81920,
             FileOptions.Asynchronous | FileOptions.SequentialScan);
     }
+
+    public bool IsReadyPath(string path) => IsReady(path);
 
     private static bool IsReady(string path) => File.Exists(path) && new FileInfo(path).Length > 0;
 

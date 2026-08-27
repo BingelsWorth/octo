@@ -272,7 +272,10 @@ Continuous streams are normalized to `LASTFM_RADIO_STREAM_BITRATE_KBPS` (96, 128
 256, or 320; default 192). These publication settings apply to dynamic and pinned
 stations. The first authenticated station-list request prepares one complete starter
 song per station and publishes only stations that are ready; the files are temporary
-and never added to the music library. A client's **Start radio from this song** action remains a one-time
+and never added to the music library. If a song cannot be resolved or transcoded, Octo
+removes it from current stations, avoids selecting it again for 24 hours, and queues a
+normal Radio refresh to refill toward the configured track count. A client's
+**Start radio from this song** action remains a one-time
 `getSimilarSongs[2]` track queue and does not create a playlist or continuous stream.
 Other scalar defaults use
 `LASTFM_ENABLE_PERSONALIZED_STATIONS`, `LASTFM_ENABLE_DISCOVERY_STATIONS`,

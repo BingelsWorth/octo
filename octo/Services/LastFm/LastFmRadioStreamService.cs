@@ -24,6 +24,7 @@ public sealed class LastFmRadioStreamService
     private readonly LastFmRadioTrackResolver _resolver;
     private readonly IMusicMetadataService _metadata;
     private readonly RadioQueueStore _queues;
+    private readonly LastFmRadioRefreshQueue _refreshQueue;
     private readonly ILogger<LastFmRadioStreamService> _logger;
 
     public LastFmRadioStreamService(LastFmRadioStateStore state,
@@ -32,12 +33,13 @@ public sealed class LastFmRadioStreamService
         ILastFmRadioAudioTranscoder transcoder, LastFmRadioTrackCache cache,
         LastFmRadioTrackResolver resolver,
         IMusicMetadataService metadata,
-        RadioQueueStore queues, ILogger<LastFmRadioStreamService> logger)
+        RadioQueueStore queues, LastFmRadioRefreshQueue refreshQueue,
+        ILogger<LastFmRadioStreamService> logger)
     {
         _state = state; _settings = settings; _library = library; _proxy = proxy;
         _downloads = downloads; _transcoder = transcoder; _cache = cache;
         _resolver = resolver; _metadata = metadata;
-        _queues = queues; _logger = logger;
+        _queues = queues; _refreshQueue = refreshQueue; _logger = logger;
     }
 
     public LastFmRadioStation? Resolve(LastFmRadioStreamSession session)
@@ -69,8 +71,16 @@ public sealed class LastFmRadioStreamService
             var ids = tracks.Select(track => track.ResolvedId!).ToList();
             _queues.Register(ids);
             _ = _metadata.PrewarmYouTubeIdsForSongIdsAsync(ids, topN: 8);
-            var starter = await PrepareAsync(session, cancellationToken)
-                ?? throw new InvalidOperationException("Radio station has no cached starter track");
+            // The session carries the exact starter that was complete before this
+            // station URL was published. A recommendation refresh may replace the
+            // snapshot between listing and tune-in; it must not invalidate that
+            // already-proven startup path.
+            var starter = session.Starter is { } published
+                && _cache.IsReadyPath(published.Path)
+                    ? published
+                    : await PrepareAsync(session, cancellationToken)
+                        ?? throw new InvalidOperationException(
+                            "Radio station has no cached starter track");
             await using (var cached = _cache.OpenRead(starter.Path))
                 await cached.CopyToAsync(output, cancellationToken);
             await output.FlushAsync(cancellationToken);
@@ -120,6 +130,7 @@ public sealed class LastFmRadioStreamService
                 catch (Exception ex)
                 {
                     failures++;
+                    RejectAndRefill(session, track);
                     _logger.LogWarning(ex, "Skipping unavailable continuous Radio track {Artist} - {Title}",
                         track.Artist, track.Title);
                     if (failures >= tracks.Count)
@@ -143,10 +154,10 @@ public sealed class LastFmRadioStreamService
         var candidates = tracks.Select((track, index) =>
         {
             var identity = track.ResolvedId ?? $"{track.Artist}\n{track.Title}";
-            var key = _cache.Key(session.Username, station.Id, identity,
-                station.ChangedUtc, bitrateKbps);
+            var key = _cache.Key(session.Username, station.Id, identity, bitrateKbps);
             return (Track: track, Index: index, Key: key);
         }).ToList();
+        var rejectedAny = false;
 
         // A later candidate may have been the first playable source on an earlier
         // request. Find any completed starter before retrying failed candidates.
@@ -169,6 +180,7 @@ public sealed class LastFmRadioStreamService
                         await _transcoder.TranscodeToMp3Async(opened.Source.AudioStream, output,
                             bitrateKbps, token);
                 }, cancellationToken);
+                if (rejectedAny) _refreshQueue.Enqueue(session.Username);
                 return new PreparedRadioStarter(path, track, candidate.Index);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -177,12 +189,20 @@ public sealed class LastFmRadioStreamService
             }
             catch (Exception ex)
             {
+                rejectedAny |= _state.RejectTrack(session.Username, track) > 0;
                 _logger.LogWarning(ex,
                     "Could not prepare Radio starter {Artist} - {Title}; trying the next track",
                     track.Artist, track.Title);
             }
         }
+        if (rejectedAny) _refreshQueue.Enqueue(session.Username);
         return null;
+    }
+
+    private void RejectAndRefill(LastFmRadioStreamSession session, LastFmRadioTrack track)
+    {
+        if (_state.RejectTrack(session.Username, track) <= 0) return;
+        _refreshQueue.Enqueue(session.Username);
     }
 
     private async Task<OpenedRadioTrack?> OpenTrackAsync(LastFmRadioTrack track,

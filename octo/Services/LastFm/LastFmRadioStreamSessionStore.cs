@@ -7,7 +7,8 @@ public sealed record LastFmRadioStreamSession(
     string Username,
     string StationId,
     IReadOnlyDictionary<string, string> Authentication,
-    DateTime ExpiresUtc);
+    DateTime ExpiresUtc,
+    PreparedRadioStarter? Starter = null);
 
 /// <summary>
 /// Bounded in-memory authorization bridge between an authenticated Subsonic
@@ -57,6 +58,24 @@ public sealed class LastFmRadioStreamSessionStore
             PruneLocked(now);
             return _sessions.TryGetValue(token, out var session) ? session : null;
         }
+    }
+
+    public bool AttachStarter(string token, PreparedRadioStarter starter,
+        DateTime? nowUtc = null)
+    {
+        var now = nowUtc ?? DateTime.UtcNow;
+        lock (_lock)
+        {
+            PruneLocked(now);
+            if (!_sessions.TryGetValue(token, out var session)) return false;
+            _sessions[token] = session with { Starter = starter };
+            return true;
+        }
+    }
+
+    public void Remove(string token)
+    {
+        lock (_lock) _sessions.Remove(token);
     }
 
     internal int Count { get { lock (_lock) return _sessions.Count; } }

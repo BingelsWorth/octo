@@ -184,6 +184,53 @@ public sealed class LastFmRadioControllerTests
     }
 
     [Fact]
+    public async Task InternetRadioList_DoesNotPublishUntilStarterTranscodeCompletes()
+    {
+        await using var fixture = new RadioWebFactory();
+        fixture.InstallStation();
+        fixture.Transcoder.CompletionGate = NewGate();
+        using var client = fixture.CreateClient();
+
+        var listing = client.GetStringAsync(
+            "/rest/getInternetRadioStations?u=alice&t=token&s=salt&f=json");
+        await fixture.Transcoder.Started.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await Task.Delay(50);
+        Assert.False(listing.IsCompleted);
+
+        fixture.Transcoder.CompletionGate.SetResult();
+        Assert.Contains("Your Mix", await listing);
+    }
+
+    [Fact]
+    public async Task PublishedStream_KeepsItsReadyStarterAcrossSnapshotRefresh()
+    {
+        await using var fixture = new RadioWebFactory();
+        fixture.InstallStation();
+        using var client = fixture.CreateClient();
+        var listBody = await client.GetStringAsync(
+            "/rest/getInternetRadioStations?u=alice&t=token&s=salt&f=json");
+        using var list = JsonDocument.Parse(listBody);
+        var url = list.RootElement.GetProperty("subsonic-response")
+            .GetProperty("internetRadioStations").GetProperty("internetRadioStation")
+            .EnumerateArray().Single(item => item.GetProperty("name").GetString() == "Your Mix")
+            .GetProperty("streamUrl").GetString()!;
+
+        fixture.InstallStation(" Refreshed");
+        fixture.Transcoder.ResetStarted();
+        fixture.Transcoder.BeforeWriteGate = NewGate();
+        using var response = await client.SendAsync(new HttpRequestMessage(HttpMethod.Get, url),
+            HttpCompletionOption.ResponseHeadersRead);
+        await using var stream = await response.Content.ReadAsStreamAsync();
+        var bytes = new byte[3];
+        await stream.ReadExactlyAsync(bytes).AsTask().WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal("MP3", Encoding.ASCII.GetString(bytes));
+        fixture.Transcoder.BeforeWriteGate.SetResult();
+    }
+
+    private static TaskCompletionSource NewGate() =>
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    [Fact]
     public async Task PlaylistAndInternetRadioPublication_AreIndependentAndReservedRadioIsReadOnly()
     {
         await using var fixture = new RadioWebFactory(exposePlaylists: false, exposeStreams: true);
@@ -244,6 +291,10 @@ public sealed class LastFmRadioControllerTests
         Assert.Contains("Your Mix", await client.GetStringAsync(
             "/rest/getInternetRadioStations?u=alice&t=token&s=salt&f=json"));
         Assert.Equal(2, fixture.Transcoder.Calls);
+        Assert.DoesNotContain(fixture.State.FindStation("alice", fixture.StationId)!.Tracks,
+            track => track.Title == "Song One");
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(1));
+        Assert.Equal("alice", (await fixture.RefreshQueue.DequeueAsync(timeout.Token)).Username);
     }
 }
 
@@ -304,6 +355,8 @@ internal sealed class RadioWebFactory : WebApplicationFactory<Program>
     public Mock<IMusicMetadataService> Metadata { get; } = new();
     public BlockingRadioTranscoder Transcoder { get; } = new();
     public LastFmRadioStateStore State => Services.GetRequiredService<LastFmRadioStateStore>();
+    public LastFmRadioRefreshQueue RefreshQueue =>
+        Services.GetRequiredService<LastFmRadioRefreshQueue>();
     public Octo.Services.Subsonic.NavidromeIdentityService Identity =>
         Services.GetRequiredService<Octo.Services.Subsonic.NavidromeIdentityService>();
     public string StationId => LastFmRadioStateStore.StationId("alice", "your-mix");
@@ -326,19 +379,20 @@ internal sealed class RadioWebFactory : WebApplicationFactory<Program>
             .Returns(Task.CompletedTask);
     }
 
-    public void InstallStation()
+    public void InstallStation(string titleSuffix = "")
     {
         State.ReplaceStations("alice", [new LastFmRadioStation
         {
             Id = StationId, Key = "your-mix", Name = "Your Mix", Owner = "alice",
             Kind = LastFmRadioStationKind.YourMix, Personalized = true,
             CreatedUtc = new DateTime(2026, 8, 25, 1, 0, 0, DateTimeKind.Utc),
-            ChangedUtc = new DateTime(2026, 8, 25, 2, 0, 0, DateTimeKind.Utc),
+            ChangedUtc = new DateTime(2026, 8, 25, 2, 0, 0, DateTimeKind.Utc)
+                .AddMinutes(titleSuffix.Length),
             ValidUntilUtc = new DateTime(2026, 8, 26, 2, 0, 0, DateTimeKind.Utc),
             Tracks =
             [
-                new() { Artist = "Artist One", Title = "Song One", Duration = 180 },
-                new() { Artist = "Artist Two", Title = "Song Two", Duration = 200 }
+                new() { Artist = "Artist One", Title = "Song One" + titleSuffix, Duration = 180 },
+                new() { Artist = "Artist Two", Title = "Song Two" + titleSuffix, Duration = 200 }
             ]
         }]);
     }
@@ -396,18 +450,30 @@ internal sealed class RadioWebFactory : WebApplicationFactory<Program>
         public int FailuresBeforeSuccess { get; set; }
         public int CompleteCalls { get; set; } = 1;
         public int Calls => Volatile.Read(ref _calls);
+        public TaskCompletionSource Started { get; private set; } = NewSignal();
+        public TaskCompletionSource? BeforeWriteGate { get; set; }
+        public TaskCompletionSource? CompletionGate { get; set; }
         private int _calls;
+        public void ResetStarted() => Started = NewSignal();
         public async Task TranscodeToMp3Async(Stream input, Stream output, int bitrateKbps,
             CancellationToken cancellationToken)
         {
             LastBitrateKbps = bitrateKbps;
             var call = Interlocked.Increment(ref _calls);
+            Started.TrySetResult();
+            if (BeforeWriteGate is not null)
+                await BeforeWriteGate.Task.WaitAsync(cancellationToken);
             if (call <= FailuresBeforeSuccess) throw new InvalidOperationException("fixture source failed");
             await output.WriteAsync("MP3"u8.ToArray(), cancellationToken);
             await output.FlushAsync(cancellationToken);
+            if (CompletionGate is not null)
+                await CompletionGate.Task.WaitAsync(cancellationToken);
             if (call <= FailuresBeforeSuccess + CompleteCalls) return;
             await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
         }
+
+        private static TaskCompletionSource NewSignal() =>
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 }
 

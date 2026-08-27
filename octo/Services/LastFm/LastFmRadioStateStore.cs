@@ -17,6 +17,8 @@ public sealed class LastFmRadioStateStore
     public const int CurrentVersion = 1;
     private const int MaxPlaysPerUser = 2_000;
     private const int MaxUsers = 100;
+    private const int MaxUnavailableTracksPerUser = 500;
+    private static readonly TimeSpan UnavailableTrackCooldown = TimeSpan.FromHours(24);
     private static readonly TimeSpan DuplicateWindow = TimeSpan.FromMinutes(5);
 
     private readonly string _path;
@@ -124,6 +126,43 @@ public sealed class LastFmRadioStateStore
             if (!LoadLocked().Users.TryGetValue(UserKey(username), out var user)) return null;
             var station = user.Stations.FirstOrDefault(item => item.Id == stationId);
             return station is null ? null : Clone(station);
+        }
+    }
+
+    /// <summary>Removes an unplayable song from every current station and prevents
+    /// an immediate deterministic refresh from selecting it again.</summary>
+    public int RejectTrack(string username, LastFmRadioTrack track, DateTime? nowUtc = null)
+    {
+        if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(track.Artist)
+            || string.IsNullOrWhiteSpace(track.Title)) return 0;
+        lock (_lock)
+        {
+            var state = LoadLocked();
+            var user = GetOrCreateLocked(state, username);
+            var now = nowUtc ?? DateTime.UtcNow;
+            var key = LastFmRadioSeedNormalizer.TrackKey(track.Artist, track.Title);
+            var removed = 0;
+            foreach (var station in user.Stations)
+            {
+                var before = station.Tracks.Count;
+                station.Tracks = station.Tracks.Where(candidate =>
+                    LastFmRadioSeedNormalizer.TrackKey(candidate.Artist, candidate.Title) != key)
+                    .ToList();
+                removed += before - station.Tracks.Count;
+                if (before != station.Tracks.Count) station.ChangedUtc = now;
+            }
+            user.UnavailableTracks = (user.UnavailableTracks ?? [])
+                .Where(item => item.RetryAfterUtc > now && item.Key != key)
+                .Prepend(new LastFmRadioUnavailableTrack
+                {
+                    Key = key, Artist = track.Artist, Title = track.Title,
+                    FailedAtUtc = now, RetryAfterUtc = now.Add(UnavailableTrackCooldown),
+                })
+                .OrderByDescending(item => item.FailedAtUtc)
+                .Take(MaxUnavailableTracksPerUser).ToList();
+            user.LastSeenUtc = now;
+            SaveLocked(state);
+            return removed;
         }
     }
 
@@ -246,6 +285,10 @@ public sealed class LastFmRadioStateStore
                 .Take(MaxPlaysPerUser)
                 .ToList();
             user.Stations ??= [];
+            user.UnavailableTracks = (user.UnavailableTracks ?? [])
+                .Where(track => track.RetryAfterUtc > DateTime.UtcNow)
+                .OrderByDescending(track => track.FailedAtUtc)
+                .Take(MaxUnavailableTracksPerUser).ToList();
         }
 
         foreach (var key in state.Users.OrderByDescending(pair => pair.Value.LastSeenUtc)

@@ -89,6 +89,10 @@ public class LastFmRadioCoreTests
         Assert.Equal("station-one", session.StationId);
         Assert.Equal("secret-token", session.Authentication["t"]);
         Assert.DoesNotContain("id", session.Authentication.Keys);
+        var starter = new PreparedRadioStarter("/tmp/ready.mp3",
+            new LastFmRadioTrack { Artist = "Artist", Title = "Title" }, 0);
+        Assert.True(store.AttachStarter(token, starter, now.AddHours(1)));
+        Assert.Same(starter, store.Get(token, now.AddHours(1))!.Starter);
         Assert.Null(store.Get(token, now.AddHours(13)));
 
         for (var index = 0; index < LastFmRadioStreamSessionStore.MaximumSessions + 20; index++)
@@ -311,6 +315,26 @@ public class LastFmRadioStateStoreTests
         var installed = Assert.Single(fixture.Store.GetUser("alice").Stations);
         Assert.Equal(station.CreatedUtc.AddDays(-2).Date, installed.CreatedUtc.Date);
         Assert.True(installed.ChangedUtc < DateTime.UtcNow.AddHours(-23));
+    }
+
+    [Fact]
+    public void RejectTrack_RemovesItFromEveryStationAndPersistsCooldown()
+    {
+        using var fixture = new StateFixture();
+        var bad = new LastFmRadioTrack { Artist = "Bad Artist", Title = "Bad Song" };
+        fixture.Store.ReplaceStations("alice",
+        [
+            new LastFmRadioStation { Id = "one", Tracks = [bad, new() { Artist = "A", Title = "T" }] },
+            new LastFmRadioStation { Id = "two", Tracks = [bad, new() { Artist = "B", Title = "U" }] },
+        ]);
+
+        Assert.Equal(2, fixture.Store.RejectTrack("alice", bad));
+        var user = fixture.Store.GetUser("alice");
+        Assert.All(user.Stations, station => Assert.DoesNotContain(station.Tracks,
+            track => track.Title == "Bad Song"));
+        var unavailable = Assert.Single(user.UnavailableTracks);
+        Assert.Equal(LastFmRadioSeedNormalizer.TrackKey("Bad Artist", "Bad Song"), unavailable.Key);
+        Assert.True(unavailable.RetryAfterUtc > unavailable.FailedAtUtc);
     }
 
     private static LastFmRadioPlay Play(string artist, string title, DateTime? at = null) =>
@@ -545,6 +569,8 @@ public class LastFmRadioRecommendationTests
                 Artist = "Repeated Old", Title = "Old Seed " + index, Genre = "Rock",
                 PlayedAtUtc = DateTime.UtcNow.AddDays(-80).AddHours(index)
             });
+            state.RejectTrack("alice", new LastFmRadioTrack
+                { Artist = "rock Artist 0", Title = "rock-0" });
 
             var service = RecommendationService(settings, state, new RecommendationHandler());
             var stations = await service.BuildAsync("alice");
@@ -564,6 +590,8 @@ public class LastFmRadioRecommendationTests
             var pinned = Assert.Single(stations, station => station.Kind == LastFmRadioStationKind.Pinned);
             Assert.Contains(pinned.Tracks, track => track.Title.StartsWith("rock-"));
             Assert.Contains(pinned.Tracks, track => track.Title.StartsWith("idm-"));
+            Assert.DoesNotContain(pinned.Tracks, track => track.Title == "rock-0");
+            Assert.Equal(settings.CurrentValue.EffectiveRadioTrackCount, pinned.Tracks.Count);
             foreach (var station in stations)
             {
                 Assert.Equal(station.Tracks.Count, station.Tracks.Select(track =>

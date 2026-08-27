@@ -14,10 +14,20 @@ public sealed class LastFmRadioUserState
     public int NewPlaysSinceRefresh { get; set; }
     public List<LastFmRadioPlay> Plays { get; set; } = [];
     public List<LastFmRadioStation> Stations { get; set; } = [];
+    public List<LastFmRadioUnavailableTrack> UnavailableTracks { get; set; } = [];
     public DateTime? LastRefreshAttemptUtc { get; set; }
     public DateTime? LastRefreshSuccessUtc { get; set; }
     public string? LastRefreshError { get; set; }
     public bool Refreshing { get; set; }
+}
+
+public sealed class LastFmRadioUnavailableTrack
+{
+    public string Key { get; set; } = string.Empty;
+    public string Artist { get; set; } = string.Empty;
+    public string Title { get; set; } = string.Empty;
+    public DateTime FailedAtUtc { get; set; } = DateTime.UtcNow;
+    public DateTime RetryAfterUtc { get; set; } = DateTime.UtcNow.AddHours(24);
 }
 
 public sealed class LastFmRadioPlay
