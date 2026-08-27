@@ -332,6 +332,10 @@ its acceptance criteria, not a separate micro-task.
   cycling the ready snapshot and resolving each track through the existing local-first
   path; normalize each source to the configured bitrate, prewarm ahead, and skip an
   unavailable track without ending the station.
+- [x] Fully transcode at least one local-first starter song into Octo's bounded temporary
+  cache before publishing each continuous station. Share concurrent preparation, try
+  fallback tracks, publish only ready stations, and never turn preparation into a
+  permanent library acquisition.
 - [x] Record qualified track completions from continuous streams for Radio learning and
   relay their scrobbles to Navidrome, because the client sees one station URL rather
   than individual Subsonic track requests.

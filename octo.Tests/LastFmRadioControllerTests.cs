@@ -170,6 +170,20 @@ public sealed class LastFmRadioControllerTests
     }
 
     [Fact]
+    public async Task InternetRadioList_PreparesStarterOnceBeforePublishingStation()
+    {
+        await using var fixture = new RadioWebFactory();
+        fixture.InstallStation();
+        using var client = fixture.CreateClient();
+        var url = "/rest/getInternetRadioStations?u=alice&t=token&s=salt&f=json";
+
+        Assert.Contains("Your Mix", await client.GetStringAsync(url));
+        Assert.Equal(1, fixture.Transcoder.Calls);
+        Assert.Contains("Your Mix", await client.GetStringAsync(url));
+        Assert.Equal(1, fixture.Transcoder.Calls);
+    }
+
+    [Fact]
     public async Task PlaylistAndInternetRadioPublication_AreIndependentAndReservedRadioIsReadOnly()
     {
         await using var fixture = new RadioWebFactory(exposePlaylists: false, exposeStreams: true);
@@ -208,10 +222,15 @@ public sealed class LastFmRadioControllerTests
         await stream.ReadExactlyAsync(bytes);
         Assert.Equal("MP3", Encoding.ASCII.GetString(bytes));
         Assert.Equal(192, fixture.Transcoder.LastBitrateKbps);
+        for (var attempt = 0; attempt < 50 && fixture.State.GetUser("alice").Plays.Count == 0;
+             attempt++)
+            await Task.Delay(10);
+        Assert.Single(fixture.State.GetUser("alice").Plays);
+        Assert.Single(fixture.Handler.RelayedScrobbleIds);
     }
 
     [Fact]
-    public async Task ContinuousRadio_SkipsFailedSourceThenRecordsACompletedLocalTrack()
+    public async Task InternetRadioPreparation_SkipsFailedSourceAndCachesPlayableFallback()
     {
         await using var fixture = new RadioWebFactory();
         fixture.Transcoder.FailuresBeforeSuccess = 1;
@@ -220,19 +239,11 @@ public sealed class LastFmRadioControllerTests
         using var client = fixture.CreateClient();
         var listBody = await client.GetStringAsync(
             "/rest/getInternetRadioStations?u=alice&t=token&s=salt&f=json");
-        using var list = JsonDocument.Parse(listBody);
-        var url = list.RootElement.GetProperty("subsonic-response")
-            .GetProperty("internetRadioStations").GetProperty("internetRadioStation")
-            .EnumerateArray().Single(item => item.GetProperty("name").GetString() == "Your Mix")
-            .GetProperty("streamUrl").GetString()!;
-        using var response = await client.SendAsync(new HttpRequestMessage(HttpMethod.Get, url),
-            HttpCompletionOption.ResponseHeadersRead);
-        await using var stream = await response.Content.ReadAsStreamAsync();
-        var bytes = new byte[6];
-        await stream.ReadExactlyAsync(bytes);
-        Assert.Equal("MP3MP3", Encoding.ASCII.GetString(bytes));
-        Assert.Single(fixture.State.GetUser("alice").Plays);
-        Assert.Single(fixture.Handler.RelayedScrobbleIds);
+        Assert.Contains("Your Mix", listBody);
+        Assert.Equal(2, fixture.Transcoder.Calls);
+        Assert.Contains("Your Mix", await client.GetStringAsync(
+            "/rest/getInternetRadioStations?u=alice&t=token&s=salt&f=json"));
+        Assert.Equal(2, fixture.Transcoder.Calls);
     }
 }
 
@@ -357,6 +368,8 @@ internal sealed class RadioWebFactory : WebApplicationFactory<Program>
             services.AddSingleton(Metadata.Object);
             services.RemoveAll<ILastFmRadioAudioTranscoder>();
             services.AddSingleton<ILastFmRadioAudioTranscoder>(Transcoder);
+            services.RemoveAll<LastFmRadioTrackCache>();
+            services.AddSingleton(new LastFmRadioTrackCache(Path.Combine(_directory, "radio-cache")));
             services.RemoveAll<LastFmRadioStateStore>();
             services.AddSingleton(provider => new LastFmRadioStateStore(
                 Path.Combine(_directory, "radio-state.json"),
@@ -381,7 +394,8 @@ internal sealed class RadioWebFactory : WebApplicationFactory<Program>
     {
         public int LastBitrateKbps { get; private set; }
         public int FailuresBeforeSuccess { get; set; }
-        public int CompleteCalls { get; set; }
+        public int CompleteCalls { get; set; } = 1;
+        public int Calls => Volatile.Read(ref _calls);
         private int _calls;
         public async Task TranscodeToMp3Async(Stream input, Stream output, int bitrateKbps,
             CancellationToken cancellationToken)

@@ -66,6 +66,7 @@ builder.Services.AddScoped<LastFmRadioRecommendationService>();
 builder.Services.AddScoped<LastFmRadioStreamService>();
 builder.Services.AddSingleton<LastFmRadioRefreshQueue>();
 builder.Services.AddSingleton<LastFmRadioStreamSessionStore>();
+builder.Services.AddSingleton<LastFmRadioTrackCache>();
 builder.Services.AddSingleton<ILastFmRadioAudioTranscoder, FfmpegLastFmRadioAudioTranscoder>();
 builder.Services.AddHostedService<LastFmRadioRefreshWorker>();
 

@@ -20,6 +20,7 @@ public sealed class LastFmRadioStreamService
     private readonly SubsonicProxyService _proxy;
     private readonly IDownloadService _downloads;
     private readonly ILastFmRadioAudioTranscoder _transcoder;
+    private readonly LastFmRadioTrackCache _cache;
     private readonly LastFmRadioTrackResolver _resolver;
     private readonly IMusicMetadataService _metadata;
     private readonly RadioQueueStore _queues;
@@ -28,12 +29,14 @@ public sealed class LastFmRadioStreamService
     public LastFmRadioStreamService(LastFmRadioStateStore state,
         IOptionsMonitor<LastFmSettings> settings, ILocalLibraryService library,
         SubsonicProxyService proxy, IDownloadService downloads,
-        ILastFmRadioAudioTranscoder transcoder, LastFmRadioTrackResolver resolver,
+        ILastFmRadioAudioTranscoder transcoder, LastFmRadioTrackCache cache,
+        LastFmRadioTrackResolver resolver,
         IMusicMetadataService metadata,
         RadioQueueStore queues, ILogger<LastFmRadioStreamService> logger)
     {
         _state = state; _settings = settings; _library = library; _proxy = proxy;
-        _downloads = downloads; _transcoder = transcoder; _resolver = resolver; _metadata = metadata;
+        _downloads = downloads; _transcoder = transcoder; _cache = cache;
+        _resolver = resolver; _metadata = metadata;
         _queues = queues; _logger = logger;
     }
 
@@ -66,7 +69,18 @@ public sealed class LastFmRadioStreamService
             var ids = tracks.Select(track => track.ResolvedId!).ToList();
             _queues.Register(ids);
             _ = _metadata.PrewarmYouTubeIdsForSongIdsAsync(ids, topN: 8);
-            var index = Random.Shared.Next(tracks.Count);
+            var starter = await PrepareAsync(session, cancellationToken)
+                ?? throw new InvalidOperationException("Radio station has no cached starter track");
+            await using (var cached = _cache.OpenRead(starter.Path))
+                await cached.CopyToAsync(output, cancellationToken);
+            await output.FlushAsync(cancellationToken);
+            var starterSong = await _resolver.ResolveAsync(starter.Track.Artist,
+                starter.Track.Title, starter.Track.Duration, session.Authentication,
+                cancellationToken);
+            if (starterSong is not null)
+                await RecordCompletionAsync(session, starter.Track, starterSong, cancellationToken);
+
+            var index = (starter.Index + 1) % tracks.Count;
             var failures = 0;
 
             while (!cancellationToken.IsCancellationRequested)
@@ -117,6 +131,60 @@ public sealed class LastFmRadioStreamService
         finally { ConcurrentStreams.Release(); }
     }
 
+    /// <summary>Ensures this station has one complete, immediately playable MP3.
+    /// Callers publish only stations for which this succeeds.</summary>
+    public async Task<PreparedRadioStarter?> PrepareAsync(LastFmRadioStreamSession session,
+        CancellationToken cancellationToken)
+    {
+        var station = Resolve(session);
+        if (station is null) return null;
+        var bitrateKbps = _settings.CurrentValue.EffectiveRadioStreamBitrateKbps;
+        var tracks = station.Tracks.Where(track => !string.IsNullOrWhiteSpace(track.ResolvedId)).ToList();
+        var candidates = tracks.Select((track, index) =>
+        {
+            var identity = track.ResolvedId ?? $"{track.Artist}\n{track.Title}";
+            var key = _cache.Key(session.Username, station.Id, identity,
+                station.ChangedUtc, bitrateKbps);
+            return (Track: track, Index: index, Key: key);
+        }).ToList();
+
+        // A later candidate may have been the first playable source on an earlier
+        // request. Find any completed starter before retrying failed candidates.
+        foreach (var candidate in candidates)
+        {
+            var readyPath = _cache.GetReadyPath(candidate.Key);
+            if (readyPath is not null)
+                return new PreparedRadioStarter(readyPath, candidate.Track, candidate.Index);
+        }
+        foreach (var candidate in candidates)
+        {
+            var track = candidate.Track;
+            try
+            {
+                var path = await _cache.GetOrCreateAsync(candidate.Key, async (output, token) =>
+                {
+                    var opened = await OpenTrackAsync(track, session.Authentication, token)
+                        ?? throw new InvalidOperationException("No playable source");
+                    await using (opened.Source.AudioStream)
+                        await _transcoder.TranscodeToMp3Async(opened.Source.AudioStream, output,
+                            bitrateKbps, token);
+                }, cancellationToken);
+                return new PreparedRadioStarter(path, track, candidate.Index);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Could not prepare Radio starter {Artist} - {Title}; trying the next track",
+                    track.Artist, track.Title);
+            }
+        }
+        return null;
+    }
+
     private async Task<OpenedRadioTrack?> OpenTrackAsync(LastFmRadioTrack track,
         IReadOnlyDictionary<string, string> authentication, CancellationToken cancellationToken)
     {
@@ -163,3 +231,5 @@ public sealed class LastFmRadioStreamService
 
     private sealed record OpenedRadioTrack(DirectStreamInfo Source, Song Song);
 }
+
+public sealed record PreparedRadioStarter(string Path, LastFmRadioTrack Track, int Index);

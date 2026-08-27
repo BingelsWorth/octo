@@ -372,14 +372,22 @@ public class SubsonicController : ControllerBase
         QueueRefreshIfStale(username);
         if (stations.Count == 0) return File(relay.Body, relay.ContentType ?? $"application/{format}");
 
-        string StreamUrl(LastFmRadioStation station)
+        async Task<(LastFmRadioStation Station, string Token)?> PrepareStation(
+            LastFmRadioStation station)
         {
             var token = _radioStreamSessions.Issue(username, station.Id, parameters);
-            return $"{Request.Scheme}://{Request.Host}{Request.PathBase}/radio/stream/{token}";
+            var session = _radioStreamSessions.Get(token)!;
+            return await _radioStreams.PrepareAsync(session, HttpContext.RequestAborted) is null
+                ? null
+                : (station, token);
         }
 
         try
         {
+            var prepared = (await Task.WhenAll(stations.Select(PrepareStation)))
+                .Where(item => item is not null).Select(item => item!.Value).ToList();
+            string StreamUrl(string token) =>
+                $"{Request.Scheme}://{Request.Host}{Request.PathBase}/radio/stream/{token}";
             if (format.Equals("json", StringComparison.OrdinalIgnoreCase))
             {
                 var root = JsonNode.Parse(relay.Body)!.AsObject();
@@ -388,12 +396,12 @@ public class SubsonicController : ControllerBase
                 response["internetRadioStations"] = container;
                 var rows = container["internetRadioStation"] as JsonArray ?? new JsonArray();
                 container["internetRadioStation"] = rows;
-                foreach (var station in stations)
+                foreach (var (station, token) in prepared)
                     rows.Add(new JsonObject
                     {
                         ["id"] = station.Id,
                         ["name"] = station.Name,
-                        ["streamUrl"] = StreamUrl(station),
+                        ["streamUrl"] = StreamUrl(token),
                     });
                 return File(Encoding.UTF8.GetBytes(root.ToJsonString()), "application/json");
             }
@@ -408,10 +416,10 @@ public class SubsonicController : ControllerBase
                 containerElement = new XElement(ns + "internetRadioStations");
                 responseElement.Add(containerElement);
             }
-            foreach (var station in stations)
+            foreach (var (station, token) in prepared)
                 containerElement.Add(new XElement(ns + "internetRadioStation",
                     new XAttribute("id", station.Id), new XAttribute("name", station.Name),
-                    new XAttribute("streamUrl", StreamUrl(station))));
+                    new XAttribute("streamUrl", StreamUrl(token))));
             return File(Encoding.UTF8.GetBytes(document.ToString()), "application/xml");
         }
         catch (Exception ex)
