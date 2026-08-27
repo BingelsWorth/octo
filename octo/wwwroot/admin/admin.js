@@ -712,13 +712,16 @@ if (location.hash === '#raw') loadRawConfig();
 if (location.hash === '#sources') loadConfigSources();
 
 // ────────────────────────────────────────────────────────────────
-// Temporary live process logs
+// Live process logs
 // ────────────────────────────────────────────────────────────────
 const logViewer = document.getElementById('log-viewer');
 const logConnection = document.getElementById('log-connection');
 const logConnectionText = document.getElementById('log-connection-text');
 const logPauseButton = document.getElementById('log-pause');
 const logLevelFilter = document.getElementById('log-level-filter');
+const logSourceFilter = document.getElementById('log-source-filter');
+const logTextFilter = document.getElementById('log-text-filter');
+const logMatchCount = document.getElementById('log-match-count');
 const logLevelRanks = { Trace: 0, Debug: 1, Information: 2, Warning: 3, Error: 4, Critical: 5 };
 let logSource = null;
 let logPaused = false;
@@ -742,7 +745,10 @@ function startLogStream() {
       const entry = JSON.parse(event.data);
       lastLogSequence = Math.max(lastLogSequence, Number(entry.sequence) || 0);
       logEntries.push(entry);
-      if (logEntries.length > 500) logEntries.shift();
+      if (logEntries.length > 1000) {
+        const removed = logEntries.shift();
+        logViewer?.querySelector(`[data-sequence="${Number(removed?.sequence) || 0}"]`)?.remove();
+      }
       appendLogEntry(entry);
     } catch {
       setLogConnection('bad', 'Invalid log data');
@@ -759,7 +765,25 @@ function stopLogStream(showStopped = true) {
 
 function logEntryMatches(entry) {
   const minimum = Number(logLevelFilter?.value || 0);
-  return (logLevelRanks[entry.level] ?? 0) >= minimum;
+  if ((logLevelRanks[entry.level] ?? 0) < minimum) return false;
+
+  const category = String(entry.category || '');
+  const message = String(entry.message || '');
+  const source = logSourceFilter?.value || 'octo';
+  const isOcto = category === 'Program' || category.startsWith('Octo.');
+  if (source === 'octo' && !isOcto) return false;
+  if (source === 'radio') {
+    const isLastFmService = category.startsWith('Octo.Services.LastFm.');
+    const isRadioControllerEvent = category === 'Octo.Controllers.SubSonicController'
+      && /\b(radio|station|warmup)\b/i.test(message);
+    if (!isLastFmService && !isRadioControllerEvent) return false;
+  }
+
+  const search = logTextFilter?.value.trim().toLocaleLowerCase() || '';
+  if (!search) return true;
+  return `${entry.level || ''}\n${category}\n${message}\n${entry.exception || ''}`
+    .toLocaleLowerCase()
+    .includes(search);
 }
 
 function formatLogTime(timestamp) {
@@ -773,6 +797,7 @@ function makeLogEntry(entry) {
   const row = document.createElement('article');
   const level = String(entry.level || 'Information');
   row.className = `log-entry level-${level.toLowerCase()}`;
+  row.dataset.sequence = String(Number(entry.sequence) || 0);
 
   const head = document.createElement('div');
   head.className = 'log-entry-head';
@@ -809,24 +834,40 @@ function makeLogEntry(entry) {
 }
 
 function appendLogEntry(entry) {
-  if (!logViewer || !logEntryMatches(entry)) return;
+  if (!logViewer) return;
+  updateLogMatchCount();
+  if (!logEntryMatches(entry)) {
+    if (!logViewer.querySelector('.log-entry')) showLogEmptyState();
+    return;
+  }
   const nearBottom = logViewer.scrollHeight - logViewer.scrollTop - logViewer.clientHeight < 80;
   logViewer.querySelector('.log-empty')?.remove();
   logViewer.append(makeLogEntry(entry));
-  while (logViewer.children.length > 500) logViewer.firstElementChild?.remove();
+  while (logViewer.querySelectorAll('.log-entry').length > 1000)
+    logViewer.querySelector('.log-entry')?.remove();
   if (nearBottom) logViewer.scrollTop = logViewer.scrollHeight;
+}
+
+function showLogEmptyState() {
+  if (!logViewer || logViewer.querySelector('.log-empty')) return;
+  const empty = document.createElement('div');
+  empty.className = 'log-empty';
+  empty.textContent = logEntries.length ? 'No entries match the current filters.' : 'Waiting for log entries…';
+  logViewer.append(empty);
+}
+
+function updateLogMatchCount() {
+  if (!logMatchCount) return;
+  const count = logEntries.filter(logEntryMatches).length;
+  logMatchCount.textContent = `${count} shown`;
 }
 
 function renderLogEntries() {
   if (!logViewer) return;
   const matching = logEntries.filter(logEntryMatches);
   logViewer.replaceChildren(...matching.map(makeLogEntry));
-  if (!matching.length) {
-    const empty = document.createElement('div');
-    empty.className = 'log-empty';
-    empty.textContent = logEntries.length ? 'No entries match this level.' : 'Waiting for log entries…';
-    logViewer.append(empty);
-  }
+  if (!matching.length) showLogEmptyState();
+  updateLogMatchCount();
   logViewer.scrollTop = logViewer.scrollHeight;
 }
 
@@ -847,6 +888,8 @@ document.getElementById('log-clear')?.addEventListener('click', () => {
   renderLogEntries();
 });
 logLevelFilter?.addEventListener('change', renderLogEntries);
+logSourceFilter?.addEventListener('change', renderLogEntries);
+logTextFilter?.addEventListener('input', renderLogEntries);
 if (location.hash === '#logs') startLogStream();
 
 // ────────────────────────────────────────────────────────────────

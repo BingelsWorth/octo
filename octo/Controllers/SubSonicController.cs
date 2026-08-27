@@ -369,6 +369,9 @@ public class SubsonicController : ControllerBase
         var username = parameters.GetValueOrDefault("u", "");
         await BootstrapRadioProfileAsync(username, parameters);
         var stations = StreamStations(username);
+        _logger.LogInformation(
+            "Continuous Radio discovery requested for {User}: {StationCount} eligible stations",
+            username, stations.Count);
         QueueRefreshIfStale(username);
         if (stations.Count == 0) return File(relay.Body, relay.ContentType ?? $"application/{format}");
 
@@ -394,6 +397,9 @@ public class SubsonicController : ControllerBase
         {
             var prepared = (await Task.WhenAll(stations.Select(PrepareStation)))
                 .Where(item => item is not null).Select(item => item!.Value).ToList();
+            _logger.LogInformation(
+                "Continuous Radio discovery published {ReadyCount}/{StationCount} ready stations for {User}",
+                prepared.Count, stations.Count, username);
             string StreamUrl(string token) =>
                 $"{Request.Scheme}://{Request.Host}{Request.PathBase}/radio/stream/{token}";
             if (format.Equals("json", StringComparison.OrdinalIgnoreCase))
@@ -456,6 +462,8 @@ public class SubsonicController : ControllerBase
         Response.Headers["icy-name"] = "Octo Radio";
         Response.Headers["icy-br"] = _lastFmSettings.EffectiveRadioStreamBitrateKbps.ToString();
         if (HttpMethods.IsHead(Request.Method)) return;
+        _logger.LogInformation("Continuous Radio stream opened for {Station} by {User}",
+            station.Name, session.Username);
         try
         {
             await Response.StartAsync(HttpContext.RequestAborted);

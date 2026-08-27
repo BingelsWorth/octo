@@ -14,7 +14,8 @@ public sealed class AdminLogBuffer : ILoggerProvider
     private const int MaximumExceptionLength = 32_768;
 
     private readonly object _gate = new();
-    private readonly Queue<AdminLogEntry> _entries;
+    private readonly Queue<AdminLogEntry> _octoEntries;
+    private readonly Queue<AdminLogEntry> _externalEntries;
     private readonly Dictionary<long, Channel<AdminLogEntry>> _subscribers = new();
     private readonly int _capacity;
     private long _nextSequence;
@@ -26,14 +27,15 @@ public sealed class AdminLogBuffer : ILoggerProvider
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(capacity, 1);
         _capacity = capacity;
-        _entries = new Queue<AdminLogEntry>(capacity);
+        _octoEntries = new Queue<AdminLogEntry>(capacity);
+        _externalEntries = new Queue<AdminLogEntry>(capacity);
     }
 
     public ILogger CreateLogger(string categoryName) => new BufferLogger(this, categoryName);
 
     public AdminLogSubscription Subscribe(long? afterSequence = null)
     {
-        var channel = Channel.CreateBounded<AdminLogEntry>(new BoundedChannelOptions(_capacity + 64)
+        var channel = Channel.CreateBounded<AdminLogEntry>(new BoundedChannelOptions((_capacity * 2) + 64)
         {
             SingleReader = true,
             SingleWriter = false,
@@ -47,7 +49,10 @@ public sealed class AdminLogBuffer : ILoggerProvider
             subscriberId = ++_nextSubscriberId;
             _subscribers.Add(subscriberId, channel);
 
-            foreach (var entry in _entries)
+            // Keep replay chronological even though first-party and framework
+            // entries have separate retention budgets. Routine health probes
+            // must not evict the Radio event an operator came here to find.
+            foreach (var entry in _octoEntries.Concat(_externalEntries).OrderBy(entry => entry.Sequence))
             {
                 if (!afterSequence.HasValue || entry.Sequence > afterSequence.Value)
                     channel.Writer.TryWrite(entry);
@@ -83,9 +88,10 @@ public sealed class AdminLogBuffer : ILoggerProvider
                 Truncate(message, MaximumMessageLength),
                 exception is null ? null : Truncate(exception.ToString(), MaximumExceptionLength));
 
-            _entries.Enqueue(entry);
-            while (_entries.Count > _capacity)
-                _entries.Dequeue();
+            var retainedEntries = IsOctoCategory(category) ? _octoEntries : _externalEntries;
+            retainedEntries.Enqueue(entry);
+            while (retainedEntries.Count > _capacity)
+                retainedEntries.Dequeue();
 
             foreach (var subscriber in _subscribers.Values)
                 subscriber.Writer.TryWrite(entry);
@@ -108,6 +114,10 @@ public sealed class AdminLogBuffer : ILoggerProvider
         value.Length <= maximumLength
             ? value
             : string.Concat(value.AsSpan(0, maximumLength), "\n… [truncated]");
+
+    private static bool IsOctoCategory(string category) =>
+        category.Equals("Program", StringComparison.Ordinal)
+        || category.StartsWith("Octo.", StringComparison.Ordinal);
 
     private sealed class BufferLogger(AdminLogBuffer owner, string category) : ILogger
     {

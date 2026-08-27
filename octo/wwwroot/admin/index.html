@@ -837,7 +837,7 @@
         <header class="page-header">
           <div>
             <h1>Logs</h1>
-            <p>Live Octo process logs for temporary troubleshooting. The latest 500 entries are kept in memory only and disappear when Octo restarts.</p>
+            <p>Live Octo process logs for troubleshooting. Recent Octo and framework entries are kept in separate memory-only tails so routine health checks cannot crowd out useful events.</p>
           </div>
         </header>
 
@@ -846,8 +846,17 @@
             <div class="log-connection" id="log-connection" role="status" aria-live="polite">
               <span class="log-connection-dot pending" aria-hidden="true"></span>
               <span id="log-connection-text">Connecting…</span>
+              <span class="log-match-count" id="log-match-count">0 shown</span>
             </div>
             <div class="log-actions">
+              <label class="log-filter">
+                <span>Source</span>
+                <select class="set-input" id="log-source-filter">
+                  <option value="octo" selected>Octo only</option>
+                  <option value="radio">Radio activity only</option>
+                  <option value="all">All sources</option>
+                </select>
+              </label>
               <label class="log-filter">
                 <span>Minimum level</span>
                 <select class="set-input" id="log-level-filter">
@@ -856,6 +865,10 @@
                   <option value="3">Warning</option>
                   <option value="4">Error</option>
                 </select>
+              </label>
+              <label class="log-filter log-search-filter">
+                <span>Search</span>
+                <input class="set-input" id="log-text-filter" type="search" placeholder="Station, artist, message…" autocomplete="off" />
               </label>
               <button type="button" class="btn btn-ghost" id="log-pause">Pause</button>
               <button type="button" class="btn btn-ghost" id="log-clear">Clear view</button>

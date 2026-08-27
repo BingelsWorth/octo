@@ -6,8 +6,8 @@ using Octo.Services.Admin;
 namespace Octo.Controllers;
 
 /// <summary>
-/// Streams the bounded, in-memory diagnostic log tail to the temporary admin
-/// Logs page. Server-sent events fit the existing read-only HTTP admin surface
+/// Streams the bounded, in-memory diagnostic tail to the admin Logs page.
+/// Server-sent events fit the existing read-only HTTP admin surface
 /// and reconnect automatically without adding a second realtime stack.
 /// </summary>
 [ApiController]

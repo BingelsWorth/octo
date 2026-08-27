@@ -26,7 +26,7 @@ builder.Services.AddHttpClient();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 builder.Services.AddHttpContextAccessor();
-// Temporary troubleshooting surface for the admin Logs page. Register this as
+// In-process troubleshooting surface for the admin Logs page. Register this as
 // a normal ILogger provider so it observes the same core application events as
 // console logging, while retaining only a bounded, restart-cleared memory tail.
 builder.Services.AddSingleton<Octo.Services.Admin.AdminLogBuffer>();

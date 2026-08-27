@@ -51,7 +51,11 @@ public sealed class LastFmRadioWarmupService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        foreach (var username in _state.KnownUsers()) QueueUser(username);
+        var knownUsers = _state.KnownUsers();
+        _logger.LogInformation(
+            "Radio startup warm found {ProfileCount} persisted Radio profiles",
+            knownUsers.Count);
+        foreach (var username in knownUsers) QueueUser(username);
         var scan = ScanReadinessAsync(stoppingToken);
         try
         {

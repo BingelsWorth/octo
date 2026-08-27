@@ -60,4 +60,22 @@ public sealed class AdminLogBufferTests
         Assert.Contains("InvalidOperationException", entry.Exception);
         Assert.Contains("provider unavailable", entry.Exception);
     }
+
+    [Fact]
+    public void FrameworkNoise_DoesNotEvictOctoEntries()
+    {
+        using var buffer = new AdminLogBuffer(2);
+        var radio = buffer.CreateLogger("Octo.Services.LastFm.Radio");
+        var framework = buffer.CreateLogger("Microsoft.AspNetCore.Hosting.Diagnostics");
+        radio.LogInformation("radio warmup started");
+        for (var index = 0; index < 10; index++)
+            framework.LogInformation("health request {Index}", index);
+
+        using var subscription = buffer.Subscribe();
+        var entries = new List<AdminLogEntry>();
+        while (subscription.Reader.TryRead(out var entry)) entries.Add(entry);
+
+        Assert.Contains(entries, entry => entry.Message == "radio warmup started");
+        Assert.Equal(2, entries.Count(entry => entry.Category.StartsWith("Microsoft.", StringComparison.Ordinal)));
+    }
 }
