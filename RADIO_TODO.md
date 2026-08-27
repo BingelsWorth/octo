@@ -10,14 +10,15 @@ Octo observes qualified Subsonic scrobbles, builds a per-user taste profile, ref
 stations in the background, and automatically adds ready stations to that user's
 playlist list.
 
-There are three related but distinct behaviors:
+There are three related but distinct ways Radio chooses music:
 
-1. **Song radio** — the existing `getSimilarSongs[2]` behavior seeded by one song.
-2. **Personalized stations** — learned automatically from a user's recent artists and
+1. **Start radio from a song** — the existing `getSimilarSongs[2]` behavior creates a
+   one-time client queue seeded by one song; it is not a reusable station.
+2. **Dynamic stations** — learned automatically from a user's recent artists and
    tags: Starter/Your Mix, Discovery Mix, up to two useful artist neighborhoods, and
    up to three non-overlapping genre stations.
-3. **Pinned discovery stations** — categories selected in the existing Last.fm admin
-   page. Their names/order/tag seeds are static; their track queues continue to
+3. **Pinned stations** — fixed categories selected in the existing Last.fm admin
+   page. Their names and tag seeds are static; their track queues continue to
    refresh. Examples are Rock, Jazz, Electronic, or a custom `electronic + idm`
    station.
 
@@ -117,7 +118,6 @@ Deezer/Qobuz assumptions). Generated, read-only station snapshots need a focused
   "EnableDiscoveryStations": true,
   "HistoryRetentionDays": 90,
   "DiscoveryPercent": 35,
-  "StationTrackCount": 50,
   "RefreshIntervalHours": 12,
   "MinimumPlays": 10,
   "DiscoveryStations": [
@@ -288,19 +288,22 @@ its acceptance criteria, not a separate micro-task.
   `section[data-pane="lastfm"]`; expand that pane with the current page header,
   `set-section`, and `set-card` structure rather than adding a Radio navigation item,
   framework, palette, or type system.
-- [x] Keep the API key and existing song-radio controls on Last.fm, organizing the page
-  into clear provider, song radio, personalized radio, pinned discovery, and station
-  status sections. Preserve every existing `LastFm.*` field name.
+- [x] Keep the API key and existing start-from-a-song controls on Last.fm, organizing
+  the page into clear radio basics, station playback methods, dynamic stations,
+  pinned stations, and station status sections. Explain that only dynamic and pinned
+  stations use the playlist/continuous-stream publication
+  settings. Preserve every existing `LastFm.*` field name.
 - [x] Add a station overview backed by focused `/api/admin/lastfm/radio` status and
   refresh endpoints: user selector when needed, learning progress,
   bootstrap/history source, seeds, track count, last success/failure, compact preview,
-  and one disabled/loading **Refresh now** action.
+  and automatic refresh state without requiring a manual refresh action.
 - [x] Add personalized settings using normal independent save cards and new
   `LastFm.*` field names; put refresh/minimum-play tuning under native `<details>`
   progressive disclosure.
-- [x] Add a pinned discovery editor by adapting the existing heart-source ordered-row
-  pattern: preset/custom tags, stable hidden ID, enable, rename, reorder, remove, and
-  per-row refresh. Provide Move up/down buttons in addition to drag behavior.
+- [x] Add a pinned discovery editor using existing settings-card controls:
+  preset/custom tags, stable hidden ID, enable, rename, and remove.
+  Do not show ordering controls because Subsonic clients choose how station and
+  playlist collections are displayed.
 - [x] Save the full discovery array via the existing `data-json="true"` convention,
   preserving unknown fields; validate inline and confirm removal without deleting
   history or downloaded tracks.
@@ -311,7 +314,36 @@ its acceptance criteria, not a separate micro-task.
   Radio state only and reports exactly what was removed and that downloaded music is
   untouched.
 
-### Phase 7 — verification, documentation, and cleanup
+### Phase 7 — continuous Subsonic radio streams
+
+- [x] Add independent `LastFm.ExposeRadioAsPlaylists` and
+  `LastFm.ExposeRadioAsStreams` settings, both enabled by default, so deployments may
+  publish either representation or both without changing recommendation state.
+- [x] Add a bounded `LastFm.RadioStreamBitrateKbps` setting with a safe default and
+  explicit supported qualities; playlist playback keeps each track's normal
+  local-first quality while internet radio is continuously transcoded.
+- [x] Intercept authenticated `getInternetRadioStations[.view]`, relay first, and merge
+  the current listener's ready Octo stations into valid JSON and XML without
+  replacing ordinary Navidrome internet-radio entries.
+- [x] Issue opaque, expiring, station/user-scoped stream sessions without putting
+  Navidrome credentials or usernames in stream URLs; bound and prune the in-memory
+  session store and ownership-check every stream open.
+- [x] Serve a cancellation-aware continuous MP3 response from the core Octo process,
+  cycling the ready snapshot and resolving each track through the existing local-first
+  path; normalize each source to the configured bitrate, prewarm ahead, and skip an
+  unavailable track without ending the station.
+- [x] Record qualified track completions from continuous streams for Radio learning and
+  relay their scrobbles to Navidrome, because the client sees one station URL rather
+  than individual Subsonic track requests.
+- [x] Keep generated internet-radio entries read-only while preserving ordinary
+  create/update/delete passthrough behavior.
+- [x] Add Last.fm admin controls and help that explain both independent modes: playlists
+  preserve normal playback quality and support hearts for a permanent lossless copy;
+  internet radio is continuous and transcoded to the selected quality.
+- [ ] Add JSON/XML/session/auth/cancellation/failure/quality fixtures and manually verify
+  the continuous endpoint in Arpeggi while confirming playlist publication still works.
+
+### Phase 8 — verification, documentation, and cleanup
 
 - [x] Add state-store tests for version/load recovery, atomic writes, bounds/pruning,
   concurrency, per-user isolation, disabled persistence, and route rehydration.
@@ -341,7 +373,6 @@ its acceptance criteria, not a separate micro-task.
 - Mood/BPM/audio-feature stations, household-shared taste profiles, weekly archives,
   live cover mosaics, or automatic station downloads.
 - Multi-instance shared-state support or a database migration.
-- A new streaming-radio protocol. Read-only playlists are the compatibility layer.
 
 ## Delete-this-file gate
 

@@ -67,7 +67,7 @@ public sealed class LastFmRadioRecommendationService
             var mixCandidates = await TracksFromSeeds(trackSeeds.Take(6), 12, ct);
             if (mixCandidates.Count == 0) mixCandidates.AddRange(plays.Select(ToCandidate));
             var blendedMix = Blend(plays.Select(ToCandidate), mixCandidates,
-                settings.EffectiveDiscoveryPercent, settings.EffectiveStationTrackCount);
+                settings.EffectiveDiscoveryPercent, settings.EffectiveRadioTrackCount);
             stations.Add(Create(username, learned ? "your-mix" : "starter",
                 learned ? "Your Mix" : "Starter Radio",
                 learned ? LastFmRadioStationKind.YourMix : LastFmRadioStationKind.Starter,
@@ -186,7 +186,7 @@ public sealed class LastFmRadioRecommendationService
                 Duration = candidate.Duration, Score = candidate.Match, Source = "lastfm"
             });
             lastArtist = candidate.Artist;
-            if (output.Count >= settings.EffectiveStationTrackCount) break;
+            if (output.Count >= settings.EffectiveRadioTrackCount) break;
         }
         return output;
     }

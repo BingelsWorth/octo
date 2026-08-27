@@ -899,6 +899,8 @@ section[data-pane].active { display: block; }
 .set-input::placeholder { color: var(--fg-faint); }
 .set-input:hover { border-color: var(--border-strong); }
 .set-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring); }
+.set-input:disabled { opacity: 0.5; cursor: not-allowed; }
+.set-row.is-disabled .set-info { opacity: 0.58; }
 .set-inline { display: flex; gap: 8px; }
 .set-inline .set-input { flex: 1 1 auto; min-width: 0; }
 .set-grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
@@ -1109,11 +1111,11 @@ section[data-pane].active { display: block; }
 .radio-preset-actions .btn, .radio-row-actions .btn { min-height: 44px; }
 .radio-discovery-list { display: grid; gap: 10px; }
 .radio-discovery-row {
-  display: grid; grid-template-columns: 44px 28px minmax(220px, 1fr) 44px auto;
+  display: grid; grid-template-columns: minmax(220px, 1fr) 44px auto;
   align-items: center; gap: 12px; padding: 12px;
   border: 1px solid var(--border); border-radius: var(--r-2); background: var(--bg-2);
 }
-.radio-discovery-row.is-dragging { opacity: .48; }
+.radio-discovery-row.is-disabled .radio-discovery-fields { opacity: .58; }
 .radio-discovery-fields { display: grid; grid-template-columns: minmax(150px, .7fr) minmax(220px, 1.3fr); gap: 10px; }
 .radio-discovery-fields label { display: grid; gap: 5px; color: var(--fg-mute); font-size: 11.5px; }
 .radio-row-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
@@ -1132,9 +1134,10 @@ section[data-pane].active { display: block; }
 .radio-reset-row { border-top: 1px solid rgba(151, 177, 185, 0.08); }
 
 @media (max-width: 760px) {
-  .radio-discovery-row { grid-template-columns: 44px 28px 1fr 44px; }
-  .radio-discovery-fields { grid-column: 2 / -1; grid-template-columns: 1fr; }
-  .radio-row-actions { grid-column: 1 / -1; justify-content: stretch; }
+  .radio-discovery-row { grid-template-columns: 1fr 44px; }
+  .radio-discovery-fields { grid-column: 1 / -1; grid-template-columns: 1fr; }
+  .radio-discovery-row > .switch { grid-column: 2; grid-row: 2; justify-self: end; }
+  .radio-row-actions { grid-column: 1; grid-row: 2; justify-content: stretch; }
   .radio-row-actions .btn { flex: 1 1 calc(50% - 8px); }
   .radio-station-grid { grid-template-columns: 1fr; }
   .radio-status-toolbar, .radio-reset-row { align-items: stretch; flex-direction: column; }

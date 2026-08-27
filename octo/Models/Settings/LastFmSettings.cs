@@ -13,7 +13,7 @@ public class LastFmSettings
     public bool EnableRadio { get; set; } = true;
     
     /// <summary>
-    /// Number of similar tracks to return
+    /// Maximum tracks in song-seeded queues and reusable station snapshots.
     /// </summary>
     public int RadioTrackCount { get; set; } = 50;
     
@@ -28,20 +28,35 @@ public class LastFmSettings
     /// <summary>Expose administrator-pinned Last.fm tag stations.</summary>
     public bool EnableDiscoveryStations { get; set; } = true;
 
+    /// <summary>Publish Octo stations as normal read-only playlists.</summary>
+    public bool ExposeRadioAsPlaylists { get; set; } = true;
+
+    /// <summary>Publish Octo stations through Subsonic internet radio.</summary>
+    public bool ExposeRadioAsStreams { get; set; } = true;
+
+    /// <summary>Continuous internet-radio MP3 bitrate.</summary>
+    public int RadioStreamBitrateKbps { get; set; } = 192;
+
     public int HistoryRetentionDays { get; set; } = 90;
     public int DiscoveryPercent { get; set; } = 35;
-    public int StationTrackCount { get; set; } = 50;
     public int RefreshIntervalHours { get; set; } = 12;
     public int MinimumPlays { get; set; } = 10;
     public List<DiscoveryStationSettings> DiscoveryStations { get; set; } = [];
 
     public int EffectiveHistoryRetentionDays => Math.Clamp(HistoryRetentionDays, 7, 365);
-    public int EffectiveRadioTrackCount => Math.Clamp(RadioTrackCount, 5, 200);
+    public int EffectiveRadioTrackCount => Math.Clamp(RadioTrackCount, 10, 100);
     public int EffectiveRadioCacheDurationHours => Math.Clamp(RadioCacheDurationHours, 1, 168);
     public int EffectiveDiscoveryPercent => Math.Clamp(DiscoveryPercent, 0, 100);
-    public int EffectiveStationTrackCount => Math.Clamp(StationTrackCount, 10, 100);
     public int EffectiveRefreshIntervalHours => Math.Clamp(RefreshIntervalHours, 1, 168);
     public int EffectiveMinimumPlays => Math.Clamp(MinimumPlays, 3, 100);
+    public int EffectiveRadioStreamBitrateKbps => RadioStreamBitrateKbps switch
+    {
+        <= 96 => 96,
+        <= 128 => 128,
+        <= 192 => 192,
+        <= 256 => 256,
+        _ => 320,
+    };
 
     public IReadOnlyList<DiscoveryStationSettings> EffectiveDiscoveryStations()
     {

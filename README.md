@@ -134,13 +134,18 @@ git checkout 2026.07.29 && ./install.sh
 
 Prebuilt multi-arch images are also published to `ghcr.io/winters27/octo`, tagged `latest`, the release date, and the commit sha.
 
-### 2026.08.25 release notes
+### 2026.08.26 release notes
 
 - Adds automatic per-user Last.fm Radio stations as read-only Subsonic and native Navidrome playlists.
+- Publishes the same stations through Subsonic internet radio as optional continuous
+  MP3 streams; playlist and stream publication can be enabled independently.
 - Adds Starter Radio, Your Mix, discovery, artist-neighborhood, genre, and administrator-pinned tag stations.
 - Adds the in-process Radio refresh worker and bounded `/app/config/lastfm-radio-state.json` store; no Radio service or container was added.
 - Expands the existing Last.fm admin pane with personalized settings, ordered pinned categories, station status, refresh, and per-user reset.
 - Preserves local-first playback, external previews, heart acquisition, queue prewarming, and ordinary Navidrome playlist behavior.
+- Keeps playlists at normal per-track quality while continuous Radio uses a configured
+  96–320 kbps MP3 bitrate. Heart a discovery track from its playlist to fetch the
+  permanent lossless copy.
 
 ## Admin dashboard
 
@@ -181,7 +186,7 @@ Navidrome's radio plays songs from your existing library. Octo's radio reaches *
 
 ### Is my data going anywhere?
 
-Octo's per-user play ledger and generated snapshots stay in `/app/config/lastfm-radio-state.json`. It sends Last.fm only the artist, title, and tag lookups needed to build recommendations; it does not send the ledger, Navidrome credentials, usernames, or stream URLs. YouTube and Soulseek receive the ordinary outbound lookups needed for preview/acquisition.
+Octo's per-user play ledger and station snapshots stay in `/app/config/lastfm-radio-state.json`. It sends Last.fm only the artist, title, and tag lookups needed to build recommendations; it does not send the ledger, Navidrome credentials, usernames, or stream URLs. Continuous Radio URLs contain opaque, expiring in-memory session tokens rather than Navidrome credentials. YouTube and Soulseek receive the ordinary outbound lookups needed for preview/acquisition.
 
 ### Do downloaded songs get tagged correctly?
 
@@ -257,7 +262,24 @@ Octo reads from three sources, highest priority first:
 
 The admin UI's "Config sources" tab shows the merged effective value for every key.
 
-Last.fm Radio is enabled by default. Scalar deployment defaults use `LASTFM_ENABLE_PERSONALIZED_STATIONS`, `LASTFM_ENABLE_DISCOVERY_STATIONS`, `LASTFM_HISTORY_RETENTION_DAYS`, `LASTFM_DISCOVERY_PERCENT`, `LASTFM_STATION_TRACK_COUNT`, `LASTFM_REFRESH_INTERVAL_HOURS`, and `LASTFM_MINIMUM_PLAYS`. Ordered pinned categories are managed as `LastFm.DiscoveryStations` in the existing Last.fm admin tab or settings JSON because encoding structured rows in `.env` is brittle.
+Last.fm Radio is enabled by default. `LASTFM_EXPOSE_AS_PLAYLISTS` and
+`LASTFM_EXPOSE_AS_STREAMS` independently publish Octo stations in those two client
+surfaces; both default to true. Playlist tracks retain normal playback quality.
+Continuous streams are normalized to `LASTFM_RADIO_STREAM_BITRATE_KBPS` (96, 128, 192,
+256, or 320; default 192). These publication settings apply to dynamic and pinned
+stations. A client's **Start radio from this song** action remains a one-time
+`getSimilarSongs[2]` track queue and does not create a playlist or continuous stream.
+Other scalar defaults use
+`LASTFM_ENABLE_PERSONALIZED_STATIONS`, `LASTFM_ENABLE_DISCOVERY_STATIONS`,
+`LASTFM_HISTORY_RETENTION_DAYS`, `LASTFM_DISCOVERY_PERCENT`,
+`LASTFM_RADIO_TRACK_COUNT`, `LASTFM_REFRESH_INTERVAL_HOURS`, and
+`LASTFM_MINIMUM_PLAYS`. Pinned categories are managed as
+`LastFm.DiscoveryStations` in the existing Last.fm admin tab or settings JSON because
+encoding structured rows in `.env` is brittle.
+
+`LASTFM_REFRESH_INTERVAL_HOURS` defaults to 12. The in-process Radio worker checks for
+stale dynamic and pinned snapshots once a minute and rebuilds them in the
+background; the last good snapshot remains playable until a replacement succeeds.
 
 Radio state is a bounded, versioned, single-writer JSON file. Do not mount the same `/app/config/lastfm-radio-state.json` into multiple Octo instances; cross-process locking is not part of this release.
 
@@ -297,6 +319,9 @@ Octo hijacks these endpoints; everything else proxies to Navidrome unchanged:
 | `getSimilarSongs2` | radio queue with local-first preference |
 | `getPlaylists`, `getPlaylist` | append authenticated per-user read-only Radio snapshots and materialize tracks local-first |
 | `createPlaylist`, `updatePlaylist`, `deletePlaylist` | protect reserved Radio IDs while relaying ordinary mutations |
+| `getInternetRadioStations` | append authenticated Octo stations with opaque continuous-stream URLs while preserving ordinary internet radio |
+| `createInternetRadioStation`, `updateInternetRadioStation`, `deleteInternetRadioStation` | protect Octo stations while relaying ordinary internet-radio mutations |
+| `/radio/stream/{token}` | resolve tracks local-first and continuously transcode them to the configured MP3 quality until disconnect |
 | `stream` | YouTube proxy with Range support, mp4/m4a passthrough |
 | `getCoverArt` | Deezer → iTunes → Last.fm aggregator with Octo watermark |
 | `getAlbum` | external album tracklists, and fills in tracks you're missing from an album you own |

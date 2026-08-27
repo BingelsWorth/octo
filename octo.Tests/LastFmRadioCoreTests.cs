@@ -49,7 +49,7 @@ public class LastFmRadioCoreTests
     {
         var settings = new LastFmSettings
         {
-            HistoryRetentionDays = 1, StationTrackCount = 500, DiscoveryPercent = -4,
+            HistoryRetentionDays = 1, RadioTrackCount = 500, DiscoveryPercent = -4,
             DiscoveryStations = [new() { Id = " Keep-ME! ", Name = " Electronic ",
                 Tags = [" IDM ", "idm", "Electronic", "Ambient", "Techno", "House"] }]
         };
@@ -57,8 +57,65 @@ public class LastFmRadioCoreTests
         Assert.Equal("keepme", station.Id);
         Assert.Equal(["idm", "electronic", "ambient", "techno", "house"], station.Tags);
         Assert.Equal(7, settings.EffectiveHistoryRetentionDays);
-        Assert.Equal(100, settings.EffectiveStationTrackCount);
+        Assert.Equal(100, settings.EffectiveRadioTrackCount);
         Assert.Equal(0, settings.EffectiveDiscoveryPercent);
+    }
+
+    [Theory]
+    [InlineData(1, 96)]
+    [InlineData(120, 128)]
+    [InlineData(192, 192)]
+    [InlineData(220, 256)]
+    [InlineData(999, 320)]
+    public void StreamBitrate_UsesSupportedMp3Qualities(int configured, int effective)
+    {
+        var settings = new LastFmSettings { RadioStreamBitrateKbps = configured };
+        Assert.Equal(effective, settings.EffectiveRadioStreamBitrateKbps);
+    }
+
+    [Fact]
+    public void StreamSessions_AreOpaqueScopedExpiringAndBounded()
+    {
+        var store = new LastFmRadioStreamSessionStore();
+        var now = new DateTime(2026, 8, 26, 1, 0, 0, DateTimeKind.Utc);
+        var token = store.Issue("alice", "station-one", new Dictionary<string, string>
+        {
+            ["u"] = "alice", ["t"] = "secret-token", ["s"] = "salt",
+            ["id"] = "must-not-be-copied", ["f"] = "json",
+        }, now);
+        Assert.DoesNotContain("alice", token);
+        Assert.DoesNotContain("secret", token);
+        var session = Assert.IsType<LastFmRadioStreamSession>(store.Get(token, now.AddHours(1)));
+        Assert.Equal("station-one", session.StationId);
+        Assert.Equal("secret-token", session.Authentication["t"]);
+        Assert.DoesNotContain("id", session.Authentication.Keys);
+        Assert.Null(store.Get(token, now.AddHours(13)));
+
+        for (var index = 0; index < LastFmRadioStreamSessionStore.MaximumSessions + 20; index++)
+            store.Issue("alice", "station-" + index, new Dictionary<string, string>(),
+                now.AddSeconds(index));
+        Assert.Equal(LastFmRadioStreamSessionStore.MaximumSessions, store.Count);
+    }
+
+    [Fact]
+    public async Task FfmpegTranscoder_ProducesConcatenableHeaderlessMp3Segments()
+    {
+        var transcoder = new FfmpegLastFmRadioAudioTranscoder();
+        await using var output = new MemoryStream();
+        await using var firstInput = WavSilence();
+        await transcoder.TranscodeToMp3Async(firstInput, output, 192, CancellationToken.None);
+        var boundary = checked((int)output.Length);
+        await using var secondInput = WavSilence();
+        await transcoder.TranscodeToMp3Async(secondInput, output, 192, CancellationToken.None);
+        var bytes = output.ToArray();
+        Assert.True(boundary > 100);
+        Assert.True(bytes.Length > boundary + 100);
+        Assert.False(bytes.AsSpan(0, 3).SequenceEqual("ID3"u8));
+        Assert.False(bytes.AsSpan(boundary, 3).SequenceEqual("ID3"u8));
+        Assert.Equal(0xff, bytes[0]);
+        Assert.Equal(0xe0, bytes[1] & 0xe0);
+        Assert.Equal(0xff, bytes[boundary]);
+        Assert.Equal(0xe0, bytes[boundary + 1] & 0xe0);
     }
 
     [Fact]
@@ -87,6 +144,26 @@ public class LastFmRadioCoreTests
         ChangedUtc = DateTime.UtcNow, ValidUntilUtc = DateTime.UtcNow.AddHours(12),
         Tracks = [new() { Artist = "Artist", Title = "Title", Duration = 200 }]
     };
+
+    private static MemoryStream WavSilence()
+    {
+        const int sampleRate = 44100;
+        const int samples = sampleRate / 4;
+        const short channels = 1;
+        const short bitsPerSample = 16;
+        var dataLength = samples * channels * (bitsPerSample / 8);
+        var stream = new MemoryStream(44 + dataLength);
+        using (var writer = new BinaryWriter(stream, System.Text.Encoding.ASCII, leaveOpen: true))
+        {
+            writer.Write("RIFF"u8); writer.Write(36 + dataLength); writer.Write("WAVE"u8);
+            writer.Write("fmt "u8); writer.Write(16); writer.Write((short)1); writer.Write(channels);
+            writer.Write(sampleRate); writer.Write(sampleRate * channels * bitsPerSample / 8);
+            writer.Write((short)(channels * bitsPerSample / 8)); writer.Write(bitsPerSample);
+            writer.Write("data"u8); writer.Write(dataLength); writer.Write(new byte[dataLength]);
+        }
+        stream.Position = 0;
+        return stream;
+    }
 }
 
 public class LastFmRadioTrackResolverTests
@@ -291,6 +368,15 @@ public class LastFmRadioRefreshQueueTests
         user.Plays.RemoveAt(user.Plays.Count - 1);
         user.LastRefreshSuccessUtc = now.AddHours(-13);
         Assert.True(LastFmRadioRefreshPolicy.IsStale(user, settings, now));
+        Assert.True(LastFmRadioRefreshPolicy.ShouldSchedulePeriodicRefresh(user, settings, now));
+        user.Refreshing = true;
+        Assert.False(LastFmRadioRefreshPolicy.ShouldSchedulePeriodicRefresh(user, settings, now));
+        user.Refreshing = false;
+        user.LastRefreshError = "provider unavailable";
+        user.LastRefreshAttemptUtc = now.AddMinutes(-5);
+        Assert.False(LastFmRadioRefreshPolicy.ShouldSchedulePeriodicRefresh(user, settings, now));
+        user.LastRefreshAttemptUtc = now.AddMinutes(-16);
+        Assert.True(LastFmRadioRefreshPolicy.ShouldSchedulePeriodicRefresh(user, settings, now));
         var jitter = LastFmRadioRefreshPolicy.StartupJitter("Alice");
         Assert.Equal(jitter, LastFmRadioRefreshPolicy.StartupJitter("alice"));
         Assert.InRange(jitter.TotalMilliseconds, 100, 499);
@@ -407,7 +493,7 @@ public class LastFmRadioRecommendationTests
         {
             var settings = TestOptions.Monitor(new LastFmSettings
             {
-                ApiKey = "", MinimumPlays = 10, StationTrackCount = 10,
+                ApiKey = "", MinimumPlays = 10, RadioTrackCount = 10,
                 DiscoveryStations = [new() { Id = "rock", Name = "Rock Discovery", Tags = ["rock"] }]
             });
             var state = new LastFmRadioStateStore(System.IO.Path.Combine(directory, "state.json"), settings,
@@ -443,7 +529,7 @@ public class LastFmRadioRecommendationTests
         {
             var settings = TestOptions.Monitor(new LastFmSettings
             {
-                ApiKey = "key", MinimumPlays = 3, StationTrackCount = 10, DiscoveryPercent = 50,
+                ApiKey = "key", MinimumPlays = 3, RadioTrackCount = 10, DiscoveryPercent = 50,
                 DiscoveryStations = [new() { Id = "fusion", Name = "Fusion",
                     Tags = ["rock", "idm"] }]
             });

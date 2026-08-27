@@ -54,6 +54,8 @@ public class SubsonicController : ControllerBase
     private readonly ILogger<SubsonicController> _logger;
     private readonly LastFmRadioStateStore? _radioStateStore;
     private readonly LastFmRadioRefreshQueue? _radioRefreshQueue;
+    private readonly LastFmRadioStreamSessionStore _radioStreamSessions;
+    private readonly LastFmRadioStreamService _radioStreams;
 
     public SubsonicController(
         IOptionsMonitor<SubsonicSettings> subsonicSettings,
@@ -73,6 +75,8 @@ public class SubsonicController : ControllerBase
         LastFmRadioTrackResolver radioTrackResolver,
         ILogger<SubsonicController> logger,
         IOptionsMonitor<LastFmSettings> lastFmSettings,
+        LastFmRadioStreamSessionStore radioStreamSessions,
+        LastFmRadioStreamService radioStreams,
         PlaylistSyncService? playlistSyncService = null,
         LastFmService? lastFmService = null,
         CoverArtService? coverArtService = null,
@@ -103,6 +107,8 @@ public class SubsonicController : ControllerBase
         _logger = logger;
         _radioStateStore = radioStateStore;
         _radioRefreshQueue = radioRefreshQueue;
+        _radioStreamSessions = radioStreamSessions;
+        _radioStreams = radioStreams;
         // No hard throw on a missing/blank Subsonic URL: that made every request
         // fail opaquely. Misconfiguration is now reported per-request with an
         // actionable message (see Ping and OctoNotConfiguredException), and the
@@ -281,7 +287,7 @@ public class SubsonicController : ControllerBase
 
         var username = parameters.GetValueOrDefault("u", "");
         await BootstrapRadioProfileAsync(username, parameters);
-        var stations = VisibleStations(username);
+        var stations = PlaylistStations(username);
         QueueRefreshIfStale(username);
         if (stations.Count == 0) return File(relay.Body, relay.ContentType ?? $"application/{format}");
         try
@@ -325,7 +331,7 @@ public class SubsonicController : ControllerBase
         var format = parameters.GetValueOrDefault("f", "xml");
         var id = parameters.GetValueOrDefault("id", "");
         var username = parameters.GetValueOrDefault("u", "");
-        var station = VisibleStations(username).FirstOrDefault(item => item.Id == id);
+        var station = PlaylistStations(username).FirstOrDefault(item => item.Id == id);
         if (station is null)
         {
             var relay = await _proxyService.RelaySafeAsync("rest/getPlaylist", parameters);
@@ -344,6 +350,133 @@ public class SubsonicController : ControllerBase
         _ = _metadataService.PrewarmYouTubeIdsAsync(songs, topN: 8);
         QueueRefreshIfStale(username);
         return _responseBuilder.CreateRadioPlaylistResponse(format, station, songs);
+    }
+
+    [HttpGet, HttpPost]
+    [Route("rest/getInternetRadioStations")]
+    [Route("rest/getInternetRadioStations.view")]
+    public async Task<IActionResult> GetInternetRadioStations()
+    {
+        var parameters = await ExtractAllParameters();
+        var format = parameters.GetValueOrDefault("f", "xml");
+        var relay = await _proxyService.RelaySafeAsync("rest/getInternetRadioStations", parameters);
+        if (!relay.Success || relay.Body is not { Length: > 0 }
+            || !IsSuccessfulSubsonicResponse(relay.Body, format))
+            return relay.Body is { Length: > 0 }
+                ? File(relay.Body, relay.ContentType ?? $"application/{format}")
+                : _responseBuilder.CreateError(format, 0, "Unable to authenticate with Navidrome");
+
+        var username = parameters.GetValueOrDefault("u", "");
+        await BootstrapRadioProfileAsync(username, parameters);
+        var stations = StreamStations(username);
+        QueueRefreshIfStale(username);
+        if (stations.Count == 0) return File(relay.Body, relay.ContentType ?? $"application/{format}");
+
+        string StreamUrl(LastFmRadioStation station)
+        {
+            var token = _radioStreamSessions.Issue(username, station.Id, parameters);
+            return $"{Request.Scheme}://{Request.Host}{Request.PathBase}/radio/stream/{token}";
+        }
+
+        try
+        {
+            if (format.Equals("json", StringComparison.OrdinalIgnoreCase))
+            {
+                var root = JsonNode.Parse(relay.Body)!.AsObject();
+                var response = root["subsonic-response"]!.AsObject();
+                var container = response["internetRadioStations"] as JsonObject ?? new JsonObject();
+                response["internetRadioStations"] = container;
+                var rows = container["internetRadioStation"] as JsonArray ?? new JsonArray();
+                container["internetRadioStation"] = rows;
+                foreach (var station in stations)
+                    rows.Add(new JsonObject
+                    {
+                        ["id"] = station.Id,
+                        ["name"] = station.Name,
+                        ["streamUrl"] = StreamUrl(station),
+                    });
+                return File(Encoding.UTF8.GetBytes(root.ToJsonString()), "application/json");
+            }
+
+            var document = XDocument.Parse(Encoding.UTF8.GetString(relay.Body));
+            var responseElement = document.Root!;
+            var ns = responseElement.Name.Namespace;
+            var containerElement = responseElement.Elements()
+                .FirstOrDefault(element => element.Name.LocalName == "internetRadioStations");
+            if (containerElement is null)
+            {
+                containerElement = new XElement(ns + "internetRadioStations");
+                responseElement.Add(containerElement);
+            }
+            foreach (var station in stations)
+                containerElement.Add(new XElement(ns + "internetRadioStation",
+                    new XAttribute("id", station.Id), new XAttribute("name", station.Name),
+                    new XAttribute("streamUrl", StreamUrl(station))));
+            return File(Encoding.UTF8.GetBytes(document.ToString()), "application/xml");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not merge Octo stations into getInternetRadioStations");
+            return File(relay.Body, relay.ContentType ?? $"application/{format}");
+        }
+    }
+
+    [HttpGet, HttpHead]
+    [Route("radio/stream/{token:length(48)}")]
+    public async Task StreamGeneratedRadio(string token)
+    {
+        var session = _radioStreamSessions.Get(token);
+        var station = session is null ? null : _radioStreams.Resolve(session);
+        if (session is null || station is null)
+        {
+            Response.StatusCode = StatusCodes.Status404NotFound;
+            return;
+        }
+
+        Response.StatusCode = StatusCodes.Status200OK;
+        Response.ContentType = "audio/mpeg";
+        Response.Headers.CacheControl = "no-store, no-transform";
+        Response.Headers["Accept-Ranges"] = "none";
+        Response.Headers["icy-name"] = "Octo Radio";
+        Response.Headers["icy-br"] = _lastFmSettings.EffectiveRadioStreamBitrateKbps.ToString();
+        if (HttpMethods.IsHead(Request.Method)) return;
+        try
+        {
+            await Response.StartAsync(HttpContext.RequestAborted);
+            await _radioStreams.StreamAsync(session, Response.Body, HttpContext.RequestAborted);
+        }
+        catch (OperationCanceledException) when (HttpContext.RequestAborted.IsCancellationRequested)
+        {
+            // A radio stream normally ends because the listener stopped playback.
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Continuous Radio stream failed for station {Station}", station.Id);
+            if (!Response.HasStarted) Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+            else HttpContext.Abort();
+        }
+    }
+
+    [HttpGet, HttpPost]
+    [Route("rest/createInternetRadioStation")]
+    [Route("rest/createInternetRadioStation.view")]
+    [Route("rest/updateInternetRadioStation")]
+    [Route("rest/updateInternetRadioStation.view")]
+    [Route("rest/deleteInternetRadioStation")]
+    [Route("rest/deleteInternetRadioStation.view")]
+    public async Task<IActionResult> MutateInternetRadioStation()
+    {
+        var parameters = await ExtractAllParameters();
+        var format = parameters.GetValueOrDefault("f", "xml");
+        var id = parameters.GetValueOrDefault("id", "");
+        if (id.StartsWith("or", StringComparison.Ordinal) && id.Length == 22)
+            return _responseBuilder.CreateError(format, 70, "Octo Radio stations are read-only");
+        var endpoint = Request.Path.Value?.Split('/').LastOrDefault()?.Replace(".view", "")
+            ?? "updateInternetRadioStation";
+        var relay = await _proxyService.RelaySafeAsync("rest/" + endpoint, parameters);
+        return relay.Success && relay.Body is not null
+            ? File(relay.Body, relay.ContentType ?? $"application/{format}")
+            : _responseBuilder.CreateError(format, 0, "Unable to update internet radio station");
     }
 
     [HttpGet, HttpPost]
@@ -374,6 +507,12 @@ public class SubsonicController : ControllerBase
             station.Personalized ? _lastFmSettings.EnablePersonalizedStations
                 : _lastFmSettings.EnableDiscoveryStations).ToList();
     }
+
+    private List<LastFmRadioStation> PlaylistStations(string username) =>
+        _lastFmSettings.ExposeRadioAsPlaylists ? VisibleStations(username) : [];
+
+    private List<LastFmRadioStation> StreamStations(string username) =>
+        _lastFmSettings.ExposeRadioAsStreams ? VisibleStations(username) : [];
 
     private void QueueRefreshIfStale(string username)
     {
@@ -2307,7 +2446,7 @@ public class SubsonicController : ControllerBase
             return File(raw.Body, raw.ContentType ?? "application/json");
         }
         var username = NativeUsername(parameters);
-        var stations = VisibleStations(username);
+        var stations = PlaylistStations(username);
         if (tail.Length == 0)
         {
             try

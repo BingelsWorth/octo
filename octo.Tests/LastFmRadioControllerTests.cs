@@ -151,6 +151,89 @@ public sealed class LastFmRadioControllerTests
         Assert.DoesNotContain("explicit", ids);
         Assert.Contains("clean", ids);
     }
+
+    [Theory]
+    [InlineData("json")]
+    [InlineData("xml")]
+    public async Task InternetRadioList_MergesOrdinaryAndGeneratedStationsWithOpaqueStreamUrl(string format)
+    {
+        await using var fixture = new RadioWebFactory();
+        fixture.InstallStation();
+        using var client = fixture.CreateClient();
+        var body = await client.GetStringAsync(
+            $"/rest/getInternetRadioStations?u=alice&t=token&s=salt&f={format}");
+        Assert.Contains("Native Radio", body);
+        Assert.Contains("Your Mix", body);
+        Assert.Contains("/radio/stream/", body);
+        Assert.DoesNotContain("t=token", body);
+        Assert.DoesNotContain("u=alice", body);
+    }
+
+    [Fact]
+    public async Task PlaylistAndInternetRadioPublication_AreIndependentAndReservedRadioIsReadOnly()
+    {
+        await using var fixture = new RadioWebFactory(exposePlaylists: false, exposeStreams: true);
+        fixture.InstallStation();
+        using var client = fixture.CreateClient();
+        var playlists = await client.GetStringAsync(
+            "/rest/getPlaylists?u=alice&t=token&s=salt&f=json");
+        Assert.DoesNotContain("Your Mix", playlists);
+        var radios = await client.GetStringAsync(
+            "/rest/getInternetRadioStations?u=alice&t=token&s=salt&f=json");
+        Assert.Contains("Your Mix", radios);
+        var mutation = await client.GetStringAsync(
+            $"/rest/deleteInternetRadioStation?id={fixture.StationId}&u=alice&t=token&s=salt&f=json");
+        Assert.Contains("read-only", mutation);
+    }
+
+    [Fact]
+    public async Task OpaqueInternetRadioUrl_StreamsMp3AndCancelsWhenClientDisconnects()
+    {
+        await using var fixture = new RadioWebFactory();
+        fixture.InstallStation();
+        using var client = fixture.CreateClient();
+        var listBody = await client.GetStringAsync(
+            "/rest/getInternetRadioStations?u=alice&t=token&s=salt&f=json");
+        using var list = JsonDocument.Parse(listBody);
+        var url = list.RootElement.GetProperty("subsonic-response")
+            .GetProperty("internetRadioStations").GetProperty("internetRadioStation")
+            .EnumerateArray().Single(item => item.GetProperty("name").GetString() == "Your Mix")
+            .GetProperty("streamUrl").GetString()!;
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
+        using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+        response.EnsureSuccessStatusCode();
+        Assert.Equal("audio/mpeg", response.Content.Headers.ContentType?.MediaType);
+        await using var stream = await response.Content.ReadAsStreamAsync();
+        var bytes = new byte[3];
+        await stream.ReadExactlyAsync(bytes);
+        Assert.Equal("MP3", Encoding.ASCII.GetString(bytes));
+        Assert.Equal(192, fixture.Transcoder.LastBitrateKbps);
+    }
+
+    [Fact]
+    public async Task ContinuousRadio_SkipsFailedSourceThenRecordsACompletedLocalTrack()
+    {
+        await using var fixture = new RadioWebFactory();
+        fixture.Transcoder.FailuresBeforeSuccess = 1;
+        fixture.Transcoder.CompleteCalls = 1;
+        fixture.InstallStation();
+        using var client = fixture.CreateClient();
+        var listBody = await client.GetStringAsync(
+            "/rest/getInternetRadioStations?u=alice&t=token&s=salt&f=json");
+        using var list = JsonDocument.Parse(listBody);
+        var url = list.RootElement.GetProperty("subsonic-response")
+            .GetProperty("internetRadioStations").GetProperty("internetRadioStation")
+            .EnumerateArray().Single(item => item.GetProperty("name").GetString() == "Your Mix")
+            .GetProperty("streamUrl").GetString()!;
+        using var response = await client.SendAsync(new HttpRequestMessage(HttpMethod.Get, url),
+            HttpCompletionOption.ResponseHeadersRead);
+        await using var stream = await response.Content.ReadAsStreamAsync();
+        var bytes = new byte[6];
+        await stream.ReadExactlyAsync(bytes);
+        Assert.Equal("MP3MP3", Encoding.ASCII.GetString(bytes));
+        Assert.Single(fixture.State.GetUser("alice").Plays);
+        Assert.Single(fixture.Handler.RelayedScrobbleIds);
+    }
 }
 
 public sealed class LastFmRadioNativeApiTests
@@ -208,19 +291,28 @@ internal sealed class RadioWebFactory : WebApplicationFactory<Program>
     private readonly string _directory = Path.Combine(Path.GetTempPath(), "octo-radio-web-" + Guid.NewGuid());
     public RadioUpstreamHandler Handler { get; } = new();
     public Mock<IMusicMetadataService> Metadata { get; } = new();
+    public BlockingRadioTranscoder Transcoder { get; } = new();
     public LastFmRadioStateStore State => Services.GetRequiredService<LastFmRadioStateStore>();
     public Octo.Services.Subsonic.NavidromeIdentityService Identity =>
         Services.GetRequiredService<Octo.Services.Subsonic.NavidromeIdentityService>();
     public string StationId => LastFmRadioStateStore.StationId("alice", "your-mix");
     private readonly string _explicitFilter;
+    private readonly bool _exposePlaylists;
+    private readonly bool _exposeStreams;
 
-    public RadioWebFactory(string explicitFilter = "All")
+    public RadioWebFactory(string explicitFilter = "All", bool exposePlaylists = true,
+        bool exposeStreams = true)
     {
         _explicitFilter = explicitFilter;
+        _exposePlaylists = exposePlaylists;
+        _exposeStreams = exposeStreams;
         Directory.CreateDirectory(_directory);
         Metadata.Setup(service => service.PrewarmYouTubeIdsAsync(
                 It.IsAny<IEnumerable<Octo.Models.Domain.Song>>(), It.IsAny<int>(),
                 It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
+        Metadata.Setup(service => service.PrewarmYouTubeIdsForSongIdsAsync(
+                It.IsAny<IEnumerable<string>>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
     }
 
     public void InstallStation()
@@ -252,6 +344,9 @@ internal sealed class RadioWebFactory : WebApplicationFactory<Program>
                 ["LastFm:EnableRadio"] = "true",
                 ["LastFm:EnablePersonalizedStations"] = "true",
                 ["LastFm:EnableDiscoveryStations"] = "true",
+                ["LastFm:ExposeRadioAsPlaylists"] = _exposePlaylists.ToString(),
+                ["LastFm:ExposeRadioAsStreams"] = _exposeStreams.ToString(),
+                ["LastFm:RadioStreamBitrateKbps"] = "192",
             }));
         builder.ConfigureServices(services =>
         {
@@ -260,6 +355,8 @@ internal sealed class RadioWebFactory : WebApplicationFactory<Program>
             services.AddSingleton<IHttpClientFactory>(new RadioHttpClientFactory(Handler));
             services.RemoveAll<IMusicMetadataService>();
             services.AddSingleton(Metadata.Object);
+            services.RemoveAll<ILastFmRadioAudioTranscoder>();
+            services.AddSingleton<ILastFmRadioAudioTranscoder>(Transcoder);
             services.RemoveAll<LastFmRadioStateStore>();
             services.AddSingleton(provider => new LastFmRadioStateStore(
                 Path.Combine(_directory, "radio-state.json"),
@@ -278,6 +375,25 @@ internal sealed class RadioWebFactory : WebApplicationFactory<Program>
     private sealed class RadioHttpClientFactory(RadioUpstreamHandler handler) : IHttpClientFactory
     {
         public HttpClient CreateClient(string name) => new(handler, disposeHandler: false);
+    }
+
+    internal sealed class BlockingRadioTranscoder : ILastFmRadioAudioTranscoder
+    {
+        public int LastBitrateKbps { get; private set; }
+        public int FailuresBeforeSuccess { get; set; }
+        public int CompleteCalls { get; set; }
+        private int _calls;
+        public async Task TranscodeToMp3Async(Stream input, Stream output, int bitrateKbps,
+            CancellationToken cancellationToken)
+        {
+            LastBitrateKbps = bitrateKbps;
+            var call = Interlocked.Increment(ref _calls);
+            if (call <= FailuresBeforeSuccess) throw new InvalidOperationException("fixture source failed");
+            await output.WriteAsync("MP3"u8.ToArray(), cancellationToken);
+            await output.FlushAsync(cancellationToken);
+            if (call <= FailuresBeforeSuccess + CompleteCalls) return;
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+        }
     }
 }
 
@@ -316,6 +432,12 @@ internal sealed class RadioUpstreamHandler : HttpMessageHandler
             return Result(format == "xml" ?
                 "<subsonic-response xmlns=\"http://subsonic.org/restapi\" status=\"ok\" version=\"1.16.1\"><playlists><playlist id=\"native-1\" name=\"Native Playlist\" owner=\"alice\" songCount=\"1\" duration=\"180\"/></playlists></subsonic-response>" :
                 OkJson("\"playlists\":{\"playlist\":[{\"id\":\"native-1\",\"name\":\"Native Playlist\",\"owner\":\"alice\",\"songCount\":1,\"duration\":180}]}"));
+        if (path.Equals("rest/getInternetRadioStations", StringComparison.OrdinalIgnoreCase))
+            return Result(format == "xml" ?
+                "<subsonic-response xmlns=\"http://subsonic.org/restapi\" status=\"ok\" version=\"1.16.1\"><internetRadioStations><internetRadioStation id=\"native-radio\" name=\"Native Radio\" streamUrl=\"https://radio.test/live\"/></internetRadioStations></subsonic-response>" :
+                OkJson("\"internetRadioStations\":{\"internetRadioStation\":[{\"id\":\"native-radio\",\"name\":\"Native Radio\",\"streamUrl\":\"https://radio.test/live\"}]}"));
+        if (path.Equals("rest/stream", StringComparison.OrdinalIgnoreCase))
+            return Result("source-audio", "application/octet-stream");
         if (path.Equals("rest/getPlaylist", StringComparison.OrdinalIgnoreCase))
             return Result(OkJson("\"playlist\":{\"id\":\"native-1\",\"name\":\"Native Playlist\",\"entry\":[]}"));
         if (path.Equals("rest/ping", StringComparison.OrdinalIgnoreCase)

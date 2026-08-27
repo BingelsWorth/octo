@@ -7,6 +7,7 @@ namespace Octo.Services.LastFm;
 /// <summary>Runs canonical recommendation refreshes inside the existing Octo host.</summary>
 public sealed class LastFmRadioRefreshWorker : BackgroundService
 {
+    private static readonly TimeSpan StaleScanInterval = TimeSpan.FromMinutes(1);
     private readonly LastFmRadioRefreshQueue _queue;
     private readonly IServiceScopeFactory _scopes;
     private readonly LastFmRadioStateStore _state;
@@ -64,16 +65,39 @@ public sealed class LastFmRadioRefreshWorker : BackgroundService
             catch (OperationCanceledException) { return; }
         }
 
-        while (!stoppingToken.IsCancellationRequested)
+        var staleScan = ScanForStaleUsersAsync(stoppingToken);
+        try
         {
-            LastFmRadioRefreshJob job;
-            try { job = await _queue.DequeueAsync(stoppingToken); }
-            catch (OperationCanceledException) { break; }
-            try
+            while (!stoppingToken.IsCancellationRequested)
             {
-                await ProcessAsync(job);
+                LastFmRadioRefreshJob job;
+                try { job = await _queue.DequeueAsync(stoppingToken); }
+                catch (OperationCanceledException) { break; }
+                try
+                {
+                    await ProcessAsync(job);
+                }
+                catch { /* ProcessAsync recorded the failure; continue draining. */ }
             }
-            catch { /* ProcessAsync recorded the failure; continue draining. */ }
+        }
+        finally
+        {
+            try { await staleScan; }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
+        }
+    }
+
+    private async Task ScanForStaleUsersAsync(CancellationToken stoppingToken)
+    {
+        using var timer = new PeriodicTimer(StaleScanInterval);
+        while (await timer.WaitForNextTickAsync(stoppingToken))
+        {
+            var settings = _settings.CurrentValue;
+            if (!settings.EnableRadio) continue;
+            foreach (var username in _state.KnownUsers())
+                if (LastFmRadioRefreshPolicy.ShouldSchedulePeriodicRefresh(
+                        _state.GetUser(username), settings))
+                    _queue.Enqueue(username);
         }
     }
 

@@ -1,0 +1,165 @@
+using Microsoft.Extensions.Options;
+using Octo.Models.Domain;
+using Octo.Models.Radio;
+using Octo.Models.Settings;
+using Octo.Services.Common;
+using Octo.Services.Local;
+using Octo.Services.Soulseek;
+using Octo.Services.Subsonic;
+
+namespace Octo.Services.LastFm;
+
+/// <summary>Turns a ready generated station into one long MP3 response. Recommendation
+/// state and stream orchestration stay in core Octo; ffmpeg is only a codec adapter.</summary>
+public sealed class LastFmRadioStreamService
+{
+    private static readonly SemaphoreSlim ConcurrentStreams = new(8, 8);
+    private readonly LastFmRadioStateStore _state;
+    private readonly IOptionsMonitor<LastFmSettings> _settings;
+    private readonly ILocalLibraryService _library;
+    private readonly SubsonicProxyService _proxy;
+    private readonly IDownloadService _downloads;
+    private readonly ILastFmRadioAudioTranscoder _transcoder;
+    private readonly LastFmRadioTrackResolver _resolver;
+    private readonly IMusicMetadataService _metadata;
+    private readonly RadioQueueStore _queues;
+    private readonly ILogger<LastFmRadioStreamService> _logger;
+
+    public LastFmRadioStreamService(LastFmRadioStateStore state,
+        IOptionsMonitor<LastFmSettings> settings, ILocalLibraryService library,
+        SubsonicProxyService proxy, IDownloadService downloads,
+        ILastFmRadioAudioTranscoder transcoder, LastFmRadioTrackResolver resolver,
+        IMusicMetadataService metadata,
+        RadioQueueStore queues, ILogger<LastFmRadioStreamService> logger)
+    {
+        _state = state; _settings = settings; _library = library; _proxy = proxy;
+        _downloads = downloads; _transcoder = transcoder; _resolver = resolver; _metadata = metadata;
+        _queues = queues; _logger = logger;
+    }
+
+    public LastFmRadioStation? Resolve(LastFmRadioStreamSession session)
+    {
+        if (!_settings.CurrentValue.EnableRadio || !_settings.CurrentValue.ExposeRadioAsStreams)
+            return null;
+        var station = _state.FindStation(session.Username, session.StationId);
+        if (station is not null && (station.Personalized
+                ? !_settings.CurrentValue.EnablePersonalizedStations
+                : !_settings.CurrentValue.EnableDiscoveryStations)) return null;
+        return station is { Tracks.Count: > 0 } ? station : null;
+    }
+
+    public async Task StreamAsync(LastFmRadioStreamSession session, Stream output,
+        CancellationToken cancellationToken)
+    {
+        await ConcurrentStreams.WaitAsync(cancellationToken);
+        try
+        {
+            var station = Resolve(session)
+                ?? throw new InvalidOperationException("Radio station is no longer available");
+            var tracks = station.Tracks.Where(track => !string.IsNullOrWhiteSpace(track.ResolvedId)).ToList();
+            if (tracks.Count == 0) throw new InvalidOperationException("Radio station has no playable tracks");
+            // Keep one connection at one declared bitrate. A saved quality change is
+            // picked up by the next tune-in instead of changing encoder parameters
+            // underneath a client that is already decoding the stream.
+            var bitrateKbps = _settings.CurrentValue.EffectiveRadioStreamBitrateKbps;
+
+            var ids = tracks.Select(track => track.ResolvedId!).ToList();
+            _queues.Register(ids);
+            _ = _metadata.PrewarmYouTubeIdsForSongIdsAsync(ids, topN: 8);
+            var index = Random.Shared.Next(tracks.Count);
+            var failures = 0;
+
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                // Pick up a refreshed snapshot at the boundary without cutting off the
+                // song currently playing. Preserve the current index modulo the new size.
+                var current = Resolve(session);
+                if (current is not null)
+                {
+                    var refreshed = current.Tracks
+                        .Where(track => !string.IsNullOrWhiteSpace(track.ResolvedId)).ToList();
+                    if (refreshed.Count > 0) { tracks = refreshed; index %= tracks.Count; }
+                }
+                var track = tracks[index];
+                index = (index + 1) % tracks.Count;
+                try
+                {
+                    var opened = await OpenTrackAsync(track, session.Authentication,
+                        cancellationToken);
+                    if (opened is null) throw new InvalidOperationException("No playable source");
+                    await using (opened.Source.AudioStream)
+                        await _transcoder.TranscodeToMp3Async(opened.Source.AudioStream, output,
+                            bitrateKbps, cancellationToken);
+                    await output.FlushAsync(cancellationToken);
+                    failures = 0;
+                    await RecordCompletionAsync(session, track, opened.Song, cancellationToken);
+
+                    var upcoming = Enumerable.Range(0, Math.Min(8, tracks.Count))
+                        .Select(offset => tracks[(index + offset) % tracks.Count].ResolvedId!)
+                        .ToList();
+                    _ = _metadata.PrewarmYouTubeIdsForSongIdsAsync(upcoming, topN: 8);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    failures++;
+                    _logger.LogWarning(ex, "Skipping unavailable continuous Radio track {Artist} - {Title}",
+                        track.Artist, track.Title);
+                    if (failures >= tracks.Count)
+                        throw new InvalidOperationException(
+                            "No tracks in this Radio snapshot have a playable source", ex);
+                }
+            }
+        }
+        finally { ConcurrentStreams.Release(); }
+    }
+
+    private async Task<OpenedRadioTrack?> OpenTrackAsync(LastFmRadioTrack track,
+        IReadOnlyDictionary<string, string> authentication, CancellationToken cancellationToken)
+    {
+        var song = await _resolver.ResolveAsync(track.Artist, track.Title, track.Duration,
+            authentication, cancellationToken);
+        if (song is null) return null;
+        var id = song.Id;
+        var (external, provider, externalId) = _library.ParseSongId(id);
+        if (external)
+        {
+            var source = await _downloads.GetDirectStreamAsync(
+                provider ?? song.ExternalProvider ?? track.ExternalProvider ?? "lastfm",
+                externalId ?? song.ExternalId ?? id, null, cancellationToken);
+            return source is null ? null : new OpenedRadioTrack(source, song);
+        }
+
+        var parameters = authentication.ToDictionary(pair => pair.Key, pair => pair.Value,
+            StringComparer.OrdinalIgnoreCase);
+        parameters["id"] = id;
+        parameters["format"] = "raw";
+        var localSource = await _proxy.OpenAudioStreamAsync(parameters, cancellationToken);
+        return localSource is null ? null : new OpenedRadioTrack(localSource, song);
+    }
+
+    private async Task RecordCompletionAsync(LastFmRadioStreamSession session,
+        LastFmRadioTrack track, Song song, CancellationToken cancellationToken)
+    {
+        var id = song.Id;
+        _state.RecordPlay(session.Username, new LastFmRadioPlay
+        {
+            SongId = id, Artist = track.Artist, Title = track.Title, Album = track.Album,
+            Genre = track.Genre ?? song.Genre, Duration = track.Duration ?? song.Duration,
+            IsLocal = song.IsLocal,
+            Source = "internet-radio", PlayedAtUtc = DateTime.UtcNow,
+        });
+        if (!song.IsLocal) return;
+        var parameters = session.Authentication.ToDictionary(pair => pair.Key, pair => pair.Value,
+            StringComparer.OrdinalIgnoreCase);
+        parameters["id"] = id;
+        parameters["submission"] = "true";
+        parameters["time"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString();
+        await _proxy.RelaySafeAsync("rest/scrobble", parameters);
+    }
+
+    private sealed record OpenedRadioTrack(DirectStreamInfo Source, Song Song);
+}
