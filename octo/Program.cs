@@ -26,6 +26,12 @@ builder.Services.AddHttpClient();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 builder.Services.AddHttpContextAccessor();
+// Temporary troubleshooting surface for the admin Logs page. Register this as
+// a normal ILogger provider so it observes the same core application events as
+// console logging, while retaining only a bounded, restart-cleared memory tail.
+builder.Services.AddSingleton<Octo.Services.Admin.AdminLogBuffer>();
+builder.Logging.Services.AddSingleton<ILoggerProvider>(provider =>
+    provider.GetRequiredService<Octo.Services.Admin.AdminLogBuffer>());
 builder.Services.AddSingleton<Octo.Services.Admin.SettingsFileWriter>(
     sp => new Octo.Services.Admin.SettingsFileWriter(SettingsFilePath));
 // Running log of fetched songs, stored next to the settings file (same

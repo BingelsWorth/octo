@@ -700,13 +700,154 @@ function escapeHtml(s) {
 
 // Re-load these whenever their tab activates so they're never stale.
 navItems.forEach(btn => btn.addEventListener('click', () => {
+  if (btn.dataset.tab === 'logs') startLogStream();
+  else stopLogStream();
   if (btn.dataset.tab === 'raw') loadRawConfig();
   if (btn.dataset.tab === 'sources') loadConfigSources();
   if (btn.dataset.tab === 'lastfm') loadRadioStatus();
 }));
-// If the page boots straight into one of these tabs (#raw / #sources), prime it.
+// If the page boots straight into one of these tabs, prime it. Logs starts
+// below, after its connection state has been initialized.
 if (location.hash === '#raw') loadRawConfig();
 if (location.hash === '#sources') loadConfigSources();
+
+// ────────────────────────────────────────────────────────────────
+// Temporary live process logs
+// ────────────────────────────────────────────────────────────────
+const logViewer = document.getElementById('log-viewer');
+const logConnection = document.getElementById('log-connection');
+const logConnectionText = document.getElementById('log-connection-text');
+const logPauseButton = document.getElementById('log-pause');
+const logLevelFilter = document.getElementById('log-level-filter');
+const logLevelRanks = { Trace: 0, Debug: 1, Information: 2, Warning: 3, Error: 4, Critical: 5 };
+let logSource = null;
+let logPaused = false;
+let lastLogSequence = 0;
+let logEntries = [];
+
+function setLogConnection(state, text) {
+  logConnection?.querySelector('.log-connection-dot')?.setAttribute('class', `log-connection-dot ${state}`);
+  if (logConnectionText) logConnectionText.textContent = text;
+}
+
+function startLogStream() {
+  if (!logViewer || logPaused || logSource) return;
+  setLogConnection('pending', 'Connecting…');
+  const query = lastLogSequence ? `?after=${encodeURIComponent(lastLogSequence)}` : '';
+  logSource = new EventSource(`/api/admin/logs/stream${query}`);
+  logSource.onopen = () => setLogConnection('ok', 'Live');
+  logSource.onerror = () => setLogConnection('pending', 'Reconnecting…');
+  logSource.addEventListener('log', event => {
+    try {
+      const entry = JSON.parse(event.data);
+      lastLogSequence = Math.max(lastLogSequence, Number(entry.sequence) || 0);
+      logEntries.push(entry);
+      if (logEntries.length > 500) logEntries.shift();
+      appendLogEntry(entry);
+    } catch {
+      setLogConnection('bad', 'Invalid log data');
+    }
+  });
+}
+
+function stopLogStream(showStopped = true) {
+  if (!logSource) return;
+  logSource.close();
+  logSource = null;
+  if (showStopped && !logPaused) setLogConnection('pending', 'Stopped');
+}
+
+function logEntryMatches(entry) {
+  const minimum = Number(logLevelFilter?.value || 0);
+  return (logLevelRanks[entry.level] ?? 0) >= minimum;
+}
+
+function formatLogTime(timestamp) {
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return '—';
+  const time = date.toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  return `${time}.${String(date.getMilliseconds()).padStart(3, '0')}`;
+}
+
+function makeLogEntry(entry) {
+  const row = document.createElement('article');
+  const level = String(entry.level || 'Information');
+  row.className = `log-entry level-${level.toLowerCase()}`;
+
+  const head = document.createElement('div');
+  head.className = 'log-entry-head';
+
+  const time = document.createElement('time');
+  time.className = 'log-time';
+  time.dateTime = entry.timestampUtc || '';
+  time.textContent = formatLogTime(entry.timestampUtc);
+
+  const badge = document.createElement('span');
+  badge.className = 'log-level';
+  badge.textContent = level;
+
+  const category = document.createElement('span');
+  category.className = 'log-category';
+  category.textContent = entry.category || 'Octo';
+  category.title = entry.category || 'Octo';
+
+  head.append(time, badge, category);
+
+  const message = document.createElement('div');
+  message.className = 'log-message';
+  message.textContent = entry.message || '';
+  row.append(head, message);
+
+  if (entry.exception) {
+    const exception = document.createElement('pre');
+    exception.className = 'log-exception';
+    exception.textContent = entry.exception;
+    row.append(exception);
+  }
+
+  return row;
+}
+
+function appendLogEntry(entry) {
+  if (!logViewer || !logEntryMatches(entry)) return;
+  const nearBottom = logViewer.scrollHeight - logViewer.scrollTop - logViewer.clientHeight < 80;
+  logViewer.querySelector('.log-empty')?.remove();
+  logViewer.append(makeLogEntry(entry));
+  while (logViewer.children.length > 500) logViewer.firstElementChild?.remove();
+  if (nearBottom) logViewer.scrollTop = logViewer.scrollHeight;
+}
+
+function renderLogEntries() {
+  if (!logViewer) return;
+  const matching = logEntries.filter(logEntryMatches);
+  logViewer.replaceChildren(...matching.map(makeLogEntry));
+  if (!matching.length) {
+    const empty = document.createElement('div');
+    empty.className = 'log-empty';
+    empty.textContent = logEntries.length ? 'No entries match this level.' : 'Waiting for log entries…';
+    logViewer.append(empty);
+  }
+  logViewer.scrollTop = logViewer.scrollHeight;
+}
+
+logPauseButton?.addEventListener('click', () => {
+  logPaused = !logPaused;
+  logPauseButton.textContent = logPaused ? 'Resume' : 'Pause';
+  logPauseButton.setAttribute('aria-pressed', String(logPaused));
+  if (logPaused) {
+    stopLogStream(false);
+    setLogConnection('paused', 'Paused');
+  } else {
+    startLogStream();
+  }
+});
+
+document.getElementById('log-clear')?.addEventListener('click', () => {
+  logEntries = [];
+  renderLogEntries();
+});
+logLevelFilter?.addEventListener('change', renderLogEntries);
+if (location.hash === '#logs') startLogStream();
 
 // ────────────────────────────────────────────────────────────────
 // Restart button
