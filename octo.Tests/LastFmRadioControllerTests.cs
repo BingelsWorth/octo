@@ -160,7 +160,7 @@ public sealed class LastFmRadioControllerTests
         await using var fixture = new RadioWebFactory();
         fixture.InstallStation();
         using var client = fixture.CreateClient();
-        var body = await ReadyStationListAsync(client,
+        var body = await StationListAsync(client,
             $"/rest/getInternetRadioStations?u=alice&t=token&s=salt&f={format}");
         Assert.Contains("Native Radio", body);
         Assert.Contains("Your Mix", body);
@@ -170,21 +170,43 @@ public sealed class LastFmRadioControllerTests
     }
 
     [Fact]
-    public async Task InternetRadioList_PreparesThreeTrackPoolOnceBeforePublishingStation()
+    public async Task InternetRadioList_PublishesStarterInSameResponseThenWarmsRunway()
     {
         await using var fixture = new RadioWebFactory();
         fixture.InstallStation();
         using var client = fixture.CreateClient();
         var url = "/rest/getInternetRadioStations?u=alice&t=token&s=salt&f=json";
 
-        Assert.Contains("Your Mix", await ReadyStationListAsync(client, url));
+        Assert.Contains("Your Mix", await StationListAsync(client, url));
+        for (var attempt = 0; attempt < 100
+             && fixture.Transcoder.Calls < LastFmRadioStreamService.ReadyPoolSize; attempt++)
+            await Task.Delay(10);
         Assert.Equal(LastFmRadioStreamService.ReadyPoolSize, fixture.Transcoder.Calls);
         Assert.Contains("Your Mix", await client.GetStringAsync(url));
         Assert.Equal(LastFmRadioStreamService.ReadyPoolSize, fixture.Transcoder.Calls);
     }
 
     [Fact]
-    public async Task InternetRadioList_ReturnsPromptlyButDoesNotPublishUntilPoolCompletes()
+    public async Task StartupWarm_CachesPersistedStationBeforeClientListsIt()
+    {
+        await using var fixture = new RadioWebFactory();
+        fixture.InstallStation();
+
+        var result = await fixture.Warmup.ProcessAsync("alice");
+        Assert.Equal(1, result.StationCount);
+        Assert.Equal(1, result.ReadyStationCount);
+        Assert.Equal(LastFmRadioStreamService.ReadyPoolSize, result.ReadyTrackCount);
+        Assert.Equal(LastFmRadioStreamService.ReadyPoolSize, fixture.Transcoder.Calls);
+
+        using var client = fixture.CreateClient();
+        var body = await StationListAsync(client,
+            "/rest/getInternetRadioStations?u=alice&t=token&s=salt&f=json");
+        Assert.Contains("Your Mix", body);
+        Assert.Equal(LastFmRadioStreamService.ReadyPoolSize, fixture.Transcoder.Calls);
+    }
+
+    [Fact]
+    public async Task InternetRadioList_WaitsForStarterAndPublishesInThatSameResponse()
     {
         await using var fixture = new RadioWebFactory();
         fixture.InstallStation();
@@ -192,12 +214,13 @@ public sealed class LastFmRadioControllerTests
         using var client = fixture.CreateClient();
 
         var url = "/rest/getInternetRadioStations?u=alice&t=token&s=salt&f=json";
-        var listing = await client.GetStringAsync(url);
+        var listing = client.GetStringAsync(url);
         await fixture.Transcoder.Started.Task.WaitAsync(TimeSpan.FromSeconds(2));
-        Assert.DoesNotContain("Your Mix", listing);
+        await Task.Delay(50);
+        Assert.False(listing.IsCompleted);
 
         fixture.Transcoder.CompletionGate.SetResult();
-        Assert.Contains("Your Mix", await ReadyStationListAsync(client, url));
+        Assert.Contains("Your Mix", await listing);
     }
 
     [Fact]
@@ -206,7 +229,7 @@ public sealed class LastFmRadioControllerTests
         await using var fixture = new RadioWebFactory();
         fixture.InstallStation();
         using var client = fixture.CreateClient();
-        var listBody = await ReadyStationListAsync(client,
+        var listBody = await StationListAsync(client,
             "/rest/getInternetRadioStations?u=alice&t=token&s=salt&f=json");
         using var list = JsonDocument.Parse(listBody);
         var url = list.RootElement.GetProperty("subsonic-response")
@@ -229,17 +252,8 @@ public sealed class LastFmRadioControllerTests
     private static TaskCompletionSource NewGate() =>
         new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-    private static async Task<string> ReadyStationListAsync(HttpClient client, string url)
-    {
-        string body = "";
-        for (var attempt = 0; attempt < 100; attempt++)
-        {
-            body = await client.GetStringAsync(url);
-            if (body.Contains("Your Mix", StringComparison.Ordinal)) return body;
-            await Task.Delay(10);
-        }
-        return body;
-    }
+    private static Task<string> StationListAsync(HttpClient client, string url) =>
+        client.GetStringAsync(url);
 
     [Fact]
     public async Task PlaylistAndInternetRadioPublication_AreIndependentAndReservedRadioIsReadOnly()
@@ -250,7 +264,7 @@ public sealed class LastFmRadioControllerTests
         var playlists = await client.GetStringAsync(
             "/rest/getPlaylists?u=alice&t=token&s=salt&f=json");
         Assert.DoesNotContain("Your Mix", playlists);
-        var radios = await ReadyStationListAsync(client,
+        var radios = await StationListAsync(client,
             "/rest/getInternetRadioStations?u=alice&t=token&s=salt&f=json");
         Assert.Contains("Your Mix", radios);
         var mutation = await client.GetStringAsync(
@@ -264,7 +278,7 @@ public sealed class LastFmRadioControllerTests
         await using var fixture = new RadioWebFactory();
         fixture.InstallStation();
         using var client = fixture.CreateClient();
-        var listBody = await ReadyStationListAsync(client,
+        var listBody = await StationListAsync(client,
             "/rest/getInternetRadioStations?u=alice&t=token&s=salt&f=json");
         using var list = JsonDocument.Parse(listBody);
         var url = list.RootElement.GetProperty("subsonic-response")
@@ -293,7 +307,7 @@ public sealed class LastFmRadioControllerTests
         await using var fixture = new RadioWebFactory();
         fixture.InstallStation();
         using var client = fixture.CreateClient();
-        var listBody = await ReadyStationListAsync(client,
+        var listBody = await StationListAsync(client,
             "/rest/getInternetRadioStations?u=alice&t=token&s=salt&f=json");
         using var list = JsonDocument.Parse(listBody);
         var url = list.RootElement.GetProperty("subsonic-response")
@@ -301,8 +315,11 @@ public sealed class LastFmRadioControllerTests
             .EnumerateArray().Single(item => item.GetProperty("name").GetString() == "Your Mix")
             .GetProperty("streamUrl").GetString()!;
         var token = new Uri(url).Segments[^1];
+        for (var attempt = 0; attempt < 100
+             && fixture.Transcoder.Calls < LastFmRadioStreamService.ReadyPoolSize; attempt++)
+            await Task.Delay(10);
         var original = fixture.Sessions.Get(token)!.ReadyPool!.Select(item => item.CacheKey).ToList();
-        Assert.Equal(LastFmRadioStreamService.ReadyPoolSize, original.Count);
+        Assert.Single(original);
 
         fixture.Transcoder.ResetStarted();
         fixture.Transcoder.CompleteCalls = LastFmRadioStreamService.ReadyPoolSize + 1;
@@ -337,9 +354,12 @@ public sealed class LastFmRadioControllerTests
         fixture.Transcoder.CompleteCalls = LastFmRadioStreamService.ReadyPoolSize;
         fixture.InstallStation();
         using var client = fixture.CreateClient();
-        var listBody = await ReadyStationListAsync(client,
+        var listBody = await StationListAsync(client,
             "/rest/getInternetRadioStations?u=alice&t=token&s=salt&f=json");
         Assert.Contains("Your Mix", listBody);
+        for (var attempt = 0; attempt < 100
+             && fixture.Transcoder.Calls < LastFmRadioStreamService.ReadyPoolSize + 1; attempt++)
+            await Task.Delay(10);
         Assert.Equal(LastFmRadioStreamService.ReadyPoolSize + 1, fixture.Transcoder.Calls);
         Assert.Contains("Your Mix", await client.GetStringAsync(
             "/rest/getInternetRadioStations?u=alice&t=token&s=salt&f=json"));
@@ -412,6 +432,8 @@ internal sealed class RadioWebFactory : WebApplicationFactory<Program>
         Services.GetRequiredService<LastFmRadioRefreshQueue>();
     public LastFmRadioStreamSessionStore Sessions =>
         Services.GetRequiredService<LastFmRadioStreamSessionStore>();
+    public LastFmRadioWarmupService Warmup =>
+        Services.GetRequiredService<LastFmRadioWarmupService>();
     public Octo.Services.Subsonic.NavidromeIdentityService Identity =>
         Services.GetRequiredService<Octo.Services.Subsonic.NavidromeIdentityService>();
     public string StationId => LastFmRadioStateStore.StationId("alice", "your-mix");
@@ -544,6 +566,13 @@ internal sealed class RadioUpstreamHandler : HttpMessageHandler
     {
         var path = request.RequestUri!.AbsolutePath.Trim('/');
         var query = System.Web.HttpUtility.ParseQueryString(request.RequestUri.Query);
+        if (request.RequestUri.Host.Equals("yt-dlp-shim", StringComparison.OrdinalIgnoreCase))
+        {
+            if (path.Equals("search", StringComparison.OrdinalIgnoreCase))
+                return Result("{\"video_id\":\"radio-video\",\"duration\":180}");
+            if (path.Equals("stream", StringComparison.OrdinalIgnoreCase))
+                return Result("external-source-audio", "audio/mp4");
+        }
         var format = query["f"] ?? "json";
         var username = query["u"] ?? "";
         if (username == "bad") return Result(format == "xml" ? FailedXml() : FailedJson());

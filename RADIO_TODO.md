@@ -333,9 +333,14 @@ its acceptance criteria, not a separate micro-task.
   path; normalize each source to the configured bitrate, prewarm ahead, and skip an
   unavailable track without ending the station.
 - [x] Fully transcode at least one local-first starter song into Octo's bounded temporary
-  cache before publishing each continuous station. Share concurrent preparation, try
-  fallback tracks, publish only ready stations, and never turn preparation into a
+  cache before publishing each continuous station in the same station-list response,
+  because clients may not poll again. Share concurrent preparation, try fallback
+  tracks, expand to a three-song background runway, and never turn preparation into a
   permanent library acquisition.
+- [x] Warm persisted station runways in core Octo at application startup, retry missing
+  readiness during the existing minute scan, and queue another warm after the internal
+  refresh worker installs a new snapshot. Use external previews before login because
+  listener credentials remain memory-only; keep authenticated replenishment local-first.
 - [x] Treat an unresolvable or untranscodable song as unavailable: remove it from every
   current station, retain a bounded 24-hour negative-availability cooldown so a
   deterministic rebuild cannot immediately restore it, and queue the existing core

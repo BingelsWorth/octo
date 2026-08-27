@@ -14,6 +14,7 @@ public sealed class LastFmRadioRefreshWorker : BackgroundService
     private readonly IOptionsMonitor<LastFmSettings> _settings;
     private readonly SingleFlight<string, bool> _singleFlight = new();
     private readonly ILogger<LastFmRadioRefreshWorker> _logger;
+    private readonly LastFmRadioWarmupService? _warmup;
     private Dictionary<string, string> _definitions;
     private bool _radioEnabled;
     private bool _personalizedEnabled;
@@ -21,9 +22,10 @@ public sealed class LastFmRadioRefreshWorker : BackgroundService
 
     public LastFmRadioRefreshWorker(LastFmRadioRefreshQueue queue, IServiceScopeFactory scopes,
         LastFmRadioStateStore state, IOptionsMonitor<LastFmSettings> settings,
-        ILogger<LastFmRadioRefreshWorker> logger)
+        ILogger<LastFmRadioRefreshWorker> logger, LastFmRadioWarmupService? warmup = null)
     {
         _queue = queue; _scopes = scopes; _state = state; _settings = settings; _logger = logger;
+        _warmup = warmup;
         _definitions = Fingerprints(settings.CurrentValue);
         _radioEnabled = settings.CurrentValue.EnableRadio;
         _personalizedEnabled = settings.CurrentValue.EnablePersonalizedStations;
@@ -139,6 +141,7 @@ public sealed class LastFmRadioRefreshWorker : BackgroundService
         if (stations.Count == 0 && _state.GetUser(job.Username).Stations.Count > 0)
             throw new InvalidOperationException("Provider returned no usable replacement stations");
         _state.ReplaceStations(job.Username, stations);
+        _warmup?.QueueUser(job.Username);
         return true;
     }
 }

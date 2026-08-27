@@ -77,11 +77,15 @@ public sealed class LastFmRadioStreamService
             // the next replenishment crosses onto the current snapshot cleanly.
             var ready = (session.ReadyPool ?? [])
                 .Where(item => _cache.IsReadyPath(item.Path)).ToList();
-            if (ready.Count == 0) ready = GetReadyPool(session).ToList();
+            foreach (var cached in GetReadyPool(session))
+                if (ready.Count < ReadyPoolSize
+                    && ready.All(item => item.CacheKey != cached.CacheKey))
+                    ready.Add(cached);
             if (ready.Count == 0)
                 ready = (await PrepareReadyPoolAsync(session, 1, cancellationToken)).ToList();
             if (ready.Count == 0)
                 throw new InvalidOperationException("Radio station has no cached ready track");
+            _sessions.AttachReadyPool(session.Token, ready);
 
             var queue = new Queue<PreparedRadioTrack>(ready);
             var nextIndex = (ready[^1].Index + 1) % tracks.Count;
@@ -172,6 +176,45 @@ public sealed class LastFmRadioStreamService
         return ready;
     }
 
+    /// <summary>Waits for the minimum publication guarantee: one complete MP3.
+    /// The remaining runway is filled in the background after the station URL is
+    /// returned, so clients that fetch their Radio list only once still see it.</summary>
+    public async Task<IReadOnlyList<PreparedRadioTrack>> PrepareForPublicationAsync(
+        LastFmRadioStreamSession session, CancellationToken cancellationToken)
+    {
+        var ready = GetReadyPool(session);
+        return ready.Count > 0
+            ? ready
+            : await PrepareReadyPoolAsync(session, 1, cancellationToken);
+    }
+
+    /// <summary>Warms persisted snapshots without a listener request. Startup has no
+    /// user credentials by design, so it uses the registered external preview route;
+    /// authenticated playback replenishment remains local-first.</summary>
+    public async Task<RadioWarmupResult> WarmStoredStationsAsync(string username,
+        CancellationToken cancellationToken)
+    {
+        var user = _state.GetUser(username);
+        var stations = user.Stations.Where(station => station.Tracks.Count > 0
+            && (station.Personalized
+                ? _settings.CurrentValue.EnablePersonalizedStations
+                : _settings.CurrentValue.EnableDiscoveryStations)).ToList();
+        var tasks = stations.Select(async station =>
+        {
+            var session = new LastFmRadioStreamSession(
+                $"warm-{Guid.NewGuid():N}", username, station.Id,
+                new Dictionary<string, string>(), DateTime.UtcNow.AddMinutes(30));
+            var ready = GetReadyPool(session);
+            if (ready.Count < ReadyPoolSize)
+                ready = await PrepareReadyPoolAsync(session, ReadyPoolSize,
+                    cancellationToken, rejectFailures: false, externalOnly: true);
+            return ready.Count;
+        });
+        var counts = await Task.WhenAll(tasks);
+        return new RadioWarmupResult(stations.Count,
+            counts.Count(count => count > 0), counts.Sum());
+    }
+
     /// <summary>Starts one deduplicated background fill for this station snapshot.
     /// Request cancellation deliberately does not own cache production: a client that
     /// refreshes or navigates away must not discard work needed by its next listing.</summary>
@@ -200,7 +243,8 @@ public sealed class LastFmRadioStreamService
     }
 
     private async Task<IReadOnlyList<PreparedRadioTrack>> PrepareReadyPoolAsync(
-        LastFmRadioStreamSession session, int target, CancellationToken cancellationToken)
+        LastFmRadioStreamSession session, int target, CancellationToken cancellationToken,
+        bool rejectFailures = true, bool externalOnly = false)
     {
         var prepared = new List<PreparedRadioTrack>();
         var rejectedAny = false;
@@ -208,7 +252,8 @@ public sealed class LastFmRadioStreamService
         {
             try
             {
-                prepared.Add(await PrepareCandidateAsync(session, candidate, cancellationToken));
+                prepared.Add(await PrepareCandidateAsync(session, candidate, cancellationToken,
+                    externalOnly));
                 if (prepared.Count == target) break;
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -217,13 +262,20 @@ public sealed class LastFmRadioStreamService
             }
             catch (Exception ex)
             {
-                rejectedAny |= _state.RejectTrack(session.Username, candidate.Track) > 0;
-                _logger.LogWarning(ex,
-                    "Could not prepare Radio pool track {Artist} - {Title}; trying the next track",
-                    candidate.Track.Artist, candidate.Track.Title);
+                if (rejectFailures)
+                {
+                    rejectedAny |= _state.RejectTrack(session.Username, candidate.Track) > 0;
+                    _logger.LogWarning(ex,
+                        "Could not prepare Radio pool track {Artist} - {Title}; trying the next track",
+                        candidate.Track.Artist, candidate.Track.Title);
+                }
+                else
+                    _logger.LogDebug(ex,
+                        "Startup Radio warm could not prepare {Artist} - {Title}",
+                        candidate.Track.Artist, candidate.Track.Title);
             }
         }
-        if (rejectedAny) _refreshQueue.Enqueue(session.Username);
+        if (rejectFailures && rejectedAny) _refreshQueue.Enqueue(session.Username);
         return prepared;
     }
 
@@ -252,13 +304,15 @@ public sealed class LastFmRadioStreamService
 
     private async Task<PreparedRadioTrack> PrepareCandidateAsync(
         LastFmRadioStreamSession session, RadioCandidate candidate,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, bool externalOnly = false)
     {
         var bitrateKbps = _settings.CurrentValue.EffectiveRadioStreamBitrateKbps;
         var path = await _cache.GetOrCreateAsync(candidate.Key, async (output, token) =>
         {
-            var opened = await OpenTrackAsync(candidate.Track, session.Authentication, token)
-                ?? throw new InvalidOperationException("No playable source");
+            var opened = externalOnly
+                ? await OpenExternalTrackAsync(candidate.Track, token)
+                : await OpenTrackAsync(candidate.Track, session.Authentication, token);
+            if (opened is null) throw new InvalidOperationException("No playable source");
             await using (opened.Source.AudioStream)
                 await _transcoder.TranscodeToMp3Async(opened.Source.AudioStream, output,
                     bitrateKbps, token);
@@ -322,6 +376,23 @@ public sealed class LastFmRadioStreamService
         return localSource is null ? null : new OpenedRadioTrack(localSource, song);
     }
 
+    private async Task<OpenedRadioTrack?> OpenExternalTrackAsync(LastFmRadioTrack track,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(track.ResolvedId)) return null;
+        var provider = track.ExternalProvider ?? SoulseekMetadataService.ProviderName;
+        var source = await _downloads.GetDirectStreamAsync(provider, track.ResolvedId,
+            null, cancellationToken);
+        if (source is null) return null;
+        return new OpenedRadioTrack(source, new Song
+        {
+            Id = track.ResolvedId, Artist = track.Artist, Title = track.Title,
+            Album = track.Album ?? string.Empty, Genre = track.Genre,
+            Duration = track.Duration, IsLocal = false,
+            ExternalProvider = provider, ExternalId = track.ResolvedId,
+        });
+    }
+
     private async Task RecordCompletionAsync(LastFmRadioStreamSession session,
         LastFmRadioTrack track, Song song, CancellationToken cancellationToken)
     {
@@ -352,3 +423,6 @@ public sealed class LastFmRadioStreamService
 
 public sealed record PreparedRadioTrack(
     string Path, LastFmRadioTrack Track, int Index, string CacheKey = "");
+
+public sealed record RadioWarmupResult(int StationCount, int ReadyStationCount,
+    int ReadyTrackCount);

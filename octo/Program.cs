@@ -68,6 +68,9 @@ builder.Services.AddSingleton<LastFmRadioRefreshQueue>();
 builder.Services.AddSingleton<LastFmRadioStreamSessionStore>();
 builder.Services.AddSingleton<LastFmRadioTrackCache>();
 builder.Services.AddSingleton<ILastFmRadioAudioTranscoder, FfmpegLastFmRadioAudioTranscoder>();
+builder.Services.AddSingleton<LastFmRadioWarmupService>();
+builder.Services.AddHostedService<LastFmRadioWarmupService>(provider =>
+    provider.GetRequiredService<LastFmRadioWarmupService>());
 builder.Services.AddHostedService<LastFmRadioRefreshWorker>();
 
 // Soulseek (FLAC source) + YouTube (instant-preview stream source).

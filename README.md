@@ -139,9 +139,11 @@ Prebuilt multi-arch images are also published to `ghcr.io/winters27/octo`, tagge
 - Adds automatic per-user Last.fm Radio stations as read-only Subsonic and native Navidrome playlists.
 - Publishes the same stations through Subsonic internet radio as optional continuous
   MP3 streams; playlist and stream publication can be enabled independently.
-- Prepares a three-song MP3 runway in Octo's bounded temporary cache before publishing
-  each continuous station, then replenishes the consumed slot in the background so
-  tune-in and rapid reconnects do not wait on source download or encoder startup.
+- Prepares one complete MP3 before publishing each continuous station, then expands it
+  to a three-song runway and replenishes consumed slots in the background so tune-in
+  and rapid reconnects do not wait on source download or encoder startup.
+- Warms persisted stations at Octo startup and after scheduled snapshot refreshes, so
+  ordinary station-list requests normally perform no audio work.
 - Adds Starter Radio, Your Mix, discovery, artist-neighborhood, genre, and administrator-pinned tag stations.
 - Adds the in-process Radio refresh worker and bounded `/app/config/lastfm-radio-state.json` store; no Radio service or container was added.
 - Expands the existing Last.fm admin pane with personalized settings, ordered pinned categories, station status, refresh, and per-user reset.
@@ -270,10 +272,15 @@ Last.fm Radio is enabled by default. `LASTFM_EXPOSE_AS_PLAYLISTS` and
 surfaces; both default to true. Playlist tracks retain normal playback quality.
 Continuous streams are normalized to `LASTFM_RADIO_STREAM_BITRATE_KBPS` (96, 128, 192,
 256, or 320; default 192). These publication settings apply to dynamic and pinned
-stations. An authenticated station-list request starts a deduplicated background warm
-without blocking the response. Octo publishes a station only after three complete MP3
-segments from its current snapshot are ready, consumes that session pool in order, and
-replenishes each slot independently of client disconnects. The files are temporary,
+stations. An authenticated station-list request waits for one complete MP3 and returns
+the ready station in that same response, because Subsonic clients do not necessarily
+poll the list again. Normally that fallback is unnecessary: Octo warms persisted
+snapshots at startup, checks readiness every minute, and warms replacements immediately
+after its internal scheduled Radio refresh. Startup uses the external preview route
+because Octo does not persist listener credentials; authenticated replenishment remains
+local-first. Octo expands the cache to three complete MP3 segments,
+consumes that pool in order, and replenishes each slot independently of client
+disconnects. The files are temporary,
 follow the existing 24-hour/512 MiB Radio cache policy, and are never added to the music
 library. A rebuilt station selects only cache keys present in its new snapshot; older
 segments age out normally. If a song cannot be resolved or transcoded, Octo
@@ -331,7 +338,7 @@ Octo hijacks these endpoints; everything else proxies to Navidrome unchanged:
 | `getSimilarSongs2` | radio queue with local-first preference |
 | `getPlaylists`, `getPlaylist` | append authenticated per-user read-only Radio snapshots and materialize tracks local-first |
 | `createPlaylist`, `updatePlaylist`, `deletePlaylist` | protect reserved Radio IDs while relaying ordinary mutations |
-| `getInternetRadioStations` | start non-blocking three-track pool warming and append only ready authenticated Octo stations with opaque continuous-stream URLs while preserving ordinary internet radio |
+| `getInternetRadioStations` | append startup-warmed authenticated Octo stations immediately, with a one-starter same-request fallback, while preserving ordinary internet radio |
 | `createInternetRadioStation`, `updateInternetRadioStation`, `deleteInternetRadioStation` | protect Octo stations while relaying ordinary internet-radio mutations |
 | `/radio/stream/{token}` | consume the ready MP3 pool and replenish it in the background until disconnect |
 | `stream` | YouTube proxy with Range support, mp4/m4a passthrough |
