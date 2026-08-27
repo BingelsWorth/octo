@@ -8,7 +8,7 @@ public sealed record LastFmRadioStreamSession(
     string StationId,
     IReadOnlyDictionary<string, string> Authentication,
     DateTime ExpiresUtc,
-    PreparedRadioStarter? Starter = null);
+    IReadOnlyList<PreparedRadioTrack>? ReadyPool = null);
 
 /// <summary>
 /// Bounded in-memory authorization bridge between an authenticated Subsonic
@@ -60,7 +60,7 @@ public sealed class LastFmRadioStreamSessionStore
         }
     }
 
-    public bool AttachStarter(string token, PreparedRadioStarter starter,
+    public bool AttachReadyPool(string token, IReadOnlyList<PreparedRadioTrack> readyPool,
         DateTime? nowUtc = null)
     {
         var now = nowUtc ?? DateTime.UtcNow;
@@ -68,8 +68,32 @@ public sealed class LastFmRadioStreamSessionStore
         {
             PruneLocked(now);
             if (!_sessions.TryGetValue(token, out var session)) return false;
-            _sessions[token] = session with { Starter = starter };
+            _sessions[token] = session with { ReadyPool = readyPool.ToList() };
             return true;
+        }
+    }
+
+    public void ConsumeReadyTrack(string token, string cacheKey)
+    {
+        lock (_lock)
+        {
+            if (!_sessions.TryGetValue(token, out var session)) return;
+            var pool = session.ReadyPool?.ToList() ?? [];
+            var index = pool.FindIndex(item => item.CacheKey == cacheKey);
+            if (index >= 0) pool.RemoveAt(index);
+            _sessions[token] = session with { ReadyPool = pool };
+        }
+    }
+
+    public void AppendReadyTrack(string token, PreparedRadioTrack track, int maximum)
+    {
+        lock (_lock)
+        {
+            if (!_sessions.TryGetValue(token, out var session)) return;
+            var pool = session.ReadyPool?.ToList() ?? [];
+            if (pool.All(item => item.CacheKey != track.CacheKey)) pool.Add(track);
+            if (pool.Count > maximum) pool.RemoveRange(maximum, pool.Count - maximum);
+            _sessions[token] = session with { ReadyPool = pool };
         }
     }
 

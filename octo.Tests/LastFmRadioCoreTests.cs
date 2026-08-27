@@ -89,10 +89,21 @@ public class LastFmRadioCoreTests
         Assert.Equal("station-one", session.StationId);
         Assert.Equal("secret-token", session.Authentication["t"]);
         Assert.DoesNotContain("id", session.Authentication.Keys);
-        var starter = new PreparedRadioStarter("/tmp/ready.mp3",
-            new LastFmRadioTrack { Artist = "Artist", Title = "Title" }, 0);
-        Assert.True(store.AttachStarter(token, starter, now.AddHours(1)));
-        Assert.Same(starter, store.Get(token, now.AddHours(1))!.Starter);
+        var pool = Enumerable.Range(0, LastFmRadioStreamService.ReadyPoolSize)
+            .Select(index => new PreparedRadioTrack($"/tmp/ready-{index}.mp3",
+                new LastFmRadioTrack { Artist = "Artist", Title = $"Title {index}" }, index,
+                $"key-{index}"))
+            .ToList();
+        Assert.True(store.AttachReadyPool(token, pool, now.AddHours(1)));
+        Assert.Equal(pool, store.Get(token, now.AddHours(1))!.ReadyPool);
+        store.ConsumeReadyTrack(token, "key-0");
+        Assert.Equal(["key-1", "key-2"], store.Get(token, now.AddHours(1))!.ReadyPool!
+            .Select(item => item.CacheKey));
+        var replacement = new PreparedRadioTrack("/tmp/ready-3.mp3",
+            new LastFmRadioTrack { Artist = "Artist", Title = "Title 3" }, 3, "key-3");
+        store.AppendReadyTrack(token, replacement, LastFmRadioStreamService.ReadyPoolSize);
+        Assert.Equal(["key-1", "key-2", "key-3"], store.Get(token, now.AddHours(1))!
+            .ReadyPool!.Select(item => item.CacheKey));
         Assert.Null(store.Get(token, now.AddHours(13)));
 
         for (var index = 0; index < LastFmRadioStreamSessionStore.MaximumSessions + 20; index++)

@@ -372,13 +372,19 @@ public class SubsonicController : ControllerBase
         QueueRefreshIfStale(username);
         if (stations.Count == 0) return File(relay.Body, relay.ContentType ?? $"application/{format}");
 
-        async Task<(LastFmRadioStation Station, string Token)?> PrepareStation(
+        (LastFmRadioStation Station, string Token)? PrepareStation(
             LastFmRadioStation station)
         {
             var token = _radioStreamSessions.Issue(username, station.Id, parameters);
             var session = _radioStreamSessions.Get(token)!;
-            var starter = await _radioStreams.PrepareAsync(session, HttpContext.RequestAborted);
-            if (starter is null || !_radioStreamSessions.AttachStarter(token, starter))
+            var readyPool = _radioStreams.GetReadyPool(session);
+            if (readyPool.Count < LastFmRadioStreamService.ReadyPoolSize)
+            {
+                _radioStreams.WarmReadyPool(session);
+                _radioStreamSessions.Remove(token);
+                return null;
+            }
+            if (!_radioStreamSessions.AttachReadyPool(token, readyPool))
             {
                 _radioStreamSessions.Remove(token);
                 return null;
@@ -388,7 +394,7 @@ public class SubsonicController : ControllerBase
 
         try
         {
-            var prepared = (await Task.WhenAll(stations.Select(PrepareStation)))
+            var prepared = stations.Select(PrepareStation)
                 .Where(item => item is not null).Select(item => item!.Value).ToList();
             string StreamUrl(string token) =>
                 $"{Request.Scheme}://{Request.Host}{Request.PathBase}/radio/stream/{token}";
