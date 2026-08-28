@@ -166,9 +166,38 @@ public sealed class LastFmRadioControllerTests
         Assert.Contains("Native Radio", body);
         Assert.Contains("Your Mix", body);
         Assert.Contains("/radio/stream/", body);
+        Assert.Contains(format == "json"
+            ? $"\"coverArt\":\"{fixture.StationId}\""
+            : $"coverArt=\"{fixture.StationId}\"", body);
         Assert.Contains("https://localhost/radio/stream/", body);
         Assert.DoesNotContain("t=token", body);
         Assert.DoesNotContain("u=alice", body);
+    }
+
+    [Fact]
+    public async Task InternetRadioCover_UsesStationIdAndRendersCurrentStationName()
+    {
+        await using var fixture = new RadioWebFactory();
+        fixture.InstallStation();
+        using var client = fixture.CreateClient();
+
+        var stationCover = await client.GetAsync(
+            $"/rest/getCoverArt?id={fixture.StationId}&u=alice&t=token&s=salt");
+        stationCover.EnsureSuccessStatusCode();
+        Assert.Equal("image/jpeg", stationCover.Content.Headers.ContentType?.MediaType);
+        var namedBytes = await stationCover.Content.ReadAsByteArrayAsync();
+
+        var placeholderBytes = await client.GetByteArrayAsync(
+            "/rest/getCoverArt?id=octo-radio&u=alice&t=token&s=salt");
+        Assert.NotEmpty(namedBytes);
+        Assert.NotEqual(placeholderBytes, namedBytes);
+
+        var station = fixture.State.FindStation("alice", fixture.StationId)!;
+        station.Name = "Renamed Mix";
+        fixture.State.ReplaceStations("alice", [station]);
+        var renamedBytes = await client.GetByteArrayAsync(
+            $"/rest/getCoverArt?id={fixture.StationId}&u=alice&t=token&s=salt");
+        Assert.NotEqual(namedBytes, renamedBytes);
     }
 
     [Fact]
@@ -319,6 +348,7 @@ public sealed class LastFmRadioControllerTests
         using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
         response.EnsureSuccessStatusCode();
         Assert.Equal("audio/mpeg", response.Content.Headers.ContentType?.MediaType);
+        Assert.False(response.Headers.Contains("icy-metaint"));
         await using var stream = await response.Content.ReadAsStreamAsync();
         var bytes = new byte[3];
         await stream.ReadExactlyAsync(bytes);
@@ -329,6 +359,33 @@ public sealed class LastFmRadioControllerTests
             await Task.Delay(10);
         Assert.NotEmpty(fixture.State.GetUser("alice").Plays);
         Assert.NotEmpty(fixture.Handler.RelayedScrobbleIds);
+    }
+
+    [Theory]
+    [InlineData(true, true)]
+    [InlineData(false, false)]
+    public async Task InternetRadioStream_NegotiatesConfiguredIcyMetadata(
+        bool metadataEnabled, bool expectMetadata)
+    {
+        await using var fixture = new RadioWebFactory(enableIcyMetadata: metadataEnabled);
+        fixture.InstallStation();
+        using var client = fixture.CreateClient();
+        var listBody = await StationListAsync(client,
+            "/rest/getInternetRadioStations?u=alice&t=token&s=salt&f=json");
+        using var list = JsonDocument.Parse(listBody);
+        var url = list.RootElement.GetProperty("subsonic-response")
+            .GetProperty("internetRadioStations").GetProperty("internetRadioStation")
+            .EnumerateArray().Single(item => item.GetProperty("name").GetString() == "Your Mix")
+            .GetProperty("streamUrl").GetString()!;
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
+        request.Headers.Add("Icy-MetaData", "1");
+        using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+        response.EnsureSuccessStatusCode();
+
+        Assert.Equal(expectMetadata, response.Headers.Contains("icy-metaint"));
+        if (expectMetadata)
+            Assert.Equal(IcyMetadataStream.DefaultInterval.ToString(),
+                response.Headers.GetValues("icy-metaint").Single());
     }
 
     [Fact]
@@ -471,13 +528,15 @@ internal sealed class RadioWebFactory : WebApplicationFactory<Program>
     private readonly string _explicitFilter;
     private readonly bool _exposePlaylists;
     private readonly bool _exposeStreams;
+    private readonly bool _enableIcyMetadata;
 
     public RadioWebFactory(string explicitFilter = "All", bool exposePlaylists = true,
-        bool exposeStreams = true)
+        bool exposeStreams = true, bool enableIcyMetadata = true)
     {
         _explicitFilter = explicitFilter;
         _exposePlaylists = exposePlaylists;
         _exposeStreams = exposeStreams;
+        _enableIcyMetadata = enableIcyMetadata;
         Directory.CreateDirectory(_directory);
         Metadata.Setup(service => service.PrewarmYouTubeIdsAsync(
                 It.IsAny<IEnumerable<Octo.Models.Domain.Song>>(), It.IsAny<int>(),
@@ -542,6 +601,7 @@ internal sealed class RadioWebFactory : WebApplicationFactory<Program>
                 ["LastFm:ExposeRadioAsPlaylists"] = _exposePlaylists.ToString(),
                 ["LastFm:ExposeRadioAsStreams"] = _exposeStreams.ToString(),
                 ["LastFm:RadioStreamBitrateKbps"] = "192",
+                ["LastFm:EnableIcyMetadata"] = _enableIcyMetadata.ToString(),
             }));
         builder.ConfigureServices(services =>
         {

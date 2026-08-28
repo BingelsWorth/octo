@@ -1,4 +1,7 @@
+using System.Collections.Concurrent;
+using SixLabors.Fonts;
 using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Drawing.Processing;
 using SixLabors.ImageSharp.PixelFormats;
 using SixLabors.ImageSharp.Processing;
 using SixLabors.ImageSharp.Formats.Jpeg;
@@ -21,6 +24,8 @@ public class CoverArtService
     private Image? _octoLogo;
     private readonly object _logoLock = new();
     private bool _logoLoadAttempted = false;
+    private readonly ConcurrentDictionary<string, byte[]> _radioStationCovers =
+        new(StringComparer.Ordinal);
 
     public CoverArtService(ILogger<CoverArtService> logger)
     {
@@ -164,6 +169,69 @@ public class CoverArtService
             using var ms = new MemoryStream();
             fallback.Save(ms, new JpegEncoder { Quality = 70 });
             return ms.ToArray();
+        }
+    }
+
+    /// <summary>
+    /// Uses the established Octo placeholder artwork for an Internet Radio
+    /// station, adding only the station's current display name. The bounded
+    /// cache keeps ordinary Subsonic cover refreshes from repeatedly rendering
+    /// the same image while allowing renamed stations to receive new artwork.
+    /// </summary>
+    public byte[] GetRadioStationCover(string stationName)
+    {
+        var name = string.IsNullOrWhiteSpace(stationName) ? "Octo Radio" : stationName.Trim();
+        if (_radioStationCovers.Count >= 128) _radioStationCovers.Clear();
+        return _radioStationCovers.GetOrAdd(name, RenderRadioStationCover);
+    }
+
+    private byte[] RenderRadioStationCover(string stationName)
+    {
+        var logo = GetOctoLogo();
+        const int size = 600;
+
+        try
+        {
+            using var image = new Image<Rgba32>(size, size, new Rgba32(0, 0, 0, 255));
+            if (logo != null)
+            {
+                const int logoSize = 300;
+                using var sized = logo.Clone(ctx => ctx.Resize(logoSize, logoSize));
+                image.Mutate(ctx => ctx.DrawImage(sized, new Point(150, 78), 1f));
+            }
+
+            var families = SystemFonts.Families.ToList();
+            if (families.Count > 0)
+            {
+                var family = families.FirstOrDefault(item =>
+                    item.Name.Equals("DejaVu Sans", StringComparison.OrdinalIgnoreCase));
+                if (string.IsNullOrEmpty(family.Name)) family = families[0];
+                var fontSize = 52f;
+                Font font;
+                FontRectangle measured;
+                do
+                {
+                    font = family.CreateFont(fontSize, FontStyle.Bold);
+                    measured = TextMeasurer.MeasureSize(stationName, new TextOptions(font));
+                    fontSize -= 2f;
+                } while (measured.Width > 520f && fontSize >= 22f);
+
+                // This is the dominant purple in octo_logo.png. Keeping the
+                // label here makes the station name read as part of the existing
+                // brand rather than as client-provided album metadata.
+                var purple = new Color(new Rgba32(147, 118, 255, 255));
+                var origin = new PointF((size - measured.Width) / 2f, 432f);
+                image.Mutate(ctx => ctx.DrawText(stationName, font, purple, origin));
+            }
+
+            using var ms = new MemoryStream();
+            image.Save(ms, new JpegEncoder { Quality = 88 });
+            return ms.ToArray();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to render radio station cover for {Station}", stationName);
+            return GetPlaceholderCover();
         }
     }
 }

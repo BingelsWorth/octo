@@ -458,6 +458,7 @@ public class SubsonicController : ControllerBase
                         ["id"] = station.Id,
                         ["name"] = station.Name,
                         ["streamUrl"] = StreamUrl(token),
+                        ["coverArt"] = station.Id,
                     });
                 return File(Encoding.UTF8.GetBytes(root.ToJsonString()), "application/json");
             }
@@ -475,7 +476,8 @@ public class SubsonicController : ControllerBase
             foreach (var (station, token) in prepared)
                 containerElement.Add(new XElement(ns + "internetRadioStation",
                     new XAttribute("id", station.Id), new XAttribute("name", station.Name),
-                    new XAttribute("streamUrl", StreamUrl(token))));
+                    new XAttribute("streamUrl", StreamUrl(token)),
+                    new XAttribute("coverArt", station.Id)));
             return File(Encoding.UTF8.GetBytes(document.ToString()), "application/xml");
         }
         catch (Exception ex)
@@ -501,15 +503,20 @@ public class SubsonicController : ControllerBase
         Response.ContentType = "audio/mpeg";
         Response.Headers.CacheControl = "no-store, no-transform";
         Response.Headers["Accept-Ranges"] = "none";
-        Response.Headers["icy-name"] = "Octo Radio";
+        Response.Headers["icy-name"] = station.Name;
         Response.Headers["icy-br"] = _lastFmSettings.EffectiveRadioStreamBitrateKbps.ToString();
+        var includeIcyMetadata = _lastFmSettings.EnableIcyMetadata
+            && Request.Headers["Icy-MetaData"].ToString().Trim() == "1";
+        if (includeIcyMetadata)
+            Response.Headers["icy-metaint"] = IcyMetadataStream.DefaultInterval.ToString();
         if (HttpMethods.IsHead(Request.Method)) return;
         _logger.LogInformation("Continuous Radio stream opened for {Station} by {User}",
             station.Name, session.Username);
         try
         {
             await Response.StartAsync(HttpContext.RequestAborted);
-            await _radioStreams.StreamAsync(session, Response.Body, HttpContext.RequestAborted);
+            await _radioStreams.StreamAsync(session, Response.Body, HttpContext.RequestAborted,
+                includeIcyMetadata);
         }
         catch (OperationCanceledException) when (HttpContext.RequestAborted.IsCancellationRequested)
         {
@@ -1551,6 +1558,18 @@ public class SubsonicController : ControllerBase
         // requests never perform a live cover mosaic build.
         if (id.Equals("octo-radio", StringComparison.OrdinalIgnoreCase))
             return ServePlaceholder();
+
+        // Generated radio IDs already resolve through the per-user state store,
+        // so station artwork follows the current station name without creating
+        // a parallel metadata record or exposing that name in the cover ID.
+        var radioStation = _radioStateStore?.FindStation(
+            parameters.GetValueOrDefault("u", ""), id);
+        if (radioStation is not null)
+        {
+            var bytes = _coverArtService?.GetRadioStationCover(radioStation.Name);
+            if (bytes is not null && bytes.Length > 0) return File(bytes, "image/jpeg");
+            return ServePlaceholder();
+        }
 
         // Playlist covers haven't changed — keep the existing path.
         if (PlaylistIdHelper.IsExternalPlaylist(id))

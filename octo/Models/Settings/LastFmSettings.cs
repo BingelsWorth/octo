@@ -37,6 +37,9 @@ public class LastFmSettings
     /// <summary>Continuous internet-radio MP3 bitrate.</summary>
     public int RadioStreamBitrateKbps { get; set; } = 192;
 
+    /// <summary>Embed the current station track as opt-in ICY stream metadata.</summary>
+    public bool EnableIcyMetadata { get; set; } = true;
+
     public int HistoryRetentionDays { get; set; } = 90;
     public int DiscoveryPercent { get; set; } = 35;
     public int RefreshIntervalHours { get; set; } = 12;

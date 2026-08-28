@@ -544,6 +544,9 @@
               <div class="set-info"><div class="set-info-t">Streaming method</div><div class="set-info-d">Shows each station in the client's Radio section as one continuous MP3 stream. Tracks are transcoded to the quality selected below.</div></div>
               <label class="switch"><input type="checkbox" id="f-radio-streams" name="LastFm.ExposeRadioAsStreams" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
             </div>
+            <div class="notice notice-warn">
+              <strong>Radio streams cannot add songs to your library.</strong> A client sees one continuous stream rather than individual songs, so liking or hearting the current track cannot trigger an Octo download. Open the station in Playlists when you want to heart a song and add it.
+            </div>
             <div class="set-row stack" id="radio-stream-quality-row">
               <div class="set-info"><div class="set-info-t">Internet radio quality</div><div class="set-info-d">MP3 bitrate for new continuous streams. Reconnect to apply a change. This does not affect playlist playback or downloaded quality.</div></div>
               <select class="set-input" id="f-radio-stream-quality" name="LastFm.RadioStreamBitrateKbps" data-number="true">
@@ -553,6 +556,10 @@
                 <option value="256">256 kbps</option>
                 <option value="320">320 kbps</option>
               </select>
+            </div>
+            <div class="set-row" id="radio-icy-metadata-row">
+              <div class="set-info"><div class="set-info-t">Now-playing metadata</div><div class="set-info-d">Embeds Octo's existing station artist and title in the MP3 stream for radio clients that request ICY metadata. Reconnect after changing this setting.</div></div>
+              <label class="switch"><input type="checkbox" id="f-radio-icy-metadata" name="LastFm.EnableIcyMetadata" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
             </div>
           </form>
         </div>

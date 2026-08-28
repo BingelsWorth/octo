@@ -60,11 +60,13 @@ public sealed class LastFmRadioStreamService
     }
 
     public async Task StreamAsync(LastFmRadioStreamSession session, Stream output,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, bool includeIcyMetadata = false)
     {
         await ConcurrentStreams.WaitAsync(cancellationToken);
         try
         {
+            var icyOutput = includeIcyMetadata ? new IcyMetadataStream(output) : null;
+            var streamOutput = (Stream?)icyOutput ?? output;
             var station = Resolve(session)
                 ?? throw new InvalidOperationException("Radio station is no longer available");
             var tracks = station.Tracks.Where(track => !string.IsNullOrWhiteSpace(track.ResolvedId)).ToList();
@@ -114,9 +116,10 @@ public sealed class LastFmRadioStreamService
 
                 try
                 {
+                    icyOutput?.SetTrack(prepared.Track);
                     await using (var cached = _cache.OpenRead(prepared.Path))
-                        await cached.CopyToAsync(output, cancellationToken);
-                    await output.FlushAsync(cancellationToken);
+                        await cached.CopyToAsync(streamOutput, cancellationToken);
+                    await streamOutput.FlushAsync(cancellationToken);
                     failures = 0;
                     var song = await _resolver.ResolveAsync(prepared.Track.Artist,
                         prepared.Track.Title, prepared.Track.Duration, session.Authentication,

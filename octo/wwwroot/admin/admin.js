@@ -352,8 +352,11 @@ document.getElementById('f-playback-source')?.addEventListener('change', event =
 function updateRadioPublicationSettings() {
   const enabled = Boolean(document.getElementById('f-radio-streams')?.checked);
   const quality = document.getElementById('f-radio-stream-quality');
+  const icyMetadata = document.getElementById('f-radio-icy-metadata');
   if (quality) quality.disabled = !enabled;
+  if (icyMetadata) icyMetadata.disabled = !enabled;
   document.getElementById('radio-stream-quality-row')?.classList.toggle('is-disabled', !enabled);
+  document.getElementById('radio-icy-metadata-row')?.classList.toggle('is-disabled', !enabled);
 }
 
 document.getElementById('f-radio-streams')?.addEventListener('change', updateRadioPublicationSettings);

@@ -74,6 +74,27 @@ public class LastFmRadioCoreTests
     }
 
     [Fact]
+    public async Task IcyMetadataStream_FramesExistingTrackMetadataAtFixedAudioIntervals()
+    {
+        await using var output = new MemoryStream();
+        var stream = new IcyMetadataStream(output, interval: 4);
+        stream.SetTrack(new LastFmRadioTrack { Artist = "Artist One", Title = "Song One" });
+        await stream.WriteAsync("ABCDEFGH"u8.ToArray());
+        stream.SetTrack(new LastFmRadioTrack { Artist = "Artist Two", Title = "Song Two" });
+        await stream.WriteAsync("IJKL"u8.ToArray());
+
+        var bytes = output.ToArray();
+        var offset = 0;
+        Assert.Equal("ABCD", ReadAudio(bytes, ref offset));
+        Assert.Equal("StreamTitle='Artist One - Song One';", ReadMetadata(bytes, ref offset));
+        Assert.Equal("EFGH", ReadAudio(bytes, ref offset));
+        Assert.Equal("StreamTitle='Artist One - Song One';", ReadMetadata(bytes, ref offset));
+        Assert.Equal("IJKL", ReadAudio(bytes, ref offset));
+        Assert.Equal("StreamTitle='Artist Two - Song Two';", ReadMetadata(bytes, ref offset));
+        Assert.Equal(bytes.Length, offset);
+    }
+
+    [Fact]
     public void StreamSessions_AreOpaqueScopedExpiringAndBounded()
     {
         var store = new LastFmRadioStreamSessionStore();
@@ -159,6 +180,21 @@ public class LastFmRadioCoreTests
         ChangedUtc = DateTime.UtcNow, ValidUntilUtc = DateTime.UtcNow.AddHours(12),
         Tracks = [new() { Artist = "Artist", Title = "Title", Duration = 200 }]
     };
+
+    private static string ReadAudio(byte[] bytes, ref int offset)
+    {
+        var value = System.Text.Encoding.ASCII.GetString(bytes, offset, 4);
+        offset += 4;
+        return value;
+    }
+
+    private static string ReadMetadata(byte[] bytes, ref int offset)
+    {
+        var length = bytes[offset++] * 16;
+        var value = System.Text.Encoding.UTF8.GetString(bytes, offset, length).TrimEnd('\0');
+        offset += length;
+        return value;
+    }
 
     private static MemoryStream WavSilence()
     {
