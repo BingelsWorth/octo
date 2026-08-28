@@ -224,6 +224,34 @@ public sealed class LastFmRadioControllerTests
     }
 
     [Fact]
+    public async Task InternetRadioList_ReturnsReadyStationsWithoutWaitingForCacheMisses()
+    {
+        await using var fixture = new RadioWebFactory();
+        fixture.InstallStation();
+        await fixture.Warmup.ProcessAsync("alice");
+        fixture.InstallSecondStation();
+        fixture.Transcoder.ResetStarted();
+        fixture.Transcoder.CompletionGate = NewGate();
+        using var client = fixture.CreateClient();
+
+        var listing = client.GetStringAsync(
+            "/rest/getInternetRadioStations?u=alice&t=token&s=salt&f=json");
+        try
+        {
+            var completed = await Task.WhenAny(listing, Task.Delay(TimeSpan.FromSeconds(2)));
+            Assert.Same(listing, completed);
+            var body = await listing;
+            Assert.Contains("Your Mix", body);
+            Assert.DoesNotContain("Discovery Mix", body);
+            await fixture.Transcoder.Started.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        }
+        finally
+        {
+            fixture.Transcoder.CompletionGate.SetResult();
+        }
+    }
+
+    [Fact]
     public async Task PublishedStream_KeepsItsReadyStarterAcrossSnapshotRefresh()
     {
         await using var fixture = new RadioWebFactory();
@@ -437,6 +465,7 @@ internal sealed class RadioWebFactory : WebApplicationFactory<Program>
     public Octo.Services.Subsonic.NavidromeIdentityService Identity =>
         Services.GetRequiredService<Octo.Services.Subsonic.NavidromeIdentityService>();
     public string StationId => LastFmRadioStateStore.StationId("alice", "your-mix");
+    public string SecondStationId => LastFmRadioStateStore.StationId("alice", "discovery");
     private readonly string _explicitFilter;
     private readonly bool _exposePlaylists;
     private readonly bool _exposeStreams;
@@ -472,6 +501,26 @@ internal sealed class RadioWebFactory : WebApplicationFactory<Program>
                 new() { Artist = "Artist Two", Title = "Song Two" + titleSuffix, Duration = 200 },
                 new() { Artist = "Artist Three", Title = "Song Three" + titleSuffix, Duration = 210 },
                 new() { Artist = "Artist Four", Title = "Song Four" + titleSuffix, Duration = 220 }
+            ]
+        }]);
+    }
+
+    public void InstallSecondStation()
+    {
+        var first = State.FindStation("alice", StationId)
+            ?? throw new InvalidOperationException("Install the primary station first");
+        State.ReplaceStations("alice", [first, new LastFmRadioStation
+        {
+            Id = SecondStationId, Key = "discovery", Name = "Discovery Mix", Owner = "alice",
+            Kind = LastFmRadioStationKind.Discovery, Personalized = true,
+            CreatedUtc = new DateTime(2026, 8, 25, 1, 0, 0, DateTimeKind.Utc),
+            ChangedUtc = new DateTime(2026, 8, 25, 3, 0, 0, DateTimeKind.Utc),
+            ValidUntilUtc = new DateTime(2026, 8, 26, 3, 0, 0, DateTimeKind.Utc),
+            Tracks =
+            [
+                new() { Artist = "New Artist One", Title = "New Song One", Duration = 180 },
+                new() { Artist = "New Artist Two", Title = "New Song Two", Duration = 200 },
+                new() { Artist = "New Artist Three", Title = "New Song Three", Duration = 210 },
             ]
         }]);
     }

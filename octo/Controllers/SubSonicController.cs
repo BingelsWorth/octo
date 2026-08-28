@@ -375,7 +375,32 @@ public class SubsonicController : ControllerBase
         QueueRefreshIfStale(username);
         if (stations.Count == 0) return File(relay.Body, relay.ContentType ?? $"application/{format}");
 
-        async Task<(LastFmRadioStation Station, string Token)?> PrepareStation(
+        (LastFmRadioStation Station, string Token)? PublishCachedStation(
+            LastFmRadioStation station)
+        {
+            var token = _radioStreamSessions.Issue(username, station.Id, parameters);
+            var session = _radioStreamSessions.Get(token)!;
+            var readyPool = _radioStreams.GetReadyPool(session);
+            if (readyPool.Count == 0)
+            {
+                // Station-list requests are latency-sensitive and some clients cancel
+                // them after only a few seconds. Warm every cache miss independently,
+                // but never make an already-ready station wait for slower siblings.
+                _radioStreams.WarmReadyPool(session);
+                _radioStreamSessions.Remove(token);
+                return null;
+            }
+            if (!_radioStreamSessions.AttachReadyPool(token, readyPool))
+            {
+                _radioStreamSessions.Remove(token);
+                return null;
+            }
+            if (readyPool.Count < LastFmRadioStreamService.ReadyPoolSize)
+                _radioStreams.WarmReadyPool(_radioStreamSessions.Get(token)!);
+            return (station, token);
+        }
+
+        async Task<(LastFmRadioStation Station, string Token)?> PrepareStarter(
             LastFmRadioStation station)
         {
             var token = _radioStreamSessions.Issue(username, station.Id, parameters);
@@ -395,8 +420,16 @@ public class SubsonicController : ControllerBase
 
         try
         {
-            var prepared = (await Task.WhenAll(stations.Select(PrepareStation)))
+            var prepared = stations.Select(PublishCachedStation)
                 .Where(item => item is not null).Select(item => item!.Value).ToList();
+            // A completely cold install still publishes one usable starter in the
+            // same response. The remaining stations are already warming above and
+            // will appear on the client's next ordinary refresh.
+            if (prepared.Count == 0)
+            {
+                var starter = await PrepareStarter(stations[0]);
+                if (starter is not null) prepared.Add(starter.Value);
+            }
             _logger.LogInformation(
                 "Continuous Radio discovery published {ReadyCount}/{StationCount} ready stations for {User}",
                 prepared.Count, stations.Count, username);
