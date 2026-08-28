@@ -91,12 +91,6 @@
 
         <div class="sidebar-nav-section">
           <div class="sidebar-nav-label">Advanced</div>
-          <button class="sidebar-nav-item" data-tab="logs">
-            <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
-              <path d="M2.5 3.5h11v9h-11z"/><path d="m4.5 6 2 2-2 2M8 10h3.5"/>
-            </svg>
-            <span>Logs</span>
-          </button>
           <button class="sidebar-nav-item" data-tab="raw">
             <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
               <path d="m6 4-3 4 3 4M10 4l3 4-3 4"/>
@@ -837,56 +831,6 @@
             </div>
           </form>
         </div>
-      </section>
-
-      <!-- ─── LOGS ──────────────────────────────────────────── -->
-      <section data-pane="logs">
-        <header class="page-header">
-          <div>
-            <h1>Logs</h1>
-            <p>Live Octo process logs for troubleshooting. Recent Octo and framework entries are kept in separate memory-only tails so routine health checks cannot crowd out useful events.</p>
-          </div>
-        </header>
-
-        <div class="log-shell">
-          <div class="log-toolbar">
-            <div class="log-connection" id="log-connection" role="status" aria-live="polite">
-              <span class="log-connection-dot pending" aria-hidden="true"></span>
-              <span id="log-connection-text">Connecting…</span>
-              <span class="log-match-count" id="log-match-count">0 shown</span>
-            </div>
-            <div class="log-actions">
-              <label class="log-filter">
-                <span>Source</span>
-                <select class="set-input" id="log-source-filter">
-                  <option value="octo" selected>Octo only</option>
-                  <option value="radio">Radio activity only</option>
-                  <option value="all">All sources</option>
-                </select>
-              </label>
-              <label class="log-filter">
-                <span>Minimum level</span>
-                <select class="set-input" id="log-level-filter">
-                  <option value="0">All levels</option>
-                  <option value="2">Information</option>
-                  <option value="3">Warning</option>
-                  <option value="4">Error</option>
-                </select>
-              </label>
-              <label class="log-filter log-search-filter">
-                <span>Search</span>
-                <input class="set-input" id="log-text-filter" type="search" placeholder="Station, artist, message…" autocomplete="off" />
-              </label>
-              <button type="button" class="btn btn-ghost" id="log-pause">Pause</button>
-              <button type="button" class="btn btn-ghost" id="log-clear">Clear view</button>
-            </div>
-          </div>
-          <div class="log-viewer" id="log-viewer" role="log" aria-label="Octo application logs" aria-live="off" tabindex="0">
-            <div class="log-empty">Waiting for log entries…</div>
-          </div>
-        </div>
-
-        <p class="log-footnote">Pausing or clearing affects this browser view only. Octo continues running and logging normally.</p>
       </section>
 
       <!-- ─── RAW CONFIG ─────────────────────────────────────── -->
