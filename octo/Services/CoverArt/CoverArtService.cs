@@ -23,7 +23,7 @@ public class CoverArtService
     private readonly ILogger<CoverArtService> _logger;
     private Image? _octoLogo;
     private readonly object _logoLock = new();
-    private bool _logoLoadAttempted = false;
+    private volatile bool _logoLoadAttempted;
     private readonly ConcurrentDictionary<string, byte[]> _radioStationCovers =
         new(StringComparer.Ordinal);
 
@@ -38,8 +38,6 @@ public class CoverArtService
         lock (_logoLock)
         {
             if (_logoLoadAttempted) return _octoLogo;
-            _logoLoadAttempted = true;
-
             // The logo can land in either Assets/ or wwwroot/Assets/ in the
             // publish output depending on how the csproj globs play out
             // (sometimes the wwwroot/<Content Link=> entry overrides the
@@ -79,8 +77,23 @@ public class CoverArtService
                     string.Join(", ", candidates));
             }
 
+            // Publish completion only after the image reference is ready. The
+            // volatile write prevents concurrent first requests from observing
+            // "attempted" while _octoLogo is still temporarily null.
+            _logoLoadAttempted = true;
             return _octoLogo;
         }
+    }
+
+    private Image? CloneOctoLogo(int width, int height)
+    {
+        var logo = GetOctoLogo();
+        if (logo is null) return null;
+        // ImageSharp does not promise concurrent processing operations on the
+        // same Image instance. Keep only the clone/resize inside this lock;
+        // each caller renders its independent clone concurrently afterward.
+        lock (_logoLock)
+            return logo.Clone(ctx => ctx.Resize(width, height));
     }
 
     /// <summary>
@@ -90,9 +103,6 @@ public class CoverArtService
     /// </summary>
     public byte[] AddOctoBadge(byte[] originalArt)
     {
-        var logo = GetOctoLogo();
-        if (logo == null) return originalArt;
-
         try
         {
             using var image = Image.Load<Rgba32>(originalArt);
@@ -103,7 +113,8 @@ public class CoverArtService
             var badgeSize = (int)(imageSize * 0.28);
             var padding   = (int)(imageSize * 0.03);
 
-            using var badge = logo.Clone(ctx => ctx.Resize(badgeSize, badgeSize));
+            using var badge = CloneOctoLogo(badgeSize, badgeSize);
+            if (badge is null) return originalArt;
 
             // Top-left placement: most album covers concentrate visual content
             // and text along the center/bottom (artist name, track titles,
@@ -141,20 +152,22 @@ public class CoverArtService
     /// </param>
     public byte[] GetPlaceholderCover(bool branded = true)
     {
-        var logo = branded ? GetOctoLogo() : null;
         const int Size = 600;
 
         try
         {
             using var image = new Image<Rgba32>(Size, Size, new Rgba32(0, 0, 0, 255));
 
-            if (logo != null)
+            if (branded)
             {
                 var logoSize = (int)(Size * 0.55);
-                using var sized = logo.Clone(ctx => ctx.Resize(logoSize, logoSize));
-                var x = (Size - logoSize) / 2;
-                var y = (Size - logoSize) / 2;
-                image.Mutate(ctx => ctx.DrawImage(sized, new Point(x, y), 1f));
+                using var sized = CloneOctoLogo(logoSize, logoSize);
+                if (sized is not null)
+                {
+                    var x = (Size - logoSize) / 2;
+                    var y = (Size - logoSize) / 2;
+                    image.Mutate(ctx => ctx.DrawImage(sized, new Point(x, y), 1f));
+                }
             }
 
             using var ms = new MemoryStream();
@@ -187,17 +200,16 @@ public class CoverArtService
 
     private byte[] RenderRadioStationCover(string stationName)
     {
-        var logo = GetOctoLogo();
         const int size = 600;
 
         try
         {
             using var image = new Image<Rgba32>(size, size, new Rgba32(0, 0, 0, 255));
-            if (logo != null)
+            const int logoSize = 300;
+            using (var sized = CloneOctoLogo(logoSize, logoSize))
             {
-                const int logoSize = 300;
-                using var sized = logo.Clone(ctx => ctx.Resize(logoSize, logoSize));
-                image.Mutate(ctx => ctx.DrawImage(sized, new Point(150, 78), 1f));
+                if (sized is not null)
+                    image.Mutate(ctx => ctx.DrawImage(sized, new Point(150, 78), 1f));
             }
 
             var families = SystemFonts.Families.ToList();
