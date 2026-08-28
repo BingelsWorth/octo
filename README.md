@@ -36,7 +36,7 @@ Built for:
 
 - **Search finds music you don't own.** Tap a result to hear it instantly via YouTube preview.
 - **Radio works on every song.** Owned tracks play at full FLAC; missing ones preview from YouTube.
-- **Personal stations appear automatically.** Completed plays create Starter Radio, then Your Mix, discovery, artist, and genre stations in the client's normal playlist list. Admin-pinned tag categories stay fixed while their queues refresh.
+- **Personal stations appear automatically.** Completed plays create Starter Radio, then Your Mix, discovery, artist, and genre stations in the client's playlist and Internet Radio lists. Admin-pinned tag categories stay fixed while their queues refresh.
 - **Heart to keep.** Star a previewed song and Octo grabs the FLAC from Soulseek, adds it to your library, and tells Navidrome to rescan. Within a minute, the song is yours forever.
 - **Search and heart whole albums.** Albums you don't own show up in search with real cover art and tracklists. Star one and Octo fetches every track. Downloads run one at a time, so a full album takes a while; album-heart sources can be disabled independently in the admin UI.
 - **Bring your own Lidarr.** Already running [Lidarr](https://github.com/Lidarr/Lidarr)? Add it as a heart source and order it against Soulseek and YouTube in the admin UI. Hearts hand off to Lidarr at album level, and finished imports land back in your library with a rescan.
@@ -133,24 +133,6 @@ git checkout 2026.07.29 && ./install.sh
 ```
 
 Prebuilt multi-arch images are also published to `ghcr.io/winters27/octo`, tagged `latest`, the release date, and the commit sha.
-
-### 2026.08.26 release notes
-
-- Adds automatic per-user Last.fm Radio stations as read-only Subsonic and native Navidrome playlists.
-- Publishes the same stations through Subsonic internet radio as optional continuous
-  MP3 streams; playlist and stream publication can be enabled independently.
-- Prepares one complete MP3 before publishing each continuous station, then expands it
-  to a three-song runway and replenishes consumed slots in the background so tune-in
-  and rapid reconnects do not wait on source download or encoder startup.
-- Warms persisted stations at Octo startup and after scheduled snapshot refreshes, so
-  ordinary station-list requests normally perform no audio work.
-- Adds Starter Radio, Your Mix, discovery, artist-neighborhood, genre, and administrator-pinned tag stations.
-- Adds the in-process Radio refresh worker and bounded `/app/config/lastfm-radio-state.json` store; no Radio service or container was added.
-- Expands the existing Last.fm admin pane with personalized settings, ordered pinned categories, station status, refresh, and per-user reset.
-- Preserves local-first playback, external previews, heart acquisition, queue prewarming, and ordinary Navidrome playlist behavior.
-- Keeps playlists at normal per-track quality while continuous Radio uses a configured
-  96–320 kbps MP3 bitrate. Heart a discovery track from its playlist to fetch the
-  permanent lossless copy.
 
 ## Admin dashboard
 
@@ -271,24 +253,13 @@ Last.fm Radio is enabled by default. `LASTFM_EXPOSE_AS_PLAYLISTS` and
 `LASTFM_EXPOSE_AS_STREAMS` independently publish Octo stations in those two client
 surfaces; both default to true. Playlist tracks retain normal playback quality.
 Continuous streams are normalized to `LASTFM_RADIO_STREAM_BITRATE_KBPS` (96, 128, 192,
-256, or 320; default 192). These publication settings apply to dynamic and pinned
-stations. An authenticated station-list request waits for one complete MP3 and returns
-the ready station in that same response, because Subsonic clients do not necessarily
-poll the list again. Normally that fallback is unnecessary: Octo warms persisted
-snapshots at startup, checks readiness every minute, and warms replacements immediately
-after its internal scheduled Radio refresh. Startup uses the external preview route
-because Octo does not persist listener credentials; authenticated replenishment remains
-local-first. Octo expands the cache to three complete MP3 segments,
-consumes that pool in order, and replenishes each slot independently of client
-disconnects. The files are temporary,
-follow the existing 24-hour/512 MiB Radio cache policy, and are never added to the music
-library. A rebuilt station selects only cache keys present in its new snapshot; older
-segments age out normally. If a song cannot be resolved or transcoded, Octo
-removes it from current stations, avoids selecting it again for 24 hours, and queues a
-normal Radio refresh to refill toward the configured track count. A client's
-**Start radio from this song** action remains a one-time
-`getSimilarSongs[2]` track queue and does not create a playlist or continuous stream.
-Other scalar defaults use
+256, or 320; default 192). Octo warms persisted stations at startup, publishes only
+stations with a complete starter track, and maintains a three-track runway in its
+bounded 24-hour/512 MiB temporary cache. Unplayable tracks are rejected for 24 hours
+and replaced through the normal refresh path; no prepared track is added to the music
+library. **Start radio from this song** remains a one-time `getSimilarSongs[2]` queue.
+
+Other Radio defaults use
 `LASTFM_ENABLE_PERSONALIZED_STATIONS`, `LASTFM_ENABLE_DISCOVERY_STATIONS`,
 `LASTFM_HISTORY_RETENTION_DAYS`, `LASTFM_DISCOVERY_PERCENT`,
 `LASTFM_RADIO_TRACK_COUNT`, `LASTFM_REFRESH_INTERVAL_HOURS`, and
@@ -296,11 +267,10 @@ Other scalar defaults use
 `LastFm.DiscoveryStations` in the existing Last.fm admin tab or settings JSON because
 encoding structured rows in `.env` is brittle.
 
-`LASTFM_REFRESH_INTERVAL_HOURS` defaults to 12. The in-process Radio worker checks for
-stale dynamic and pinned snapshots once a minute and rebuilds them in the
-background; the last good snapshot remains playable until a replacement succeeds.
-
-Radio state is a bounded, versioned, single-writer JSON file. Do not mount the same `/app/config/lastfm-radio-state.json` into multiple Octo instances; cross-process locking is not part of this release.
+The in-process worker refreshes stale snapshots in the background while retaining the
+last good version. State is bounded and versioned in
+`/app/config/lastfm-radio-state.json`; do not share that file across Octo instances
+because cross-process locking is not supported.
 
 ### Download path on Windows and manual installs
 
