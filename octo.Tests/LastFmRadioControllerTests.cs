@@ -160,11 +160,13 @@ public sealed class LastFmRadioControllerTests
         await using var fixture = new RadioWebFactory();
         fixture.InstallStation();
         using var client = fixture.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Forwarded-Proto", "https");
         var body = await StationListAsync(client,
             $"/rest/getInternetRadioStations?u=alice&t=token&s=salt&f={format}");
         Assert.Contains("Native Radio", body);
         Assert.Contains("Your Mix", body);
         Assert.Contains("/radio/stream/", body);
+        Assert.Contains("https://localhost/radio/stream/", body);
         Assert.DoesNotContain("t=token", body);
         Assert.DoesNotContain("u=alice", body);
     }

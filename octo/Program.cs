@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.HttpOverrides;
 using Octo.Models.Settings;
 using Octo.Services;
 using Octo.Services.Soulseek;
@@ -26,6 +27,18 @@ builder.Services.AddHttpClient();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 builder.Services.AddHttpContextAccessor();
+builder.Services.Configure<ForwardedHeadersOptions>(options =>
+{
+    // Octo normally runs one hop behind a container ingress or tunnel. Only
+    // accept the original scheme, which is required when generating absolute
+    // Radio stream URLs; client IP and Host continue to come from ASP.NET's
+    // direct request data. The proxy address is dynamic in container networks,
+    // so it cannot be represented by the loopback-only defaults.
+    options.ForwardedHeaders = ForwardedHeaders.XForwardedProto;
+    options.ForwardLimit = 1;
+    options.KnownNetworks.Clear();
+    options.KnownProxies.Clear();
+});
 // In-process troubleshooting surface for the admin Logs page. Register this as
 // a normal ILogger provider so it observes the same core application events as
 // console logging, while retaining only a bounded, restart-cleared memory tail.
@@ -231,6 +244,8 @@ _ = Task.Run(async () =>
         .DetectMusicFolderAsync(force: true);
 });
 
+// This must run before any middleware or controller reads Request.Scheme.
+app.UseForwardedHeaders();
 app.UseExceptionHandler(_ => { });
 
 // Capture the raw request body for body-carrying methods so the proxy can
