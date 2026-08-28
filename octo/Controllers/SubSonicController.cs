@@ -375,6 +375,8 @@ public class SubsonicController : ControllerBase
         QueueRefreshIfStale(username);
         if (stations.Count == 0) return File(relay.Body, relay.ContentType ?? $"application/{format}");
 
+        var coldSessions = new List<LastFmRadioStreamSession>();
+
         (LastFmRadioStation Station, string Token)? PublishCachedStation(
             LastFmRadioStation station)
         {
@@ -386,7 +388,7 @@ public class SubsonicController : ControllerBase
                 // Station-list requests are latency-sensitive and some clients cancel
                 // them after only a few seconds. Warm every cache miss independently,
                 // but never make an already-ready station wait for slower siblings.
-                _radioStreams.WarmReadyPool(session);
+                coldSessions.Add(session);
                 _radioStreamSessions.Remove(token);
                 return null;
             }
@@ -429,7 +431,14 @@ public class SubsonicController : ControllerBase
             {
                 var starter = await PrepareStarter(stations[0]);
                 if (starter is not null) prepared.Add(starter.Value);
+
+                // PrepareStarter owns this station's cold-path production and starts
+                // its runway warm only after the publication pool is attached. Do not
+                // race it with the cache-miss warmer discovered above.
+                coldSessions.RemoveAll(session => session.StationId == stations[0].Id);
             }
+            foreach (var coldSession in coldSessions)
+                _radioStreams.WarmReadyPool(coldSession);
             _logger.LogInformation(
                 "Continuous Radio discovery published {ReadyCount}/{StationCount} ready stations for {User}",
                 prepared.Count, stations.Count, username);
